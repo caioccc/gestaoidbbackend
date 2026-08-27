@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <title>Remessa Regional - {{ church.name }}</title>
+    <style>
+        @page { size: A4; margin: 2cm; }
+        body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; color: #111; }
+        h1 { font-size: 16px; margin: 0 0 4px 0; color: #1f4e79; }
+        h2 { font-size: 13px; margin: 20px 0 6px 0; color: #1f4e79; border-bottom: 2px solid #1f4e79; }
+        .sub { color: #555; margin: 0 0 12px 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { border: 1px solid #999; padding: 5px 7px; text-align: left; }
+        th { background: #1f4e79; color: #fff; }
+        td.num, th.num { text-align: right; }
+        .total td { font-weight: bold; background: #f0f4f8; }
+        .header { border-bottom: 3px double #1f4e79; padding-bottom: 8px; margin-bottom: 12px; }
+        .meta { font-size: 10px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>IGREJAS DE DEUS NO BRASIL</h1>
+        <h2>Convenção Regional - Paraíba</h2>
+        <p class="sub">
+            Remessa Financeira Regional - {{ month_name }}/{{ year }}
+        </p>
+        <p class="meta">{{ church.name }} - {{ church.city }}/{{ church.state }}</p>
+    </div>
+
+    <h2>1. Dízimos (15%)</h2>
+    <p class="meta">Total de Dízimos do mês: R$ {{ dizimos.total_dizimos|floatformat:2 }}</p>
+    <table>
+        <tr>
+            <th>Destino</th>
+            <th class="num">Percentual</th>
+            <th class="num">Valor</th>
+        </tr>
+        <tr><td>Região</td><td class="num">11%</td><td class="num">R$ {{ dizimos.regiao|floatformat:2 }}</td></tr>
+        <tr><td>Fundo Ministerial</td><td class="num">1%</td><td class="num">R$ {{ dizimos.fundo_ministerial|floatformat:2 }}</td></tr>
+        <tr><td>Distrito</td><td class="num">1,5%</td><td class="num">R$ {{ dizimos.distrito|floatformat:2 }}</td></tr>
+        <tr><td>Evangelismo</td><td class="num">1,5%</td><td class="num">R$ {{ dizimos.evangelismo|floatformat:2 }}</td></tr>
+        <tr class="total"><td>Total Remessa Dízimos</td><td class="num">15%</td><td class="num">R$ {{ dizimos.total_remessa_dizimos|floatformat:2 }}</td></tr>
+    </table>
+
+    <h2>2. Ofertas Departamentais (10%)</h2>
+    <table>
+        <tr>
+            <th>Departamento</th>
+            <th class="num">Total Ofertado</th>
+            <th class="num">10%</th>
+        </tr>
+        {% for offer in offers %}
+        <tr>
+            <td>{{ offer.categoria|title }}</td>
+            <td class="num">R$ {{ offer.total|floatformat:2 }}</td>
+            <td class="num">R$ {{ offer.remessa|floatformat:2 }}</td>
+        </tr>
+        {% endfor %}
+        <tr class="total">
+            <td>Total Remessa Ofertas</td>
+            <td class="num"></td>
+            <td class="num">R$ {{ total_remittance|floatformat:2 }}</td>
+        </tr>
+    </table>
+
+    <h2>3. Balancete do Mês</h2>
+    <table>
+        <tr><td>Total de Entradas</td><td class="num">R$ {{ balance.total_entries|floatformat:2 }}</td></tr>
+        <tr><td>Total de Saídas</td><td class="num">R$ {{ balance.total_exits|floatformat:2 }}</td></tr>
+        <tr class="total"><td>Saldo do Mês</td><td class="num">R$ {{ balance.balance|floatformat:2 }}</td></tr>
+    </table>
+
+    <p class="meta" style="margin-top: 24px;">
+        Documento gerado automaticamente pelo Sistema Financeiro Eclésia IDB.
+    </p>
+</body>
+</html>

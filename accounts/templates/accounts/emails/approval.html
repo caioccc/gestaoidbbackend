@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:Arial,Helvetica,sans-serif;color:#1f2933;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f4f5f7;padding:24px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e4e7ec;">
+        <tr>
+          <td style="background:#2f9e44;padding:20px 28px;">
+            <h1 style="color:#ffffff;margin:0;font-size:20px;">{{ app_name }}</h1>
+            <p style="color:#d3f9d8;margin:4px 0 0;font-size:12px;">{{ app_tagline }}</p>
+          </td>
+        </tr>
+        <tr><td style="padding:28px;">
+          <h2 style="color:#2f9e44;margin:0 0 12px;font-size:18px;">Cadastro aprovado! 🎉</h2>
+          <p style="margin:0 0 16px;font-size:14px;line-height:1.6;">
+            Parabéns, <strong>{{ account_name }}</strong>! A congregação
+            <strong>{{ church_name }}</strong> foi <strong>aprovada</strong> pela administração
+            nacional e o seu acesso está liberado.
+          </p>
+          <p style="margin:0 0 16px;font-size:14px;line-height:1.6;">
+            Sua conta associada é: <strong>{{ email }}</strong>. Use as credenciais enviadas no
+            e-mail de cadastro para entrar e começar a lançar as movimentações financeiras.
+          </p>
+          <p style="margin:0 0 20px;">
+            <a href="{{ frontend_url }}/login"
+               style="background:#2f9e44;color:#ffffff;padding:12px 24px;text-decoration:none;border-radius:8px;font-size:14px;display:inline-block;">
+              Acessar painel financeiro
+            </a>
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
