@@ -1,4 +1,6 @@
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from decimal import Decimal
 
 # Create your models here.
 from django.db import models
@@ -31,6 +33,15 @@ class Church(models.Model):
     pastor_name = models.CharField("Pastor Responsável", max_length=150, blank=True)
     treasurer_name = models.CharField("Tesoureiro Responsável", max_length=150, blank=True)
     phone = models.CharField("Telefone / WhatsApp", max_length=20, blank=True)
+
+    # Regras contábeis da congregação.
+    pastoral_prebenda_percent = models.DecimalField(
+        "Percentual da Prebenda Pastoral (%)",
+        max_digits=5, decimal_places=2,
+        default=Decimal('10.00'),
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text='Percentual da prebenda sobre o total arrecadado no mês.',
+    )
 
     # Endereço & Localização
     cep = models.CharField("CEP", max_length=9, blank=True)

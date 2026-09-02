@@ -28,14 +28,19 @@ class ChurchAdmin(admin.ModelAdmin):
             if user is not None and not user.is_active:
                 user.is_active = True
                 user.save(update_fields=['is_active'])
+            try:
+                from finance.services import seed_default_calendar_events
+                seed_default_calendar_events(church)
+            except Exception:
+                pass
         self.message_user(
-            request, f'{allowed.count()} congregação(ões) aprovada(s).'
+            request, f'{allowed.count()} Igreja(s) aprovada(s).'
         )
 
     @admin.action(description='Rejeitar congregações selecionadas')
     def reject_churches(self, request, queryset):
         updated = queryset.filter(status='PENDING').update(status='REJECTED')
-        self.message_user(request, f'{updated} congregação(ões) rejeitada(s).')
+        self.message_user(request, f'{updated} Igreja(s) rejeitada(s).')
 
 
 @admin.register(User)

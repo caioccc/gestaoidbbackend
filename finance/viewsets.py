@@ -1,9 +1,11 @@
 ﻿"""Views do mÃ³dulo financeiro (EclÃ©sia IDB)."""
 from datetime import datetime
 from decimal import Decimal
+from io import BytesIO
+from typing import Optional
 
 from django.db.models import Sum
-from django.http import HttpResponse
+from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -14,11 +16,20 @@ from rest_framework.views import APIView
 from accounts.models import Church
 from accounts.viewsets import IsStaffPermission
 
-from .models import FinancialEntry, FinancialExit, Tither, TitheRecord
+from .models import (
+    CalendarEvent,
+    FinancialEntry,
+    FinancialExit,
+    MonthlyValidation,
+    Tither,
+    TitheRecord,
+)
 from .serializers import (
+    CalendarEventSerializer,
     CategorySerializer,
     FinancialEntrySerializer,
     FinancialExitSerializer,
+    TitherSerializer,
 )
 from . import services
 
@@ -28,6 +39,97 @@ def _int_param(request, name, default):
         return int(request.query_params.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _int_from_post(request, name, default):
+    """Lê int de post-data (multipart) ou query-string, com fallback."""
+    raw = None
+    if hasattr(request, 'data') and name in request.data:
+        raw = request.data.get(name)
+    if raw is None and request.query_params.get(name) is not None:
+        raw = request.query_params.get(name)
+    try:
+        return int(raw or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_competence(request):
+    """Valida a competência (year/month) obrigatória da importação.
+
+    Retorna (year, month) ou uma Response de erro (400).
+    """
+    year_raw = request.data.get('year')
+    month_raw = request.data.get('month')
+    if year_raw is None or year_raw == '' or month_raw is None or month_raw == '':
+        return Response(
+            {'detail': 'year e month (competência) são obrigatórios.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        year = int(year_raw)
+        month = int(month_raw)
+    except (TypeError, ValueError):
+        return Response(
+            {'detail': 'year e month devem ser números inteiros.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if month < 1 or month > 12 or year not in range(2000, 2101):
+        return Response(
+            {'detail': 'Competência inválida: ano (2000..2100) e mês (1..12).'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return year, month
+
+
+def _validate_month(request) -> Response | None:
+    """Valida o parâmetro month (1..12). Retorna None quando válido."""
+    month = _int_param(request, 'month', 0)
+    if not (1 <= month <= 12):
+        return Response(
+            {'detail': 'month deve estar entre 1 e 12.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
+def _parse_mapping(request):
+    """Lê o mapeamento de colunas (JSON string ou dict) do request."""
+    raw = request.data.get('mapping')
+    if raw in (None, ''):
+        return None
+    if isinstance(raw, str):
+        try:
+            import json  # noqa: PLC0415
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return raw
+
+
+def _serialize_validation(record: Optional[MonthlyValidation]):
+    """Payload serializado de uma validação mensal (ou None)."""
+    if record is None:
+        return None
+    record.recompute_status()
+    return {
+        'id': record.id,
+        'church': record.church_id,
+        'year': record.year,
+        'month': record.month,
+        'status': record.status,
+        'status_display': record.get_status_display(),
+        'note': record.note,
+        'approved_by_treasury': record.approved_by_treasury_id,
+        'treasury_approved_at': record.treasury_approved_at,
+        'rejected_by_treasury': record.rejected_by_treasury_id,
+        'treasury_rejected_at': record.treasury_rejected_at,
+        'approved_by_leadership': record.approved_by_leadership_id,
+        'leadership_approved_at': record.leadership_approved_at,
+        'rejected_by_leadership': record.rejected_by_leadership_id,
+        'leadership_rejected_at': record.leadership_rejected_at,
+        'updated_at': record.updated_at,
+    }
 
 
 class FinancialEntryViewSet(viewsets.ModelViewSet):
@@ -77,6 +179,77 @@ class FinancialExitViewSet(viewsets.ModelViewSet):
         serializer.save(church=self.request.user.church)
 
 
+class TitherViewSet(viewsets.ModelViewSet):
+    """CRUD de membros dizimistas do usuário (igreja vinculada)."""
+
+    serializer_class = TitherSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Tither.objects.filter(
+            church=self.request.user.church,
+        ).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+
+def _update_tither_tithe_records(tither, year, months):
+    """Grava os 12 valores mensais de dízimo de um membro (update_or_create).
+
+    Valor vazio/None deleta o registro do mês; caso contrário cria/atualiza.
+    Retorna os 12 meses recalculados a partir do banco (autoritativo).
+    """
+    YEAR_MIN = 2000
+    YEAR_MAX = 2100
+    if not (YEAR_MIN <= int(year) <= YEAR_MAX):
+        raise ValueError('year inválido.')
+    if not isinstance(months, (list, tuple)) or len(months) != 12:
+        raise ValueError('months deve ter exatamente 12 itens.')
+
+    from decimal import Decimal
+
+    result = []
+    for i, raw in enumerate(months, start=1):
+        if raw is None or raw == '':
+            TitheRecord.objects.filter(
+                tither=tither, year=year, month=i,
+            ).delete()
+            result.append(None)
+            continue
+        amount = Decimal(str(raw))
+        if amount <= 0:
+            raise ValueError(f'O valor do mês {i} deve ser maior que 0.')
+        TitheRecord.objects.update_or_create(
+            tither=tither,
+            year=year,
+            month=i,
+            defaults={'amount': amount},
+        )
+        result.append(str(amount))
+    return {'member_id': tither.id, 'year': year, 'months': result}
+
+
+class TitherTitheRecordsView(APIView):
+    """Grava os 12 valores mensais de dízimo de um membro do usuário."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, tither_pk):
+        tither = get_object_or_404(
+            Tither, pk=tither_pk, church=request.user.church,
+        )
+        year = _int_from_post(request, 'year', datetime.now().year)
+        months = request.data.get('months')
+        try:
+            result = _update_tither_tithe_records(tither, year, months)
+        except ValueError as exc:
+            return Response(
+                {'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(result)
+
+
 class DashboardSummaryView(APIView):
     """Resumo anual com totais e sÃ©rie temporal dos 12 meses."""
 
@@ -88,25 +261,80 @@ class DashboardSummaryView(APIView):
         return Response(data)
 
 
+class ExistingMonthDataView(APIView):
+    """Retorna quantos lançamentos já existem na competência (ano/mês).
+
+    Usado na tela de importação para alertar o usuário/adm que, ao reimportar,
+    os dados atuais do período serão SUBSTITUÍDOS pelos novos arquivos.
+    GET ?year=2026&month=7
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        competence = _parse_competence(request)
+        if isinstance(competence, Response):
+            return competence
+        year, month = competence
+        counts = services.month_data_counts(request.user.church, year, month)
+        return Response(counts, status=status.HTTP_200_OK)
+
+
+class AdminChurchExistingMonthDataView(APIView):
+    """Idem ExistingMonthDataView, porém para staff sobre a igreja da URL."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        competence = _parse_competence(request)
+        if isinstance(competence, Response):
+            return competence
+        year, month = competence
+        counts = services.month_data_counts(
+            _get_admin_church(church_pk), year, month
+        )
+        return Response(counts, status=status.HTTP_200_OK)
+
+
 class ImportSpreadsheetView(APIView):
-    """Endpoint multipart para upload e processamento em lote das planilhas."""
+    """Endpoint multipart para upload e processamento em lote das planilhas.
+
+    Ano/Mês da competência são obrigatórios (`year`/`month`). Envie `dry_run=1`
+    para apenas validar (prévia, sem gravar). Na gravação, havendo qualquer erro
+    de validação nada é persistido (tudo-ou-nada) e a resposta vem como 400
+    com os erros agrupados por arquivo.
+    """
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
         files = {}
-        for key in ('entries', 'exits', 'tithers'):
+        for key in ('entries', 'exits', 'tithers', 'caixa', 'relatorio'):
             if key in request.FILES:
                 files[key] = request.FILES[key]
 
-        if not files:
+        if not any(k in files for k in ('entries', 'exits', 'tithers')):
             return Response(
                 {'detail': 'Envie ao menos uma planilha (entries, exits ou tithers).'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        result = services.import_spreadsheets(request.user.church, files)
+        competence = _parse_competence(request)
+        if isinstance(competence, Response):
+            return competence
+
+        year, month = competence
+        dry_run = str(request.data.get('dry_run', '')).lower() in ('1', 'true', 'yes')
+        try:
+            result = services.import_spreadsheets(
+                request.user.church, files, year=year, month=month,
+                dry_run=dry_run, mapping=_parse_mapping(request),
+            )
+        except services.ImportValidationError as exc:
+            return Response(exc.result, status=status.HTTP_400_BAD_REQUEST)
+        except (TypeError, ValueError) as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -219,13 +447,46 @@ class MonthlyClosingsView(APIView):
             )
             grand['total_entries'] += closing.total_entries
             grand['total_exits'] += closing.total_exits
-            grand['final_balance'] += closing.final_balance
+
+        # Saldo acumulado no rodapé = Σ Entradas − Σ Saídas (não somar os
+        # saldos mês a mês, pois o saldo anterior já é carregado entre meses).
+        grand['final_balance'] = (
+            grand['total_entries'] - grand['total_exits']
+        )
 
         return Response(
             {
                 'year': year,
                 'grand_total': {k: str(v) for k, v in grand.items()},
                 'months': months,
+            }
+        )
+
+    def post(self, request):
+        """Fechar ou reabrir a competência de um mês (Tesouraria)."""
+        year = _int_param(request, 'year', datetime.now().year)
+        raw_month = request.query_params.get('month')
+        month = int(raw_month) if raw_month else None
+        if month is None or not (1 <= month <= 12):
+            return Response(
+                {'detail': 'month deve estar entre 1 e 12.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        closed = request.data.get('closed')
+        if not isinstance(closed, bool):
+            return Response(
+                {'detail': 'closed deve ser true ou false.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        church = request.user.church
+        closing, _ = services.get_or_create_monthly_closing(church, year, month)
+        closing.is_closed = closed
+        closing.save(update_fields=['is_closed'])
+        return Response(
+            {
+                'year': year,
+                'month': month,
+                'is_closed': closing.is_closed,
             }
         )
 
@@ -400,6 +661,43 @@ class AdminChurchExitsViewSet(viewsets.ModelViewSet):
         serializer.save(church=self._church())
 
 
+class AdminChurchTithersViewSet(viewsets.ModelViewSet):
+    """CRUD de membros dizimistas para a igreja indicada na rota (staff)."""
+
+    serializer_class = TitherSerializer
+    permission_classes = [IsStaffPermission]
+
+    def _church(self):
+        return _get_admin_church(self.kwargs['church_pk'])
+
+    def get_queryset(self):
+        return Tither.objects.filter(
+            church=self._church(),
+        ).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self._church())
+
+
+class AdminChurchTitherTitheRecordsView(APIView):
+    """Grava os 12 valores mensais de dízimo de um membro (staff)."""
+
+    permission_classes = [IsStaffPermission]
+
+    def patch(self, request, church_pk, tither_pk):
+        church = _get_admin_church(church_pk)
+        tither = get_object_or_404(Tither, pk=tither_pk, church=church)
+        year = _int_from_post(request, 'year', datetime.now().year)
+        months = request.data.get('months')
+        try:
+            result = _update_tither_tithe_records(tither, year, months)
+        except ValueError as exc:
+            return Response(
+                {'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(result)
+
+
 class AdminChurchDashboardView(APIView):
     permission_classes = [IsStaffPermission]
 
@@ -410,25 +708,304 @@ class AdminChurchDashboardView(APIView):
 
 
 class AdminChurchImportView(APIView):
+    """Importação de planilhas (staff) — competência obrigatória, dry_run/commit."""
+
     permission_classes = [IsStaffPermission]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, church_pk):
         files = {}
-        for key in ('entries', 'exits', 'tithers'):
+        for key in ('entries', 'exits', 'tithers', 'caixa', 'relatorio'):
             if key in request.FILES:
                 files[key] = request.FILES[key]
 
-        if not files:
+        if not any(k in files for k in ('entries', 'exits', 'tithers')):
             return Response(
                 {'detail': 'Envie ao menos uma planilha (entries, exits ou tithers).'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        result = services.import_spreadsheets(
-            _get_admin_church(church_pk), files,
-        )
+        competence = _parse_competence(request)
+        if isinstance(competence, Response):
+            return competence
+
+        year, month = competence
+        dry_run = str(request.data.get('dry_run', '')).lower() in ('1', 'true', 'yes')
+        try:
+            result = services.import_spreadsheets(
+                _get_admin_church(church_pk), files,
+                year=year, month=month, dry_run=dry_run,
+                mapping=_parse_mapping(request),
+            )
+        except services.ImportValidationError as exc:
+            return Response(exc.result, status=status.HTTP_400_BAD_REQUEST)
+        except (TypeError, ValueError) as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
+
+
+class InspectSpreadsheetView(APIView):
+    """Inspeciona uma planilha e devolve cabeçalhos + sugestão de mapeamento."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        kind = request.data.get('kind')
+        if kind not in ('entries', 'exits', 'tithers'):
+            return Response(
+                {'detail': 'kind deve ser entries, exits ou tithers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        file = request.FILES.get('file')
+        if file is None:
+            return Response(
+                {'detail': 'Envie o arquivo (file).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(services.inspect_spreadsheet(file, kind))
+
+
+class AdminChurchInspectSpreadsheetView(APIView):
+    """Inspeção (staff) de uma planilha para mapeamento de colunas."""
+
+    permission_classes = [IsStaffPermission]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, church_pk):
+        _get_admin_church(church_pk)
+        kind = request.data.get('kind')
+        if kind not in ('entries', 'exits', 'tithers'):
+            return Response(
+                {'detail': 'kind deve ser entries, exits ou tithers.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        file = request.FILES.get('file')
+        if file is None:
+            return Response(
+                {'detail': 'Envie o arquivo (file).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(services.inspect_spreadsheet(file, kind))
+
+
+class DreSummaryView(APIView):
+    """DRE: receitas por departamento e despesas por natureza (mensal/anual)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        year = _int_param(request, 'year', datetime.now().year)
+        raw_month = request.query_params.get('month')
+        month = int(raw_month) if raw_month else None
+        if month is not None and not (1 <= month <= 12):
+            return Response(
+                {'detail': 'month deve estar entre 1 e 12.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        data = services.build_dre_summary(request.user.church, year, month)
+        return Response(data)
+
+
+class TitherRepeatAuditView(APIView):
+    """Auditoria de repetição de dizimistas (~90%) entre o mês e o anterior."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        year = _int_param(request, 'year', datetime.now().year)
+        month = _int_param(request, 'month', datetime.now().month)
+        invalid = _validate_month(request)
+        if invalid:
+            return invalid
+        return Response(services.audit_tither_repeat(request.user.church, year, month))
+
+
+class MonthlyValidationView(APIView):
+    """Validação mensal da Rotina Contábil IDB — papel Tesouraria (igreja).
+
+    GET retorna o checklist calculado ao vivo + o registro de validação.
+    POST: action='approve' (exige competência fechada) ou 'reject'.
+    A aprovação da Tesouraria é independente da Liderança.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        year = _int_param(request, 'year', datetime.now().year)
+        month = _int_param(request, 'month', datetime.now().month)
+        invalid = _validate_month(request)
+        if invalid:
+            return invalid
+        church = request.user.church
+        record = MonthlyValidation.objects.filter(
+            church=church, year=year, month=month,
+        ).first()
+        return Response({
+            'year': year,
+            'month': month,
+            'checks': services.build_validation_checks(church, year, month),
+            'validation': _serialize_validation(record),
+        })
+
+    def post(self, request):
+        year = _int_param(request, 'year', datetime.now().year)
+        month = _int_param(request, 'month', datetime.now().month)
+        invalid = _validate_month(request)
+        if invalid:
+            return invalid
+        church = request.user.church
+        action = request.data.get('action')
+        note = str(request.data.get('note') or '').strip()
+        checks = services.build_validation_checks(church, year, month)
+        record, _ = MonthlyValidation.objects.get_or_create(
+            church=church, year=year, month=month,
+        )
+
+        if action == 'approve' or action == 'submit_treasury':
+            if not checks['closing']['is_closed']:
+                return Response(
+                    {'detail': 'A competência precisa estar fechada (Caixa IDB) antes da validação.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            record.checks = checks
+            record.note = note
+            record.approved_by_treasury = request.user
+            record.treasury_approved_at = datetime.now()
+            record.rejected_by_treasury = None
+            record.treasury_rejected_at = None
+            record.recompute_status()
+            record.save()
+            return Response(_serialize_validation(record))
+        if action == 'reject':
+            record.checks = checks
+            record.note = note
+            record.rejected_by_treasury = request.user
+            record.treasury_rejected_at = datetime.now()
+            record.approved_by_treasury = None
+            record.treasury_approved_at = None
+            record.recompute_status()
+            record.save()
+            return Response(_serialize_validation(record))
+        return Response(
+            {'detail': "action deve ser 'approve' ou 'reject'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class AdminChurchDreSummaryView(APIView):
+    """DRE por natureza — papel Liderança (staff)."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        year = _int_param(request, 'year', datetime.now().year)
+        raw_month = request.query_params.get('month')
+        month = int(raw_month) if raw_month else None
+        if month is not None and not (1 <= month <= 12):
+            return Response(
+                {'detail': 'month deve estar entre 1 e 12.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(services.build_dre_summary(
+            _get_admin_church(church_pk), year, month,
+        ))
+
+
+class AdminChurchTitherRepeatAuditView(APIView):
+    """Repetição de dizimistas (~90%) — papel Liderança (staff)."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        year = _int_param(request, 'year', datetime.now().year)
+        month = _int_param(request, 'month', datetime.now().month)
+        invalid = _validate_month(request)
+        if invalid:
+            return invalid
+        return Response(services.audit_tither_repeat(
+            _get_admin_church(church_pk), year, month,
+        ))
+
+
+class AdminChurchMonthlyValidationView(APIView):
+    """Validação mensal — papel Liderança (staff).
+
+    GET: checklist + registro. POST: action='approve' (exige competência
+    fechada) ou 'reject'. A aprovação da Liderança é independente da
+    Tesouraria.
+    """
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        year = _int_param(request, 'year', datetime.now().year)
+        month = _int_param(request, 'month', datetime.now().month)
+        invalid = _validate_month(request)
+        if invalid:
+            return invalid
+        church = _get_admin_church(church_pk)
+        record = MonthlyValidation.objects.filter(
+            church=church, year=year, month=month,
+        ).first()
+        return Response({
+            'year': year,
+            'month': month,
+            'checks': services.build_validation_checks(church, year, month),
+            'validation': _serialize_validation(record),
+        })
+
+    def post(self, request, church_pk):
+        year = _int_param(request, 'year', datetime.now().year)
+        month = _int_param(request, 'month', datetime.now().month)
+        invalid = _validate_month(request)
+        if invalid:
+            return invalid
+        church = _get_admin_church(church_pk)
+        action = request.data.get('action')
+        note = str(request.data.get('note') or '').strip()
+        checks = services.build_validation_checks(church, year, month)
+        record = MonthlyValidation.objects.filter(
+            church=church, year=year, month=month,
+        ).first()
+
+        if action == 'approve' or action == 'submit_leadership':
+            if not checks['closing']['is_closed']:
+                return Response(
+                    {'detail': 'A competência precisa estar fechada (Caixa IDB) antes da validação.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if record is None:
+                record = MonthlyValidation.objects.create(
+                    church=church, year=year, month=month,
+                )
+            record.checks = checks
+            record.note = note
+            record.approved_by_leadership = request.user
+            record.leadership_approved_at = datetime.now()
+            record.rejected_by_leadership = None
+            record.leadership_rejected_at = None
+            record.recompute_status()
+            record.save()
+            return Response(_serialize_validation(record))
+        if action == 'reject':
+            if record is None:
+                record = MonthlyValidation.objects.create(
+                    church=church, year=year, month=month,
+                )
+            record.checks = checks
+            record.note = note
+            record.rejected_by_leadership = request.user
+            record.leadership_rejected_at = datetime.now()
+            record.approved_by_leadership = None
+            record.leadership_approved_at = None
+            record.recompute_status()
+            record.save()
+            return Response(_serialize_validation(record))
+        return Response(
+            {'detail': "action deve ser 'approve' ou 'reject'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 class AdminChurchTithersReconciliationView(APIView):
@@ -534,13 +1111,45 @@ class AdminChurchMonthlyClosingsView(APIView):
             )
             grand['total_entries'] += closing.total_entries
             grand['total_exits'] += closing.total_exits
-            grand['final_balance'] += closing.final_balance
+
+        # Saldo acumulado no rodapé = Σ Entradas − Σ Saídas.
+        grand['final_balance'] = (
+            grand['total_entries'] - grand['total_exits']
+        )
 
         return Response(
             {
                 'year': year,
                 'grand_total': {k: str(v) for k, v in grand.items()},
                 'months': months,
+            }
+        )
+
+    def post(self, request, church_pk):
+        """Fechar ou reabrir a competência de um mês (Liderança)."""
+        year = _int_param(request, 'year', datetime.now().year)
+        raw_month = request.query_params.get('month')
+        month = int(raw_month) if raw_month else None
+        if month is None or not (1 <= month <= 12):
+            return Response(
+                {'detail': 'month deve estar entre 1 e 12.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        closed = request.data.get('closed')
+        if not isinstance(closed, bool):
+            return Response(
+                {'detail': 'closed deve ser true ou false.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        church = _get_admin_church(church_pk)
+        closing, _ = services.get_or_create_monthly_closing(church, year, month)
+        closing.is_closed = closed
+        closing.save(update_fields=['is_closed'])
+        return Response(
+            {
+                'year': year,
+                'month': month,
+                'is_closed': closing.is_closed,
             }
         )
 
@@ -608,3 +1217,199 @@ class AdminChurchCategoriesView(APIView):
 
     def get(self, request, church_pk):
         return Response(CategorySerializer.many_categories())
+
+
+class CalendarEventViewSet(viewsets.ModelViewSet):
+    """CRUD de eventos do calendário financeiro do usuário (igreja vinculada)."""
+
+    serializer_class = CalendarEventSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        return CalendarEvent.objects.filter(
+            church=self.request.user.church
+        ).order_by('title')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+
+class AdminChurchCalendarEventsViewSet(viewsets.ModelViewSet):
+    """CRUD de eventos do calendário de uma igreja específica (apenas staff)."""
+
+    serializer_class = CalendarEventSerializer
+    permission_classes = [IsStaffPermission]
+    pagination_class = None
+
+    def _church(self):
+        return _get_admin_church(self.kwargs['church_pk'])
+
+    def get_queryset(self):
+        return CalendarEvent.objects.filter(
+            church=self._church()
+        ).order_by('title')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self._church())
+
+
+# --------------------------------------------------------------------------- #
+# Export de planilhas preenchidas no modelo (Entradas/Saídas) e Fechamento
+# --------------------------------------------------------------------------- #
+XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+
+def _xlsx_file_response(data: bytes, filename: str) -> FileResponse:
+    """Empacota bytes .xlsx como resposta de download anexa."""
+    response = FileResponse(
+        BytesIO(data), content_type=XLSX_MIME, as_attachment=True,
+        filename=filename,
+    )
+    return response
+
+
+def _export_competence(request, require_month: bool = True):
+    """Lê year/month da query; valida a competência."""
+    year = _int_param(request, 'year', datetime.now().year)
+    raw_month = request.query_params.get('month')
+    month = int(raw_month) if raw_month else None
+    if require_month and (month is None or not (1 <= month <= 12)):
+        return None, None, Response(
+            {'detail': 'month deve estar entre 1 e 12.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return year, month, None
+
+
+class ExportEntriesView(APIView):
+    """Baixa o modelo de Entradas preenchido com o mês da competência."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        year, month, err = _export_competence(request)
+        if err:
+            return err
+        data = services.generate_filled_entries(request.user.church, year, month)
+        return _xlsx_file_response(
+            data, f'entradas-{year}-{month:02d}.xlsx'
+        )
+
+
+class ExportExitsView(APIView):
+    """Baixa o modelo de Saídas preenchido com o mês da competência."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        year, month, err = _export_competence(request)
+        if err:
+            return err
+        data = services.generate_filled_exits(request.user.church, year, month)
+        return _xlsx_file_response(
+            data, f'saidas-{year}-{month:02d}.xlsx'
+        )
+
+
+class ExportClosingsView(APIView):
+    """Baixa o export do Fechamento Mensal (anual ou por competência)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        mode = request.query_params.get('mode', 'annual')
+        year = _int_param(request, 'year', datetime.now().year)
+        month = None
+        if mode == 'period':
+            year, month, err = _export_competence(request, require_month=True)
+            if err:
+                return err
+        data = services.generate_closings_export(
+            request.user.church, year, mode, month=month
+        )
+        filename = (
+            f'fechamento-{year}.xlsx'
+            if mode == 'annual'
+            else f'fechamento-{year}-{month:02d}.xlsx'
+        )
+        return _xlsx_file_response(data, filename)
+
+
+class AdminChurchExportEntriesView(APIView):
+    """Variante admin do export de Entradas para uma igreja específica."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        church = _get_admin_church(church_pk)
+        year, month, err = _export_competence(request)
+        if err:
+            return err
+        data = services.generate_filled_entries(church, year, month)
+        return _xlsx_file_response(
+            data, f'entradas-{year}-{month:02d}.xlsx'
+        )
+
+
+class AdminChurchExportExitsView(APIView):
+    """Variante admin do export de Saídas para uma igreja específica."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        church = _get_admin_church(church_pk)
+        year, month, err = _export_competence(request)
+        if err:
+            return err
+        data = services.generate_filled_exits(church, year, month)
+        return _xlsx_file_response(
+            data, f'saidas-{year}-{month:02d}.xlsx'
+        )
+
+
+class AdminChurchExportClosingsView(APIView):
+    """Variante admin do export do Fechamento Mensal."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        church = _get_admin_church(church_pk)
+        mode = request.query_params.get('mode', 'annual')
+        year = _int_param(request, 'year', datetime.now().year)
+        month = None
+        if mode == 'period':
+            year, month, err = _export_competence(request, require_month=True)
+            if err:
+                return err
+        data = services.generate_closings_export(church, year, mode, month=month)
+        filename = (
+            f'fechamento-{year}.xlsx'
+            if mode == 'annual'
+            else f'fechamento-{year}-{month:02d}.xlsx'
+        )
+        return _xlsx_file_response(data, filename)
+
+
+XLS_MIME = 'application/vnd.ms-excel'
+
+
+def _xls_file_response(data: bytes, filename: str) -> HttpResponse:
+    """Empacota bytes .xls (caixa IDB) como resposta de download anexa."""
+    response = HttpResponse(data, content_type=XLS_MIME)
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
+class AdminChurchCaixaDownloadView(APIView):
+    """Baixa o Caixa IDB (Balanço Local) preenchido (.xls) para uma igreja."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request, church_pk):
+        church = _get_admin_church(church_pk)
+        year, month, err = _export_competence(request)
+        if err:
+            return err
+        data = services.generate_filled_caixa(church, year, month)
+        return _xls_file_response(data, f'caixa-idb-{year}-{month:02d}.xls')

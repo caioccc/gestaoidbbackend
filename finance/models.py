@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
@@ -7,6 +8,7 @@ class DepartmentCategory(models.TextChoices):
 
     DIZIMO = 'DIZIMO', 'Dízimo'
     OFERTA = 'OFERTA', 'Ofertas Gerais'
+    VISAO_CORPORATIVA = 'VISAO_CORPORATIVA', 'Visão Corporativa'
     CONSTRUCAO = 'CONSTRUCAO', 'Construção'
     ESPECIAL = 'ESPECIAL', 'Especiais'
     MISSOES = 'MISSOES', 'Missões'
@@ -16,6 +18,7 @@ class DepartmentCategory(models.TextChoices):
     ESC_BIBLICA = 'ESC_BIBLICA', 'Escola Bíblica'
     INFANTIL = 'INFANTIL', 'Infantil'
     ADOLESCENTES = 'ADOLESCENTES', 'Adolescentes'
+    CASAIS = 'CASAIS', 'Casais'
 
 
 class FinancialEntry(models.Model):
@@ -126,6 +129,57 @@ class TitheRecord(models.Model):
         return f'{self.tither} - {self.month}/{self.year} - R$ {self.amount}'
 
 
+class CalendarEvent(models.Model):
+    """Evento do calendário financeiro da congregação.
+
+    Suporta eventos recorrentes (repeat_monthly=True, usando month/day) e
+    eventos pontuais (repeat_monthly=False, usando date).
+    """
+
+    class Category(models.TextChoices):
+        BILL = 'bill', 'Conta fixa'
+        DEADLINE = 'deadline', 'Prazo / Vencimento'
+        MEETING = 'meeting', 'Reunião'
+        EVENT = 'event', 'Evento'
+
+    church = models.ForeignKey(
+        'accounts.Church',
+        on_delete=models.CASCADE,
+        related_name='calendar_events',
+        verbose_name='Igreja',
+    )
+    title = models.CharField('Título', max_length=150)
+    category = models.CharField(
+        'Categoria', max_length=20, choices=Category.choices, default=Category.EVENT,
+    )
+    repeat_monthly = models.BooleanField('Recorre mensalmente', default=False)
+    date = models.DateField(
+        'Data (evento pontual)', null=True, blank=True,
+        help_text='Preenchido quando o evento não recorre mensalmente.',
+    )
+    month = models.PositiveIntegerField(
+        'Mês (recorrente)',
+        validators=[MinValueValidator(1), MaxValueValidator(12)],
+        null=True,
+        blank=True,
+    )
+    day = models.PositiveIntegerField(
+        'Dia (recorrente)',
+        validators=[MinValueValidator(1), MaxValueValidator(31)],
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Evento do Calendário'
+        verbose_name_plural = 'Eventos do Calendário'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.title} - {self.church}'
+
+
 class MonthlyClosing(models.Model):
     """Fechamento mensal (Caixa IDB) da congregação."""
 
@@ -166,3 +220,91 @@ class MonthlyClosing(models.Model):
         self.final_balance = (
             self.previous_balance + self.total_entries - self.total_exits
         )
+
+
+class MonthlyValidation(models.Model):
+    """Validação mensal da Rotina Contábil IDB (Tesouraria/Liderança).
+
+    Registra o resultado do checklist (fechamento, prebenda, repetição de
+    dizimistas e classificações) e o fluxo de aprovação em duas etapas:
+    Tesouraria (igreja) → Liderança (staff).
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pendente'
+        TREASURY_APPROVED = 'TREASURY_APPROVED', 'Aprovado pela Tesouraria'
+        LEADERSHIP_APPROVED = 'LEADERSHIP_APPROVED', 'Aprovado pela Liderança'
+        REJECTED = 'REJECTED', 'Rejeitado'
+
+    church = models.ForeignKey(
+        'accounts.Church',
+        on_delete=models.CASCADE,
+        related_name='monthly_validations',
+        verbose_name='Igreja',
+    )
+    year = models.PositiveIntegerField('Ano')
+    month = models.PositiveIntegerField(
+        'Mês', validators=[MinValueValidator(1), MaxValueValidator(12)],
+    )
+    status = models.CharField(
+        'Status', max_length=30, choices=Status.choices, default=Status.PENDING,
+    )
+    checks = models.JSONField('Resultado dos checks', default=dict, blank=True)
+    note = models.CharField('Observação', max_length=500, blank=True)
+    approved_by_treasury = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+        verbose_name='Aprovado pela Tesouraria',
+    )
+    approved_by_leadership = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+        verbose_name='Aprovado pela Liderança',
+    )
+    treasury_approved_at = models.DateTimeField(
+        'Tesouraria aprovou em', null=True, blank=True,
+    )
+    leadership_approved_at = models.DateTimeField(
+        'Liderança aprovou em', null=True, blank=True,
+    )
+    rejected_by_treasury = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+        verbose_name='Rejeitado pela Tesouraria',
+    )
+    treasury_rejected_at = models.DateTimeField(
+        'Tesouraria rejeitou em', null=True, blank=True,
+    )
+    rejected_by_leadership = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+        verbose_name='Rejeitado pela Liderança',
+    )
+    leadership_rejected_at = models.DateTimeField(
+        'Liderança rejeitou em', null=True, blank=True,
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Validação Mensal'
+        verbose_name_plural = 'Validações Mensais'
+        unique_together = ('church', 'year', 'month')
+
+    def __str__(self):
+        return f'Validação {self.church} - {self.month}/{self.year}'
+
+    def recompute_status(self):
+        """Recomputa o status agregado a partir das aprovações/rejeições por lado.
+
+        Cada perfil (Tesouraria e Liderança) pode aprovar de forma independente;
+        o status é apenas um resumo para exibição.
+        """
+        if self.treasury_approved_at and self.leadership_approved_at:
+            self.status = self.Status.LEADERSHIP_APPROVED
+        elif self.treasury_approved_at:
+            self.status = self.Status.TREASURY_APPROVED
+        elif self.treasury_rejected_at or self.leadership_rejected_at:
+            self.status = self.Status.REJECTED
+        else:
+            self.status = self.Status.PENDING

@@ -9,6 +9,11 @@ urlpatterns = [
     path('register/', viewsets.RegisterView.as_view(), name='register'),
     path('profile/', viewsets.ProfileView.as_view(), name='profile'),
     path(
+        'profile/reset-password/',
+        viewsets.ResetOwnPasswordView.as_view(),
+        name='reset-own-password',
+    ),
+    path(
         'admin/churches/',
         viewsets.AdminChurchesView.as_view(),
         name='admin-churches',
@@ -27,5 +32,20 @@ urlpatterns = [
         'admin/churches/<int:pk>/reject/',
         viewsets.AdminRejectChurchView.as_view(),
         name='admin-reject-church',
+    ),
+    path(
+        'admin/churches/<int:pk>/profile/',
+        viewsets.AdminChurchProfileView.as_view(),
+        name='admin-church-profile',
+    ),
+    path(
+        'admin/churches/<int:pk>/reset-password/',
+        viewsets.AdminChurchResetPasswordView.as_view(),
+        name='admin-church-reset-password',
+    ),
+    path(
+        'admin/churches/<int:pk>/clear-data/',
+        viewsets.AdminChurchClearDataView.as_view(),
+        name='admin-church-clear-data',
     ),
 ]

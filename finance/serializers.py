@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from .models import (
+    CalendarEvent,
     DepartmentCategory,
     FinancialEntry,
     FinancialExit,
@@ -90,6 +91,32 @@ class MonthlyClosingSerializer(serializers.ModelSerializer):
             'church', 'previous_balance', 'total_entries',
             'total_exits', 'final_balance',
         ]
+
+
+class CalendarEventSerializer(serializers.ModelSerializer):
+    category_display = serializers.CharField(
+        source='get_category_display', read_only=True,
+    )
+
+    class Meta:
+        model = CalendarEvent
+        fields = [
+            'id', 'church', 'title', 'category', 'category_display',
+            'repeat_monthly', 'date', 'month', 'day', 'created_at',
+        ]
+        read_only_fields = ['church', 'created_at']
+
+    def validate(self, attrs):
+        repeat_monthly = attrs.get('repeat_monthly')
+        if repeat_monthly is False and attrs.get('date') is None:
+            raise serializers.ValidationError(
+                {'date': 'Informe a data para um evento pontual.'}
+            )
+        if repeat_monthly is True and attrs.get('day') is None:
+            raise serializers.ValidationError(
+                {'day': 'Informe o dia para um evento recorrente.'}
+            )
+        return attrs
 
 
 class CategorySerializer(serializers.Serializer):

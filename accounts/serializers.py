@@ -17,6 +17,7 @@ class ChurchSerializer(serializers.ModelSerializer):
             'id', 'name', 'pastor_name', 'treasurer_name', 'phone',
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
             'latitude', 'longitude', 'status', 'created_at', 'updated_at',
+            'pastoral_prebenda_percent',
         ]
         read_only_fields = ['id', 'status', 'created_at', 'updated_at']
 
@@ -24,12 +25,17 @@ class ChurchSerializer(serializers.ModelSerializer):
 class ChurchProfileSerializer(serializers.ModelSerializer):
     """Consulta e atualização dos dados da congregação (perfil)."""
 
+    responsible_email = serializers.EmailField(
+        source='user_account.email', read_only=True
+    )
+
     class Meta:
         model = Church
         fields = [
             'id', 'name', 'pastor_name', 'treasurer_name', 'phone',
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
-            'latitude', 'longitude',
+            'latitude', 'longitude', 'pastoral_prebenda_percent',
+            'responsible_email',
         ]
         read_only_fields = ['id']
 

@@ -1,12 +1,20 @@
 from django.contrib import admin
 
 from .models import (
+    CalendarEvent,
     FinancialEntry,
     FinancialExit,
     MonthlyClosing,
     Tither,
     TitheRecord,
 )
+
+
+@admin.register(CalendarEvent)
+class CalendarEventAdmin(admin.ModelAdmin):
+    list_display = ['title', 'church', 'category', 'repeat_monthly', 'date', 'day', 'created_at']
+    list_filter = ['category', 'repeat_monthly', 'church']
+    search_fields = ['title', 'church__name']
 
 
 @admin.register(FinancialEntry)

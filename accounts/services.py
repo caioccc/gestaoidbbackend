@@ -62,7 +62,7 @@ def send_approval_notification(email, church_name, account_name):
     """Notifica que a congregação foi aprovada e o acesso está ativo."""
     _send_template_email(
         email,
-        f'Congregação aprovada — {APP_NAME}',
+        f'Igreja aprovada — {APP_NAME}',
         'accounts/emails/approval.html',
         {
             'email': email,
@@ -84,5 +84,20 @@ def send_rejection_notification(email, church_name, account_name):
             'church_name': church_name,
             'account_name': account_name,
             'status': 'rejected',
+        },
+    )
+
+
+def send_password_reset(email, password, church_name, account_name):
+    """Envia a nova senha do login responsável (após reset)."""
+    _send_template_email(
+        email,
+        f'Senha alterada — {APP_NAME}',
+        'accounts/emails/password_reset.html',
+        {
+            'email': email,
+            'password': password,
+            'church_name': church_name,
+            'account_name': account_name,
         },
     )

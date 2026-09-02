@@ -24,6 +24,11 @@ import dj_database_url
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Carrega o .env (raiz do backend) para os.environ. Necessário pois a
+# configuração de e-mail (SMTP), DATABASE_URL etc. são lidos de os.environ.
+from dotenv import load_dotenv  # noqa: E402
+load_dotenv(BASE_DIR / '.env')
+
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-dev-key')
 DEBUG = config('DEBUG', default=True, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
@@ -164,6 +169,8 @@ EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True') == 'True'
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
+# Para Gmail SMTP o "from" precisa ser a própria conta autenticada
+# (EMAIL_HOST_USER). Só usamos um from genérico se houver um explícito.
 DEFAULT_FROM_EMAIL = os.environ.get(
     'DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'noreply@idb.org.br'
 )
