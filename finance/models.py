@@ -1,6 +1,9 @@
+import hashlib
+
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
+from cloudinary.models import CloudinaryField
 
 
 class DepartmentCategory(models.TextChoices):
@@ -283,6 +286,16 @@ class MonthlyValidation(models.Model):
     leadership_rejected_at = models.DateTimeField(
         'Liderança rejeitou em', null=True, blank=True,
     )
+    treasury_photo_url = CloudinaryField(
+        'Foto do signatário (Tesouraria)', null=True, blank=True,
+    )
+    treasury_signature_url = CloudinaryField(
+        'Assinatura digital (Tesouraria)', null=True, blank=True,
+    )
+    signature_hash = models.CharField(
+        'Hash da Assinatura', max_length=64, blank=True, editable=False,
+        help_text='SHA-256 da imagem da assinatura digital.',
+    )
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
     updated_at = models.DateTimeField('Atualizado em', auto_now=True)
 
@@ -308,3 +321,29 @@ class MonthlyValidation(models.Model):
             self.status = self.Status.REJECTED
         else:
             self.status = self.Status.PENDING
+
+    def _compute_signature_hash(self):
+        """SHA-256 da imagem da assinatura digital (fingerprint de integridade)."""
+        sig = self.treasury_signature_url
+        if sig is None:
+            return None
+        if hasattr(sig, 'read'):
+            try:
+                sig.seek(0)
+                data = sig.read()
+                sig.seek(0)
+                sha256 = hashlib.sha256(data).hexdigest()
+                return sha256
+            except Exception:
+                pass
+        return hashlib.sha256(str(sig).encode('utf-8')).hexdigest()
+
+    def save(self, *args, **kwargs):
+        """Gera o hash da assinatura quando um novo arquivo é anexado.
+
+        Só recalcula quando o campo ainda guarda um arquivo recém-enviado;
+        em saves posteriores (já com o resource Cloudinary) preserva o hash.
+        """
+        if hasattr(self.treasury_signature_url, 'read'):
+            self.signature_hash = self._compute_signature_hash() or ''
+        super().save(*args, **kwargs)

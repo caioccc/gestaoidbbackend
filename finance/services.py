@@ -1,4 +1,4 @@
-"""Serviços de negócio do módulo financeiro (Eclésia IDB)."""
+"""Serviços de negócio do módulo financeiro (Financeiro IDB)."""
 from __future__ import annotations
 
 import calendar

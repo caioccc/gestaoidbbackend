@@ -1,8 +1,10 @@
 ﻿"""Views do mÃ³dulo financeiro (EclÃ©sia IDB)."""
+import base64
 from datetime import datetime
 from decimal import Decimal
 from io import BytesIO
 from typing import Optional
+from django.core.files.uploadedfile import SimpleUploadedFile
 
 from django.db.models import Sum
 from django.http import FileResponse, HttpResponse
@@ -107,6 +109,41 @@ def _parse_mapping(request):
     return raw
 
 
+def _cloudinary_url(field):
+    """Resolve a URL acessível de um CloudinaryField (ou None)."""
+    if not field:
+        return None
+    try:
+        return getattr(field, 'url', None) or (field.name if field.name else None)
+    except Exception:
+        return field.name if getattr(field, 'name', None) else None
+
+
+def _data_url_to_file(data_url, name):
+    """Converte um data URL (ex.: data:image/png;base64,...) em Um UploadedFile.
+
+    Utiliza SimpleUploadedFile (subclasse de UploadedFile) para que o
+    CloudinaryField.pre_save reconheça o valor e envie a imagem ao Cloudinary
+    durante o save() do modelo.
+    """
+    if not data_url or ',' not in data_url:
+        return None
+    try:
+        header, b64 = data_url.split(',', 1)
+        content = base64.b64decode(b64)
+    except (ValueError, TypeError, base64.binascii.Error):
+        return None
+    if not content:
+        return None
+    content_type = header.split(';')[0].replace('data:', '') if 'data:' in header else 'image/png'
+    return SimpleUploadedFile(name, content, content_type=content_type)
+
+
+def _read_img(request, key, name):
+    """Lê uma imagem (data URL base64) do request.data e devolve um UploadedFile."""
+    return _data_url_to_file(request.data.get(key), name)
+
+
 def _serialize_validation(record: Optional[MonthlyValidation]):
     """Payload serializado de uma validação mensal (ou None)."""
     if record is None:
@@ -128,6 +165,9 @@ def _serialize_validation(record: Optional[MonthlyValidation]):
         'leadership_approved_at': record.leadership_approved_at,
         'rejected_by_leadership': record.rejected_by_leadership_id,
         'leadership_rejected_at': record.leadership_rejected_at,
+        'treasury_photo_url': _cloudinary_url(record.treasury_photo_url),
+        'treasury_signature_url': _cloudinary_url(record.treasury_signature_url),
+        'signature_hash': record.signature_hash or None,
         'updated_at': record.updated_at,
     }
 
@@ -862,6 +902,9 @@ class MonthlyValidationView(APIView):
             church=church, year=year, month=month,
         )
 
+        photo = _read_img(request, 'photo', 'treasury_photo.png')
+        signature = _read_img(request, 'signature', 'treasury_signature.png')
+
         if action == 'approve' or action == 'submit_treasury':
             if not checks['closing']['is_closed']:
                 return Response(
@@ -874,6 +917,10 @@ class MonthlyValidationView(APIView):
             record.treasury_approved_at = datetime.now()
             record.rejected_by_treasury = None
             record.treasury_rejected_at = None
+            if photo:
+                record.treasury_photo_url = photo
+            if signature:
+                record.treasury_signature_url = signature
             record.recompute_status()
             record.save()
             return Response(_serialize_validation(record))
@@ -884,6 +931,10 @@ class MonthlyValidationView(APIView):
             record.treasury_rejected_at = datetime.now()
             record.approved_by_treasury = None
             record.treasury_approved_at = None
+            if photo:
+                record.treasury_photo_url = photo
+            if signature:
+                record.treasury_signature_url = signature
             record.recompute_status()
             record.save()
             return Response(_serialize_validation(record))
@@ -969,6 +1020,9 @@ class AdminChurchMonthlyValidationView(APIView):
             church=church, year=year, month=month,
         ).first()
 
+        photo = _read_img(request, 'photo', 'treasury_photo.png')
+        signature = _read_img(request, 'signature', 'treasury_signature.png')
+
         if action == 'approve' or action == 'submit_leadership':
             if not checks['closing']['is_closed']:
                 return Response(
@@ -981,10 +1035,18 @@ class AdminChurchMonthlyValidationView(APIView):
                 )
             record.checks = checks
             record.note = note
+            record.approved_by_treasury = request.user
+            record.treasury_approved_at = datetime.now()
             record.approved_by_leadership = request.user
             record.leadership_approved_at = datetime.now()
+            record.rejected_by_treasury = None
+            record.treasury_rejected_at = None
             record.rejected_by_leadership = None
             record.leadership_rejected_at = None
+            if photo:
+                record.treasury_photo_url = photo
+            if signature:
+                record.treasury_signature_url = signature
             record.recompute_status()
             record.save()
             return Response(_serialize_validation(record))
@@ -995,10 +1057,18 @@ class AdminChurchMonthlyValidationView(APIView):
                 )
             record.checks = checks
             record.note = note
+            record.rejected_by_treasury = request.user
+            record.treasury_rejected_at = datetime.now()
             record.rejected_by_leadership = request.user
             record.leadership_rejected_at = datetime.now()
+            record.approved_by_treasury = None
+            record.treasury_approved_at = None
             record.approved_by_leadership = None
             record.leadership_approved_at = None
+            if photo:
+                record.treasury_photo_url = photo
+            if signature:
+                record.treasury_signature_url = signature
             record.recompute_status()
             record.save()
             return Response(_serialize_validation(record))

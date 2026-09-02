@@ -5,6 +5,7 @@ from .models import (
     FinancialEntry,
     FinancialExit,
     MonthlyClosing,
+    MonthlyValidation,
     Tither,
     TitheRecord,
 )
@@ -68,3 +69,41 @@ class MonthlyClosingAdmin(admin.ModelAdmin):
     ]
     list_filter = ['is_closed', 'year', 'month', 'church']
     search_fields = ['church__name']
+
+
+@admin.register(MonthlyValidation)
+class MonthlyValidationAdmin(admin.ModelAdmin):
+    list_display = [
+        'church', 'year', 'month', 'status',
+        'approved_by_treasury', 'approved_by_leadership',
+        'treasury_approved_at', 'leadership_approved_at',
+        'updated_at',
+    ]
+    list_filter = ['status', 'year', 'month', 'church']
+    search_fields = ['church__name', 'note']
+    readonly_fields = [
+        'created_at', 'updated_at',
+    ]
+    fieldsets = (
+        (None, {'fields': ('church', 'year', 'month', 'status', 'checks', 'note')}),
+        (
+            'Tesouraria',
+            {
+                'fields': (
+                    'approved_by_treasury', 'treasury_approved_at',
+                    'rejected_by_treasury', 'treasury_rejected_at',
+                    'treasury_photo_url', 'treasury_signature_url',
+                ),
+            },
+        ),
+        (
+            'Liderança',
+            {
+                'fields': (
+                    'approved_by_leadership', 'leadership_approved_at',
+                    'rejected_by_leadership', 'leadership_rejected_at',
+                ),
+            },
+        ),
+        ('Datas', {'fields': ('created_at', 'updated_at')}),
+    )

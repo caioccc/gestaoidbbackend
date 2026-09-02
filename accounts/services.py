@@ -11,7 +11,7 @@ from django.template.loader import render_to_string
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = 'Eclésia IDB'
+APP_NAME = 'Financeiro IDB'
 APP_TAGLINE = 'Gestão Financeira das Igrejas de Deus no Brasil'
 
 
