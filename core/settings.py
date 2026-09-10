@@ -132,6 +132,15 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+STORAGES = {
+    "default": {
+        "BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS
@@ -158,6 +167,9 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
+    'USER_AUTHENTICATION_RULE': (
+        'accounts.authentication.custom_user_authentication_rule'
+    ),
 }
 
 
@@ -185,3 +197,10 @@ cloudinary.config(
     api_key=os.environ.get('CLOUDINARY_API_KEY', '977733565746842'),
     api_secret=os.environ.get('CLOUDINARY_API_SECRET', 'q552mjrVeEmgPs1kUxfKzp4wz2o'),
 )
+
+CLOUDINARY_STORAGE = {
+    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'freelancerinc'),
+    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '977733565746842'),
+    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', 'q552mjrVeEmgPs1kUxfKzp4wz2o'),
+    'SECURE': True,
+}

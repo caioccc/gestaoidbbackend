@@ -1,7 +1,13 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import Church, User
+from .models import (
+    AccountingCategory,
+    Church,
+    Member,
+    MinistryArea,
+    User,
+)
 
 
 @admin.register(Church)
@@ -24,7 +30,7 @@ class ChurchAdmin(admin.ModelAdmin):
         for church in allowed:
             church.status = 'ACTIVE'
             church.save(update_fields=['status'])
-            user = getattr(church, 'user_account', None)
+            user = church.responsible_user
             if user is not None and not user.is_active:
                 user.is_active = True
                 user.save(update_fields=['is_active'])
@@ -41,6 +47,27 @@ class ChurchAdmin(admin.ModelAdmin):
     def reject_churches(self, request, queryset):
         updated = queryset.filter(status='PENDING').update(status='REJECTED')
         self.message_user(request, f'{updated} Igreja(s) rejeitada(s).')
+
+
+@admin.register(AccountingCategory)
+class AccountingCategoryAdmin(admin.ModelAdmin):
+    list_display = ['key', 'label', 'created_at']
+    search_fields = ['key', 'label']
+    ordering = ['label']
+
+
+@admin.register(MinistryArea)
+class MinistryAreaAdmin(admin.ModelAdmin):
+    list_display = ['name', 'church', 'created_at']
+    list_filter = ['church']
+    search_fields = ['name']
+
+
+@admin.register(Member)
+class MemberAdmin(admin.ModelAdmin):
+    list_display = ['name', 'church', 'phone', 'status', 'church_entry', 'cpf']
+    list_filter = ['church', 'status', 'church_entry']
+    search_fields = ['name', 'phone', 'email', 'cpf', 'rg']
 
 
 @admin.register(User)

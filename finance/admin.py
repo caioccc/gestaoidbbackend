@@ -34,16 +34,12 @@ class FinancialEntryAdmin(admin.ModelAdmin):
 class FinancialExitAdmin(admin.ModelAdmin):
     list_display = [
         'date', 'church', 'description', 'category', 'amount',
-        'has_receipt', 'created_at',
+        'created_at',
     ]
     list_filter = ['category', 'date', 'church']
     search_fields = ['description', 'church__name']
     date_hierarchy = 'date'
     list_per_page = 50
-
-    @admin.display(boolean=True, description='Comprovante')
-    def has_receipt(self, obj):
-        return bool(obj.receipt)
 
 
 @admin.register(Tither)

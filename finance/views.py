@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Church
-from accounts.viewsets import IsStaffPermission
+from accounts.permissions import CanAccessTargetChurch
 
 from . import services
 
@@ -88,6 +88,11 @@ class RegionalReportXlsView(APIView):
                 {'detail': 'Usuário sem igreja vinculada.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if not church.is_sede():
+            return Response(
+                {'detail': 'Congregações não possuem Relatório Regional.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         year, month, err = _month_valid(request, None)
         if err:
             return err
@@ -148,7 +153,7 @@ class NationalReportXlsxView(APIView):
 class AdminChurchNationalReportXlsxView(APIView):
     """Baixa o Relatório Nacional preenchido (.xlsx) de uma igreja (staff)."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         church = get_object_or_404(Church, pk=church_pk)

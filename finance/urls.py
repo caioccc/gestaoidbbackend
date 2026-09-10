@@ -33,6 +33,7 @@ admin_router.register(
 )
 
 urlpatterns = [
+    path('public/calendar/<str:hash>/', viewsets.PublicCalendarEventsView.as_view(), name='public-calendar'),
     path('dashboard/summary/', viewsets.DashboardSummaryView.as_view(), name='dashboard-summary'),
     path('dre/summary/', viewsets.DreSummaryView.as_view(), name='dre-summary'),
     path('import-spreadsheet/', viewsets.ImportSpreadsheetView.as_view(), name='import-spreadsheet'),

@@ -1,4 +1,4 @@
-"""Serviços de negócio do módulo financeiro (Financeiro IDB)."""
+"""Serviços de negócio do módulo financeiro (Gestão IDB)."""
 from __future__ import annotations
 
 import calendar
@@ -47,6 +47,7 @@ def seed_default_calendar_events(church) -> int:
             church=church,
             title=title,
             category=category.value,
+            audience=CalendarEvent.Audience.FINANCE,
             repeat_monthly=True,
             day=day,
         )
@@ -179,11 +180,13 @@ def reconcile_tithers(church, year: int, month: int) -> Dict:
 # --------------------------------------------------------------------------- #
 # 2. Cálculo da remessa financeira regional (Convenção Paraíba)
 # --------------------------------------------------------------------------- #
-def _sum_category(church, year: int, month: int, category: str) -> Decimal:
-    return FinancialEntry.objects.filter(
-        church=church, date__year=year, date__month=month,
-        category=category,
-    ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+def _sum_category(church, year: int, month: Optional[int], category: str) -> Decimal:
+    qs = FinancialEntry.objects.filter(
+        church=church, date__year=year, category=category,
+    )
+    if month:
+        qs = qs.filter(date__month=month)
+    return qs.aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
 
 
 def calc_regional_remittance(
@@ -1721,7 +1724,7 @@ def build_dre_summary(
         (Decimal(item['value']) for item in expenses_by_nature), Decimal('0.00'),
     )
 
-    return {
+    result = {
         'year': year,
         'month': month,
         'total_revenue': str(total_revenue),
@@ -1730,6 +1733,7 @@ def build_dre_summary(
         'revenue_by_category': revenue_by_category,
         'expenses_by_nature': expenses_by_nature,
     }
+    return result
 
 
 def audit_tither_repeat(church, year: int, month: int) -> Dict:
@@ -1809,9 +1813,14 @@ def prebenda_check(church, year: int, month: int) -> Dict:
 
 
 def build_validation_checks(church, year: int, month: int) -> Dict:
-    """Checklist mensal da rotina contábil IDB (Tesouraria/Liderança)."""
+    """Checklist mensal da rotina contábil IDB (Tesouraria/Liderança).
+
+    Congregações não possuem prebenda pastoral (paga pela Sede): o bloco
+    `prebenda` é omitido e a PREBENDA é removida do resumo por natureza.
+    """
     closing = get_or_create_monthly_closing(church, year, month)[0]
-    return {
+    nature_summary = _expenses_by_nature(church, year, month)
+    checks = {
         'closing': {
             'is_closed': closing.is_closed,
             'previous_balance': str(closing.previous_balance),
@@ -1819,10 +1828,16 @@ def build_validation_checks(church, year: int, month: int) -> Dict:
             'total_exits': str(closing.total_exits),
             'final_balance': str(closing.final_balance),
         },
-        'prebenda': prebenda_check(church, year, month),
         'tither_repeat': audit_tither_repeat(church, year, month),
-        'nature_summary': _expenses_by_nature(church, year, month),
     }
+    if church is not None and church.is_sede():
+        checks['prebenda'] = prebenda_check(church, year, month)
+    else:
+        nature_summary = [
+            n for n in nature_summary if n['nature'] != 'PREBENDA'
+        ]
+    checks['nature_summary'] = nature_summary
+    return checks
 
 
 # --------------------------------------------------------------------------- #

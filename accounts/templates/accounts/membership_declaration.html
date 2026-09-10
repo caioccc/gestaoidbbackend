@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <title>Declaração de Membresia - {{ member.name }}</title>
+    <style>
+        @page { size: A4; margin: 2cm; }
+        body { font-family: Helvetica, Arial, sans-serif; font-size: 12px; color: #111; line-height: 1.6; }
+        .header { text-align: center; border-bottom: 3px double #1f4e79; padding-bottom: 10px; margin-bottom: 28px; }
+        .header .church-name { font-size: 17px; font-weight: bold; color: #1f4e79; text-transform: uppercase; }
+        .header .church-address { font-size: 10.5px; color: #555; margin-top: 4px; }
+        .header .church-contact { font-size: 10.5px; color: #555; }
+        h1 { text-align: center; font-size: 15px; letter-spacing: 1px; margin: 0 0 4px 0; }
+        .protocol { text-align: center; font-size: 11px; color: #555; margin: 0 0 26px 0; }
+        .body { text-align: justify; margin-bottom: 14px; }
+        .place-date { margin-top: 30px; text-align: right; font-size: 11.5px; }
+        .signature { margin-top: 90px; text-align: center; }
+        .signature .line { width: 320px; border-bottom: 1px solid #222; margin: 0 auto 6px auto; }
+        .signature .name { font-weight: bold; }
+        .signature .role { font-size: 11px; color: #333; }
+        .footer { margin-top: 26px; text-align: center; font-size: 9px; color: #999; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="church-name">{{ church.name }}</div>
+        {% if church.street %}
+        <div class="church-address">{{ church.street }}{% if church.number %}, {{ church.number }}{% endif %}{% if church.neighborhood %} - {{ church.neighborhood }}{% endif %}</div>
+        {% endif %}
+        {% if church.city or church.state or church.cep %}
+        <div class="church-address">{{ church.city }}{% if church.state %} - {{ church.state }}{% endif %}{% if church.cep %} / CEP {{ church.cep }}{% endif %}</div>
+        {% endif %}
+        {% if church.phone %}
+        <div class="church-contact">Telefone / WhatsApp: {{ church.phone }}</div>
+        {% endif %}
+    </div>
+
+    <h1>DECLARAÇÃO DE MEMBRESIA</h1>
+    <p class="protocol">Declaração nº {{ protocol }} &mdash; emitida em {{ emitted_date }}</p>
+
+    <p class="body">
+        Declaramos, para os devidos fins, que
+        <strong>{{ member.name }}</strong>{% if member.cpf %}, portador(a) do CPF
+        <strong>{{ member.cpf }}</strong>{% endif %}{% if member.birth_date %}, nascido(a) em
+        <strong>{{ member.birth_date|date:"d/m/Y" }}</strong>{% endif %},
+        {% if member.baptism_date %}
+        é membro(a) em plena comunhão desta igreja desde
+        <strong>{{ member.baptism_date|date:"d/m/Y" }}</strong>{% if entry_label %},
+        tendo ingressado por {{ entry_label|lower }}{% endif %},
+        {% else %}
+        consta regularmente no rol de membros desta igreja ({{ church.name }}),
+        {% endif %}
+        {% if member.card_number %}
+        sob matrícula / carteirinha nº <strong>{{ member.card_number }}</strong>.
+        {% else %}
+        estando devidamente registrado(a) no rol de membros desta igreja.
+        {% endif %}
+    </p>
+
+    <p class="body">
+        A presente declaração é emitida para fins de comprovação de membresia, valendo
+        em todo o território nacional. Qualquer informação adicional poderá ser requerida
+        junto à secretaria desta igreja.
+    </p>
+
+    <div class="place-date">{{ church.city }}/{{ church.state }}, {{ emitted_date }}.</div>
+
+    <div class="signature">
+        <div class="line"></div>
+        <div class="name">{{ signer_name }}</div>
+        <div class="role">{{ signer_role }}</div>
+    </div>
+
+    <div class="footer">Documento gerado pelo Sistema Financeiro Eclésia IDB.</div>
+</body>
+</html>

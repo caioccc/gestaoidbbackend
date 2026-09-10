@@ -1,28 +1,109 @@
 """Views de autenticação, cadastro e moderação (app accounts)."""
+import mimetypes
+import os
+import secrets
+import uuid
+
+from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
+from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
-from rest_framework import permissions, status
+from django.utils import timezone
+from django.utils.text import slugify
+from rest_framework import permissions, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import Church, User as UserModel
 from . import services
-from .serializers import (
-    ChurchProfileSerializer,
-    PendingChurchSerializer,
-    RegisterSerializer,
-    UserSerializer,
+from .models import (
+    AccountingCategory,
+    Church,
+    ChurchMembership,
+    ChurchMinutes,
+    Loan,
+    MaterialItem,
+    Member,
+    MemberDocument,
+    MemberSubmission,
+    MemberTransfer,
+    MinistryArea,
+    StorageLocation,
+    WorshipService,
+    User as UserModel,
 )
+from .permissions import (
+    CanAccessTargetChurch,
+    IsChurchRole,
+    IsSedeManager,
+    IsStaffPermission,
+    accessible_churches,
+    can_manage_church,
+    is_admin,
+)
+from .serializers import (
+    PUBLIC_SUBMISSION_FIELDS,
+    AddChurchUserSerializer,
+    ChurchCreateSerializer,
+    ChurchMembershipSerializer,
+    ChurchMinutesSerializer,
+    ChurchProfileSerializer,
+    ChurchSerializer,
+    ChurchUpdateSerializer,
+    LoanSerializer,
+    MaterialItemSerializer,
+    MemberDocumentSerializer,
+    MemberSerializer,
+    MemberSubmissionSerializer,
+    MemberTransferSerializer,
+    MinistryAreaSerializer,
+    PendingChurchSerializer,
+    PendingCongregationSerializer,
+    PublicMemberCardSerializer,
+    PublicMemberFormSerializer,
+    PublicSubmissionSerializer,
+    RegisterSerializer,
+    StorageLocationSerializer,
+    UserSerializer,
+    WorshipServiceSerializer,
+)
+
+ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Login com payload customizado contendo os dados do usuário/igreja."""
+    """Login com payload customizado contendo os dados do usuário/igreja.
+
+    Bloqueia o login de congregações ainda não aprovadas pela Sede (403).
+    """
 
     def validate(self, attrs):
         data = super().validate(attrs)
         user = self.user
+        church = getattr(user, 'church', None)
+        if church is not None and not church.is_approved:
+            if church.church_type == Church.ChurchType.CONGREGATION:
+                raise PermissionDenied(
+                    'Seu cadastro foi recebido e está aguardando aprovação da Igreja Sede.'
+                )
+            raise PermissionDenied(
+                'Seu cadastro foi recebido e está aguardando aprovação da '
+                'administração da IDB.'
+            )
+        if not user.is_active:
+            raise AuthenticationFailed(
+                'Usuário inativo. Aguarde a ativação da conta.',
+                code='no_active_account',
+            )
+        if user.church is None and not is_admin(user):
+            raise PermissionDenied(
+                'Sua conta não está vinculada a nenhuma igreja.'
+            )
         token = self.get_token(user)
         data['access'] = str(token.access_token)
         data['refresh'] = str(token)
@@ -35,7 +116,7 @@ class LoginView(TokenObtainPairView):
 
 
 class RegisterView(APIView):
-    """Cadastro público da congregação (Church PENDING + User inativo)."""
+    """Cadastro público de uma congregação (aguarda aprovação da Sede)."""
 
     permission_classes = [permissions.AllowAny]
 
@@ -46,12 +127,17 @@ class RegisterView(APIView):
 
         user = result['user']
         church = result['church']
+        is_sede = church.church_type == Church.ChurchType.INDEPENDENT
+        detail = (
+            'Sede cadastrada com sucesso! Aguarde a aprovação da administração '
+            'da IDB para acessar o sistema.'
+            if is_sede
+            else 'Congregação cadastrada com sucesso! '
+                 'Aguarde a aprovação da Igreja Sede para acessar o sistema.'
+        )
         return Response(
             {
-                'detail': (
-                    'Igreja cadastrada com sucesso! '
-                    'Aguarde a aprovação de um moderador para acessar o sistema.'
-                ),
+                'detail': detail,
                 'church_id': church.id,
                 'user': UserSerializer(user).data,
             },
@@ -59,57 +145,138 @@ class RegisterView(APIView):
         )
 
 
-class IsStaffPermission(permissions.BasePermission):
-    """Permite acesso apenas a usuários com is_staff=True."""
+class SwitchChurchView(APIView):
+    """Altera a igreja ativa (user.church) do usuário autenticado.
 
-    def has_permission(self, request, view):
-        return bool(
-            request.user
-            and request.user.is_authenticated
-            and request.user.is_staff
-        )
+    Só permite igrejas operáveis (gateway da troca de contexto): a própria
+    igreja, congregações aprovadas do Pastor de Sede, ou a Sede (nos dois
+    sentidos). Admins trocam para qualquer igreja.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        church_id = request.data.get('church_id')
+        if not church_id:
+            return Response(
+                {'detail': 'Informe church_id.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        church = get_object_or_404(Church, pk=church_id)
+        if not can_manage_church(request.user, church):
+            raise PermissionDenied('Você não pode operar esta igreja.')
+        if (
+            church.church_type == Church.ChurchType.CONGREGATION
+            and not church.is_approved
+        ):
+            return Response(
+                {'detail': 'Congregação ainda não aprovada pela Sede.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        request.user.church = church
+        request.user.save(update_fields=['church'])
+        return Response({
+            'user': UserSerializer(request.user).data,
+            'detail': 'Contexto alterado com sucesso.',
+        })
 
 
-class AdminChurchesView(APIView):
-    """Lista todas as igrejas (todas os status) para o painel admin (apenas staff)."""
+class SearchParentChurchesView(APIView):
+    """Busca assíncrona de Igrejas Independentes (Sedes) no auto-cadastro.
 
-    permission_classes = [IsStaffPermission]
+    Sem `q`: pré-lista 5 sedes. Com `q` (mín. 3 caracteres no frontend):
+    busca por nome/cidade (retorna até 20). Pública: o cadastro em /register
+    é feito por usuários não autenticados.
+    """
+
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        churches = Church.objects.all().order_by('name', 'id')
-        serializer = PendingChurchSerializer(churches, many=True)
-        return Response(serializer.data)
+        q = (request.query_params.get('q') or '').strip()
+        queryset = Church.objects.filter(
+            church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE',
+        ).order_by('name', 'city')
+        if len(q) >= 3:
+            queryset = queryset.filter(
+                Q(name__icontains=q) | Q(city__icontains=q)
+            )[:20]
+        else:
+            queryset = queryset[:5]
+        return Response(ChurchSerializer(queryset, many=True).data)
 
 
-class AdminPendingChurchesView(APIView):
-    """Lista as igrejas pendentes de aprovação (apenas staff)."""
+class PendingCongregationsView(APIView):
+    """Solicitações pendentes de vínculo das congregações (Sede ou ADMIN)."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [permissions.IsAuthenticated, IsSedeManager]
 
     def get(self, request):
-        churches = Church.objects.filter(status='PENDING').order_by('created_at')
-        serializer = PendingChurchSerializer(churches, many=True)
-        return Response(serializer.data)
+        if is_admin(request.user):
+            queryset = Church.objects.filter(
+                status='PENDING',
+                church_type=Church.ChurchType.CONGREGATION,
+            ).order_by('created_at')
+        else:
+            church = request.user.church
+            if church is None or not church.is_sede():
+                raise PermissionDenied(
+                    'Apenas Igrejas Independentes aprovam congregações.'
+                )
+            queryset = Church.objects.filter(
+                status='PENDING',
+                church_type=Church.ChurchType.CONGREGATION,
+                parent_church=church,
+            ).order_by('created_at')
+        return Response(PendingCongregationSerializer(queryset, many=True).data)
 
 
-class AdminApproveChurchView(APIView):
-    """Aprova a igreja e ativa o usuário vinculado (apenas staff)."""
+class ApproveCongregationView(APIView):
+    """Aprova uma congregação pendente: ativa, associa a categoria contábil e
+    ativa o usuário solicitante. Restrita à Sede da congregação ou a ADMIN."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [permissions.IsAuthenticated, IsSedeManager]
 
     @transaction.atomic
     def post(self, request, pk):
         church = get_object_or_404(Church, pk=pk)
-        if church.status != 'PENDING':
+
+        if not is_admin(request.user):
+            user_church = request.user.church
+            if (
+                user_church is None
+                or church.parent_church_id != user_church.id
+            ):
+                raise PermissionDenied(
+                    'Você só pode aprovar congregações da sua Igreja Sede.'
+                )
+        if church.status != 'PENDING' or church.is_approved:
             return Response(
-                {'detail': f'Igreja já está com status {church.status}.'},
+                {'detail': 'Esta solicitação já foi avaliada.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        church.status = 'ACTIVE'
-        church.save()
+        accounting_category = (
+            request.data.get('accounting_category') or ''
+        ).strip()
+        if not accounting_category:
+            return Response(
+                {'detail': 'Informe a categoria contábil do repasse.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        user = getattr(church, 'user_account', None)
+        # Categorias personalizadas (ex.: CONGREGACAO_ABC) são persistidas no
+        # catálogo para passarem a existir como opção para a Sede.
+        accounting_category = services.persist_accounting_category(
+            accounting_category
+        )
+
+        church.status = 'ACTIVE'
+        church.is_approved = True
+        church.accounting_category = accounting_category
+        church.save(update_fields=['status', 'is_approved', 'accounting_category'])
+
+        user = church.responsible_user
         if user is not None:
             user.is_active = True
             user.save(update_fields=['is_active'])
@@ -123,7 +290,1430 @@ class AdminApproveChurchView(APIView):
         try:
             from finance.services import seed_default_calendar_events
             seed_default_calendar_events(church)
-        except Exception:
+        except Exception:  # noqa: BLE001
+            pass
+
+        return Response({
+            'detail': 'Congregação aprovada e usuário ativado com sucesso.',
+            'church': PendingCongregationSerializer(church).data,
+        })
+
+
+class RejectCongregationView(APIView):
+    """Rejeita uma congregação pendente (Sede da congregação ou ADMIN)."""
+
+    permission_classes = [permissions.IsAuthenticated, IsSedeManager]
+
+    def post(self, request, pk):
+        church = get_object_or_404(Church, pk=pk)
+
+        if not is_admin(request.user):
+            user_church = request.user.church
+            if (
+                user_church is None
+                or church.parent_church_id != user_church.id
+            ):
+                raise PermissionDenied(
+                    'Você só pode rejeitar congregações da sua Igreja Sede.'
+                )
+        if church.status != 'PENDING' or church.is_approved:
+            return Response(
+                {'detail': 'Esta solicitação já foi avaliada.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        church.status = 'REJECTED'
+        church.save(update_fields=['status'])
+        user = church.responsible_user
+        if user is not None:
+            services.send_rejection_notification(
+                email=user.email,
+                church_name=church.name,
+                account_name=user.name,
+            )
+        return Response({
+            'detail': 'Solicitação rejeitada.',
+            'church': PendingCongregationSerializer(church).data,
+        })
+
+
+class ChurchViewSet(viewsets.ModelViewSet):
+    """Painel de Igrejas da Sede (ou visão nacional do ADMIN).
+
+    - LIST: igrejas acessíveis (sede + congregações; ADMIN vê tudo).
+    - CREATE: admin pode criar tanto Sede (INDEPENDENT) quanto Congregação;
+      sedes pastorais só criam Congregação vinculada à sua Sede. Criação
+      nasce aprovada (is_approved=True, status ACTIVE) com Categoria Contábil
+      obrigatória; opcionalmente vincula um responsável.
+    - UPDATE/PATCH: edita dados gerais e permite reclassificar a Categoria
+      Contábil vinculada.
+    - DESTROY: remove a igreja em cascata (dados financeiros, dízimos,
+      fechamentos, validações, eventos de calendário, membros, áreas de
+      atuação e vínculos de usuários). Excluir uma Sede (apenas ADMIN)
+      remove também todas as congregações relacionadas e seus dados.
+    """
+
+    serializer_class = ChurchSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_permissions(self):
+        if self.action == 'create':
+            # Criação de congregação é restrita a Pastor de Sede (ou ADMIN).
+            return [IsSedeManager()]
+        return [permissions.IsAuthenticated()]
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return ChurchCreateSerializer
+        if self.action in ('update', 'partial_update'):
+            return ChurchUpdateSerializer
+        return ChurchSerializer
+
+    def get_queryset(self):
+        return accessible_churches(self.request.user)
+
+    def _assert_sede_manager(self):
+        user = self.request.user
+        if is_admin(user):
+            return None
+        if (
+            user.church is not None
+            and user.church.is_sede()
+            and user.get_role_for(user.church) == ChurchMembership.Role.PASTOR
+        ):
+            return user.church
+        raise PermissionDenied(
+            'Apenas Pastores de Igreja Independente ou Administradores '
+            'podem gerenciar igrejas.'
+        )
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        user = self.request.user
+        church_type = data.get('church_type', Church.ChurchType.CONGREGATION)
+
+        if church_type == Church.ChurchType.INDEPENDENT:
+            # Só admins podem criar Igrejas Sede.
+            if not is_admin(user):
+                raise PermissionDenied(
+                    'Apenas administradores podem criar Igrejas Sede.'
+                )
+            parent = None
+        else:
+            # Congregação: validação de parent_church.
+            if is_admin(user):
+                parent = data.get('parent_church')
+                if parent is None or not parent.is_sede():
+                    raise ValidationError(
+                        {'parent_church': 'Informe a Igreja Sede para a congregação.'}
+                    )
+                if parent.status != 'ACTIVE':
+                    raise ValidationError(
+                        {'parent_church': 'A Igreja Sede informada não está ativa.'}
+                    )
+            else:
+                parent = self._assert_sede_manager()
+
+        responsible = data.pop('responsible_user', None)
+        church = serializer.save(
+            church_type=church_type,
+            parent_church=parent,
+            status='ACTIVE',
+            is_approved=True,
+        )
+
+        if responsible:
+            if 'user_id' in responsible:
+                u = UserModel.objects.filter(
+                    pk=responsible['user_id']
+                ).first()
+                if u is not None:
+                    services.link_church_user(
+                        church=church,
+                        user=u,
+                        role=responsible['role'],
+                    )
+            else:
+                services.create_church_user(
+                    church=church,
+                    email=responsible['email'],
+                    name=responsible.get('name', ''),
+                    role=responsible['role'],
+                )
+
+        # Semeia os eventos padrão do calendário financeiro, como na aprovação.
+        try:
+            from finance.services import seed_default_calendar_events
+            seed_default_calendar_events(church)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def perform_update(self, serializer):
+        responsible = serializer.validated_data.pop('responsible_user', None)
+        if responsible is not None:
+            # Troca de responsável é operação de gestão: Sede/ADMIN apenas.
+            self._assert_sede_manager()
+        church = serializer.save()
+        if responsible:
+            user = UserModel.objects.filter(pk=responsible['user_id']).first()
+            if user is not None:
+                self._reassign_responsible(church, user, responsible['role'])
+
+    def _reassign_responsible(self, church, user, role):
+        """Troca o responsável da congregação.
+
+        Vincula (ou atualiza o papel de) o usuário escolhido e remove o
+        vínculo do responsável anterior — mantendo o modelo de um único
+        responsável por congregação.
+        """
+        previous = church.responsible_user
+        services.link_church_user(church=church, user=user, role=role)
+        if previous is not None and previous.id != user.id:
+            membership = ChurchMembership.objects.filter(
+                church=church, user=previous,
+            ).first()
+            if membership is not None:
+                self._unlink_church_user(church, previous, membership)
+
+    def _unlink_church_user(self, church, user, membership):
+        """Remove o vínculo de um usuário e re-aponta User.church se preciso."""
+        membership.delete()
+        if user.church_id == church.id and user.church_memberships.exists():
+            first = user.church_memberships.first()
+            user.church = first.church
+        user.save(update_fields=['church'])
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        # Exclusão de Sede é destrutiva (varre todas as congregações e dados):
+        # restrita a administradores. Congregações seguem excluíveis por
+        # Pastor de Sede/ADMIN.
+        if instance.is_sede() and not is_admin(request.user):
+            raise PermissionDenied(
+                'Apenas administradores podem excluir uma Igreja Sede.'
+            )
+        with transaction.atomic():
+            instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ChurchUsersView(APIView):
+    """Usuários (Pastor(a)/Tesoureiro(a)/Secretário(a)) da igreja da rota.
+
+    GET: leitura para PASTOR e SECRETARIA (a Secretária apenas vê a lista).
+    Criação (POST) continua restrita a PASTOR/ADMIN.
+    """
+
+    permission_classes = [IsChurchRole('PASTOR')]
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [IsChurchRole('PASTOR', 'SECRETARIA')()]
+        return super().get_permissions()
+
+    def _church(self, request):
+        church = get_object_or_404(Church, pk=self.kwargs['church_pk'])
+        if not can_manage_church(request.user, church):
+            raise PermissionDenied('Você não pode gerenciar usuários desta igreja.')
+        return church
+
+    def get(self, request, church_pk):
+        church = self._church(request)
+        memberships = (
+            ChurchMembership.objects.filter(church=church)
+            .select_related('user')
+            .order_by('user__name')
+        )
+        return Response(ChurchMembershipSerializer(memberships, many=True).data)
+
+    @transaction.atomic
+    def post(self, request, church_pk):
+        church = self._church(request)
+        serializer = AddChurchUserSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        email = serializer.validated_data['email'].lower()
+        role = serializer.validated_data['role']
+        name = serializer.validated_data.get('name', '')
+        password = serializer.validated_data['password']
+
+        user = UserModel.objects.filter(email__iexact=email).first()
+        if user is None:
+            user = UserModel.objects.create_user(
+                email=email,
+                password=password,
+                name=name,
+                is_active=True,
+            )
+        else:
+            # A provisão pelo gestor redefine a senha do usuário já existente.
+            user.set_password(password)
+            user.save(update_fields=['password'])
+
+        membership, _created = ChurchMembership.objects.get_or_create(
+            user=user,
+            church=church,
+            defaults={'role': role},
+        )
+        if not _created and membership.role != role:
+            membership.role = role
+            membership.save(update_fields=['role'])
+
+        if user.church is None:
+            user.church = church
+            user.is_active = True
+            user.save(update_fields=['church', 'is_active'])
+
+        return Response(
+            ChurchMembershipSerializer(membership).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class ChurchUserDetailView(APIView):
+    """Edita o papel ou remove o vínculo de um usuário na igreja (PASTOR/ADMIN)."""
+
+    permission_classes = [IsChurchRole('PASTOR')]
+
+    def _target(self, request, church_pk, membership_pk):
+        church = get_object_or_404(Church, pk=church_pk)
+        if not can_manage_church(request.user, church):
+            raise PermissionDenied('Você não pode gerenciar usuários desta igreja.')
+        membership = get_object_or_404(
+            ChurchMembership, pk=membership_pk, church=church,
+        )
+        return membership
+
+    def patch(self, request, church_pk, membership_pk):
+        membership = self._target(request, church_pk, membership_pk)
+        role = request.data.get('role')
+        if role not in ChurchMembership.Role.values:
+            return Response(
+                {'detail': 'Papel inválido.'}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        membership.role = role
+        membership.save(update_fields=['role'])
+        return Response(ChurchMembershipSerializer(membership).data)
+
+    def delete(self, request, church_pk, membership_pk):
+        membership = self._target(request, church_pk, membership_pk)
+        user = membership.user
+        membership.delete()
+        if user.church_id == membership.church_id and user.church_memberships.exists():
+            first = user.church_memberships.first()
+            user.church = first.church
+        user.save(update_fields=['church'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def apply_member_filters(qs, params):
+    """Filtros combinados para o diretório de membros (query params):
+    search, status, area, education, marital_status, church_entry, age_min,
+    age_max. Parâmetros inválidos/desconhecidos são ignorados com segurança."""
+    from datetime import date
+
+    search = params.get('search', '').strip()
+    if search:
+        query = Q()
+        for term in search.split():
+            query &= (
+                Q(name__icontains=term)
+                | Q(phone__icontains=term)
+                | Q(email__icontains=term)
+                | Q(card_number__icontains=term)
+            )
+        qs = qs.filter(query)
+
+    status = params.get('status')
+    if status in Member.Status.values:
+        qs = qs.filter(status=status)
+
+    area = params.get('area')
+    if area:
+        qs = qs.filter(ministry_areas__id=area).distinct()
+
+    education = params.get('education')
+    if education in Member.EducationLevel.values:
+        qs = qs.filter(education_level=education)
+
+    marital_status = params.get('marital_status')
+    if marital_status in Member.MaritalStatus.values:
+        qs = qs.filter(marital_status=marital_status)
+
+    church_entry = params.get('church_entry')
+    if church_entry in Member.ChurchEntry.values:
+        qs = qs.filter(church_entry=church_entry)
+
+    today = date.today()
+    try:
+        if params.get('age_min'):
+            cutoff = date(today.year - int(params['age_min']), today.month, today.day)
+            qs = qs.filter(birth_date__lte=cutoff)
+        if params.get('age_max'):
+            cutoff = date(today.year - int(params['age_max']) - 1, today.month, today.day)
+            qs = qs.filter(birth_date__gte=cutoff)
+    except ValueError:
+        pass
+    return qs
+
+
+class MemberSelfViewSet(viewsets.ModelViewSet):
+    """CRUD de membros da igreja ativa (Secretaria/Pastor/Admin). Sem dados
+    financeiros."""
+
+    serializer_class = MemberSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return Member.objects.none()
+        return apply_member_filters(
+            Member.objects.filter(church=church).order_by('name'),
+            self.request.query_params,
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+    @action(detail=True, methods=['get'], url_path='public-link')
+    def public_link(self, request, pk=None):
+        member = self.get_object()
+        member.ensure_public_hash()
+        member.save(update_fields=['public_hash', 'updated_at'])
+        return Response({
+            'id': member.id,
+            'public_url': f'{settings.FRONTEND_URL}/cartao/{member.public_hash}',
+        })
+
+    @action(detail=True, methods=['post'], url_path='public-link/regenerate')
+    def public_link_regenerate(self, request, pk=None):
+        member = self.get_object()
+        member.regenerate_public_hash()
+        return Response({
+            'id': member.id,
+            'public_url': f'{settings.FRONTEND_URL}/cartao/{member.public_hash}',
+        })
+
+
+class MemberImportInspectView(APIView):
+    """Inspeciona a planilha do rol e sugere o mapeamento de colunas."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def post(self, request):
+        file = request.FILES.get('file')
+        if file is None:
+            raise ValidationError({'file': 'Envie um arquivo.'})
+        if request.user.church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        try:
+            inspection = services.inspect_members_sheet(file)
+        except Exception:  # noqa: BLE001
+            raise ValidationError(
+                {'file': 'Não foi possível ler a planilha. Use .xlsx, .xls ou .csv.'}
+            )
+        return Response(inspection)
+
+
+class MemberImportView(APIView):
+    """Importa o rol de membros (dry_run=1 apenas simula, sem gravar)."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def post(self, request):
+        file = request.FILES.get('file')
+        if file is None:
+            raise ValidationError({'file': 'Envie um arquivo.'})
+        if request.user.church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        dry_run = str(request.data.get('dry_run', '')).lower() in ('1', 'true', 'yes')
+        mapping_raw = request.data.get('mapping')
+        mapping = {}
+        if mapping_raw:
+            if isinstance(mapping_raw, str):
+                import json  # noqa: PLC0415
+                try:
+                    mapping = json.loads(mapping_raw)
+                except json.JSONDecodeError:
+                    raise ValidationError({'mapping': 'Mapeamento inválido.'})
+            else:
+                mapping = dict(mapping_raw)
+        result = services.import_member_rows(
+            request.user.church,
+            file,
+            mapping,
+            dry_run=dry_run,
+        )
+        if result['errors'] and not dry_run:
+            raise ValidationError({'errors': result['errors']})
+        return Response(result)
+
+
+class MinistryAreaViewSet(viewsets.ModelViewSet):
+    """CRUD das áreas de atuação da igreja ativa (Secretaria/Pastor/Admin)."""
+
+    serializer_class = MinistryAreaSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return MinistryArea.objects.none()
+        return MinistryArea.objects.filter(church=church).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+
+class StorageLocationViewSet(viewsets.ModelViewSet):
+    """CRUD dos locais de armazenamento da igreja ativa."""
+
+    serializer_class = StorageLocationSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return StorageLocation.objects.none()
+        return StorageLocation.objects.filter(church=church).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+
+class MaterialItemViewSet(viewsets.ModelViewSet):
+    """CRUD dos materiais/equipamentos do inventário da igreja ativa."""
+
+    serializer_class = MaterialItemSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return MaterialItem.objects.none()
+        return MaterialItem.objects.filter(church=church).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+    def perform_destroy(self, instance):
+        if instance.loans.exists():
+            raise ValidationError(
+                'O material possui empréstimos registrados e não pode ser excluído.'
+            )
+        instance.delete()
+
+
+class LoanViewSet(viewsets.ModelViewSet):
+    """CRUD dos empréstimos de materiais/equipamentos da igreja ativa."""
+
+    serializer_class = LoanSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return Loan.objects.none()
+        return Loan.objects.filter(church=church).order_by('-borrowed_at', '-id')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church, created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+    @action(detail=True, methods=['post'], url_path='return')
+    def return_item(self, request, pk=None):
+        """Registra a baixa da devolução do empréstimo."""
+        loan = self.get_object()
+        if loan.returned_at is not None:
+            return Response(
+                {'detail': 'Este empréstimo já foi devolvido.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        loan.returned_at = timezone.now()
+        loan.returned_by = request.user
+        loan.save(update_fields=['returned_at', 'returned_by', 'updated_at'])
+        return Response(self.get_serializer(loan).data)
+
+
+class WorshipServiceViewSet(viewsets.ModelViewSet):
+    """Registro de cultos da igreja ativa (livro de cultos).
+
+    Disponível a todos os perfis com igreja ativa (sem restrição de papel).
+    """
+
+    serializer_class = WorshipServiceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return WorshipService.objects.none()
+        return WorshipService.objects.filter(church=church).order_by('-date', '-id')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church, created_by=self.request.user)
+
+
+class ChurchMinutesViewSet(viewsets.ModelViewSet):
+    """Gestão de atas da igreja ativa, com PDF opcional e link público.
+
+    Disponível a todos os perfis com igreja ativa (sem restrição de papel).
+    """
+
+    serializer_class = ChurchMinutesSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return ChurchMinutes.objects.none()
+        return ChurchMinutes.objects.filter(church=church).order_by('-meeting_date', '-id')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church, created_by=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='regenerate-hash')
+    def regenerate_hash(self, request, pk=None):
+        """Regenera o hash público da ata (invalida a URL anterior)."""
+        minutes = self.get_object()
+        minutes.regenerate_public_hash()
+        return Response(self.get_serializer(minutes).data)
+
+    @action(detail=True, methods=['get'], url_path='pdf')
+    def download_pdf(self, request, pk=None):
+        """Download autenticado do PDF da ata."""
+        minutes = self.get_object()
+        if not minutes.pdf:
+            return Response(
+                {'detail': 'Esta ata não possui PDF anexado.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return FileResponse(
+            minutes.pdf.open('rb'),
+            as_attachment=True,
+            filename=os.path.basename(minutes.pdf.name or 'ata.pdf'),
+        )
+
+
+class PublicMinutesView(APIView):
+    """Consulta pública de uma ata pelo hash (sem autenticação)."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, hash):
+        try:
+            minutes = ChurchMinutes.objects.get(public_hash=hash)
+        except ChurchMinutes.DoesNotExist:
+            raise NotFound('Ata não encontrada.')
+        return Response({
+            'id': minutes.id,
+            'title': minutes.title,
+            'meeting_type': minutes.meeting_type,
+            'meeting_type_display': minutes.get_meeting_type_display(),
+            'meeting_date': minutes.meeting_date.isoformat(),
+            'location': minutes.location,
+            'recorder': minutes.recorder,
+            'participants': minutes.participants,
+            'content': minutes.content,
+            'has_pdf': bool(minutes.pdf),
+            'church': {
+                'id': minutes.church.id,
+                'name': minutes.church.name,
+                'city': minutes.church.city,
+                'state': minutes.church.state,
+            },
+            'created_at': minutes.created_at.isoformat(),
+        })
+
+
+class PublicMinutesPdfView(APIView):
+    """Download público do PDF da ata (via hash)."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, hash):
+        try:
+            minutes = ChurchMinutes.objects.get(public_hash=hash)
+        except ChurchMinutes.DoesNotExist:
+            raise NotFound('Ata não encontrada.')
+        if not minutes.pdf:
+            raise NotFound('Ata não encontrada.')
+        return FileResponse(
+            minutes.pdf.open('rb'),
+            as_attachment=True,
+            filename=os.path.basename(minutes.pdf.name or 'ata.pdf'),
+        )
+
+
+class ChurchMembersViewSet(viewsets.ModelViewSet):
+    """CRUD de membros de uma igreja específica da rota (Secretaria/Pastor/Admin)."""
+
+    serializer_class = MemberSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def _church(self):
+        church = get_object_or_404(Church, pk=self.kwargs['church_pk'])
+        if not can_manage_church(self.request.user, church):
+            raise PermissionDenied('Você não pode acessar os membros desta igreja.')
+        return church
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self._church()
+        return context
+
+    def get_queryset(self):
+        return apply_member_filters(
+            Member.objects.filter(church=self._church()).order_by('name'),
+            self.request.query_params,
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(church=self._church())
+
+
+class ChurchMinistryAreasViewSet(viewsets.ModelViewSet):
+    """CRUD das áreas de atuação de uma igreja específica da rota
+    (Secretaria/Pastor/Admin). Espelha ChurchMembersViewSet: a igreja da rota
+    é a dona das áreas, não a igreja ativa do usuário."""
+
+    serializer_class = MinistryAreaSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def _church(self):
+        church = get_object_or_404(Church, pk=self.kwargs['church_pk'])
+        if not can_manage_church(self.request.user, church):
+            raise PermissionDenied('Você não pode acessar as áreas desta igreja.')
+        return church
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self._church()
+        return context
+
+    def get_queryset(self):
+        return MinistryArea.objects.filter(church=self._church()).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self._church())
+
+
+class AccountingCategoriesView(APIView):
+    """Categorias contábeis disponíveis para o repasse de congregações.
+
+    Mescla as categorias padrão do módulo financeiro com as categorias
+    personalizadas já persistidas pela Sede (AccountingCategory) — que passam a
+    existir como opção após serem criadas na aprovação ou na edição da
+    congregação. Um texto livre ("custom_allowed") também é aceito.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from finance.models import DepartmentCategory
+
+        standard = [{'value': c.value, 'label': c.label} for c in DepartmentCategory]
+        known = {c['value'] for c in standard}
+        custom = [
+            {'value': c.key, 'label': c.label}
+            for c in AccountingCategory.objects.exclude(key__in=known)
+        ]
+        return Response({
+            'categories': standard + custom,
+            'custom_allowed': True,
+        })
+
+
+class TransferTargetChurchesView(APIView):
+    """Busca igrejas ativas como destino de transferência (exclui a própria)."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            return Response([])
+        q = (request.query_params.get('q') or '').strip()
+        qs = Church.objects.filter(status='ACTIVE').exclude(pk=church.id)
+        if q:
+            qs = qs.filter(name__icontains=q)
+        qs = qs.order_by('name')[:15]
+        return Response([
+            {'id': c.id, 'name': c.name, 'city': c.city, 'state': c.state}
+            for c in qs
+        ])
+
+
+class MemberTransferView(APIView):
+    """Transferências emitidas pela igreja ativa (lista) e emissão."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def _church(self, request):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        return church
+
+    def get(self, request):
+        church = self._church(request)
+        queryset = MemberTransfer.objects.filter(source_church=church)
+        return Response(MemberTransferSerializer(queryset, many=True).data)
+
+    def post(self, request):
+        church = self._church(request)
+        member_id = request.data.get('member_id')
+        target_id = request.data.get('target_church_id')
+        if member_id is None or target_id is None:
+            raise ValidationError({
+                'detail': 'Envie member_id e target_church_id.',
+            })
+        member = get_object_or_404(Member, pk=member_id, church=church)
+        target = get_object_or_404(Church, pk=target_id)
+        transfer = services.issue_member_transfer(church, member, target)
+        return Response(
+            MemberTransferSerializer(transfer).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class IncomingMemberTransfersView(APIView):
+    """Transferências recebidas pela igreja ativa (entrada)."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        queryset = MemberTransfer.objects.filter(target_church=church)
+        return Response(MemberTransferSerializer(queryset, many=True).data)
+
+
+class ReceiveMemberTransferView(APIView):
+    """Recebe uma transferência pendente e cria o membro no rol."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def post(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        transfer = get_object_or_404(
+            MemberTransfer, pk=pk, target_church=church,
+        )
+        services.receive_member_transfer(church, transfer, request.user)
+        return Response(MemberTransferSerializer(transfer).data)
+
+
+class CancelMemberTransferView(APIView):
+    """Cancela uma transferência pendente (somente a igreja de origem)."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def post(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        transfer = get_object_or_404(
+            MemberTransfer, pk=pk, source_church=church,
+        )
+        services.cancel_member_transfer(church, transfer, request.user)
+        return Response(MemberTransferSerializer(transfer).data)
+
+
+class MemberDeclarationView(APIView):
+    """Gera o PDF da declaração/comprovante de membresia de um membro.
+
+    Somente o membro deve pertencer à igreja ativa do usuário
+    (Secretaria/Pastor/Admin).
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        member = get_object_or_404(Member, pk=pk, church=church)
+        signer_name = (
+            church.pastor_name
+            or request.user.name
+            or request.user.email
+        )
+        pdf = services.build_membership_declaration_pdf(
+            member, signer_name=signer_name, signer_role='Pastor Responsável',
+        )
+        filename = f'declaracao-membresia-{slugify(member.name)[:40]}.pdf'
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
+class MemberDocumentsView(APIView):
+    """Listagem e upload de documentos de um membro da igreja ativa."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def _church(self, request):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        return church
+
+    def get(self, request, pk):
+        church = self._church(request)
+        member = get_object_or_404(Member, pk=pk, church=church)
+        docs = member.documents.all()
+        return Response(MemberDocumentSerializer(docs, many=True).data)
+
+    def post(self, request, pk):
+        church = self._church(request)
+        member = get_object_or_404(Member, pk=pk, church=church)
+        upload = request.FILES.get('file')
+        doc_type = (request.data.get('doc_type') or '').strip()
+        notes = (request.data.get('notes') or '').strip()
+        if upload is None:
+            raise ValidationError({'file': 'Envie o arquivo (campo file).'})
+        if doc_type not in MemberDocument.DocType.values:
+            raise ValidationError({'doc_type': 'Tipo de documento inválido.'})
+        ext = os.path.splitext(upload.name)[1].lower()
+        if ext not in ALLOWED_DOC_EXTENSIONS:
+            raise ValidationError({
+                'file': 'Formato não permitido (use PDF, PNG ou JPG).',
+            })
+        doc = MemberDocument.objects.create(
+            member=member,
+            doc_type=doc_type,
+            file=upload,
+            notes=notes,
+            uploaded_by=request.user,
+        )
+        return Response(
+            MemberDocumentSerializer(doc).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class MemberDocumentDetailView(APIView):
+    """Exclusão de um documento (restrito à igreja do membro)."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def delete(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        doc = get_object_or_404(
+            MemberDocument, pk=pk, member__church=church,
+        )
+        doc.file.delete(save=False)
+        doc.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MemberDocumentDownloadView(APIView):
+    """Download autenticado de um documento da igreja ativa."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        doc = get_object_or_404(
+            MemberDocument, pk=pk, member__church=church,
+        )
+        try:
+            content = doc.file.read()
+        except Exception:  # noqa: BLE001
+            raise ValidationError({'detail': 'Arquivo não encontrado.'})
+        content_type = (
+            mimetypes.guess_type(doc.file.name)[0]
+            or 'application/octet-stream'
+        )
+        response = HttpResponse(content, content_type=content_type)
+        response['Content-Disposition'] = (
+            f'attachment; filename="{os.path.basename(doc.file.name)}"'
+        )
+        return response
+
+
+class MemberReportPdfView(APIView):
+    """PDF do rol de membros da igreja ativa (filtro por status).
+
+    Gera um relatório portátil com todos os membros do rol (ativos por
+    padrão; `?status=INACTIVE` para inativos), no padrão xhtml2pdf.
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            raise PermissionDenied('Você não tem uma igreja ativa.')
+        status_filter = (request.query_params.get('status') or '').strip().upper()
+        qs = Member.objects.filter(church=church)
+        if status_filter in {Member.Status.ACTIVE, Member.Status.INACTIVE}:
+            qs = qs.filter(status=status_filter)
+        else:
+            qs = qs.filter(status=Member.Status.ACTIVE)
+        qs = qs.order_by('name')
+        filename = f'rol-membros-{slugify(church.name)[:40]}.pdf'
+        pdf = services.build_members_report_pdf(church, qs)
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
+class CalendarPublicLinkView(APIView):
+    """URL pública (hash) do calendário geral da igreja (PASTOR/SECRETARIA).
+
+    GET retorna o hash atual, gerando-o caso não exista ainda.
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Você não tem uma igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hash_value = church.ensure_public_hash()
+        church.save(update_fields=['calendar_public_hash'])
+        return Response({
+            'hash': hash_value,
+            'url': f'/calendario/{hash_value}',
+        })
+
+
+class CalendarPublicLinkRegenerateView(APIView):
+    """Regenera o hash público do calendário (PASTOR/SECRETARIA).
+
+    Regenerar invalida a URL antiga que já estiver divulgada.
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def post(self, request):
+        church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Você não tem uma igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        church.calendar_public_hash = uuid.uuid4().hex
+        church.save(update_fields=['calendar_public_hash'])
+        return Response({
+            'hash': church.calendar_public_hash,
+            'url': f'/calendario/{church.calendar_public_hash}',
+        })
+
+
+class ChurchMemberFormLinkView(APIView):
+    """Hash do formulário público de candidatos da igreja (PASTOR/SECRETARIA).
+
+    GET  → retorna o link genérico `/formulario/{hash}` (gera se preciso).
+    POST → regenera o hash (invalida o link antigo divulgado).
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Você não tem uma igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hash_value = church.ensure_member_form_hash()
+        church.save(update_fields=['member_form_hash'])
+        return Response({
+            'hash': hash_value,
+            'url': f'/formulario/{hash_value}',
+        })
+
+    def post(self, request):
+        church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Você não tem uma igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        church.member_form_hash = secrets.token_urlsafe(32)
+        church.save(update_fields=['member_form_hash'])
+        return Response({
+            'hash': church.member_form_hash,
+            'url': f'/formulario/{church.member_form_hash}',
+        })
+
+
+class PublicMemberCardView(APIView):
+    """Cartão público de um membro pelo hash (https://.../cartao/{hash})."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, hash):
+        try:
+            member = Member.objects.select_related('church').get(
+                public_hash=hash,
+                status=Member.Status.ACTIVE,
+            )
+        except Member.DoesNotExist:
+            raise NotFound('Cartão não encontrado.')
+        return Response(PublicMemberCardSerializer(member).data)
+
+
+class PublicMemberFormView(APIView):
+    """Formulário público de membro (https://.../formulario/{hash}).
+
+    O hash pode ser:
+    - o `public_hash` de um membro  → formulário do tipo `member` (atualização);
+    - o `member_form_hash` da igreja → formulário do tipo `candidate` (genérico).
+
+    GET  → metadados (nome da igreja, tipo, e, se for membro, nome/cartão).
+    POST → valida e cria a pendência de revisão (`MemberSubmission`).
+    """
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def _resolve(self, hash):
+        member = Member.objects.select_related('church').filter(public_hash=hash).first()
+        if member is not None:
+            return {
+                'type': 'member',
+                'church': member.church,
+                'member': member,
+            }
+        church = Church.objects.filter(member_form_hash=hash).first()
+        if church is not None:
+            return {'type': 'candidate', 'church': church, 'member': None}
+        return None
+
+    def get(self, request, hash):
+        resolved = self._resolve(hash)
+        if resolved is None:
+            raise NotFound('Formulário não encontrado.')
+        church = resolved['church']
+        meta = {
+            'type': resolved['type'],
+            'church_name': church.name,
+            'church_city': church.city,
+            'church_state': church.state,
+            'church_phone': church.phone,
+        }
+        if resolved['member'] is not None:
+            meta['member_name'] = resolved['member'].name
+            meta['card_number'] = resolved['member'].card_number or ''
+        return Response(PublicMemberFormSerializer(meta).data)
+
+    def post(self, request, hash):
+        resolved = self._resolve(hash)
+        if resolved is None:
+            raise NotFound('Formulário não encontrado.')
+        serializer = PublicSubmissionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        submission = MemberSubmission.objects.create(
+            church=resolved['church'],
+            member=resolved['member'],
+            source_hash=hash,
+            data=serializer.validated_data['data'],
+        )
+        return Response({
+            'id': submission.id,
+            'status': submission.status,
+        }, status=status.HTTP_201_CREATED)
+
+
+class MemberSubmissionsView(APIView):
+    """Lista as submissões (pendências de revisão) da igreja ativa.
+
+    PASTOR/SECRETARIA. `?status=PENDING|APPROVED|REJECTED` filtra.
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            return Response([])
+        qs = MemberSubmission.objects.filter(church=church).select_related('member')
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return Response(MemberSubmissionSerializer(qs, many=True).data)
+
+
+class MemberSubmissionReviewView(APIView):
+    """Aprova ou rejeita uma submissão (aplica os dados ou arquiva)."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def post(self, request, pk):
+        submission = MemberSubmission.objects.filter(
+            pk=pk, church=request.user.church,
+        ).first()
+        if submission is None:
+            raise NotFound('Submissão não encontrada.')
+        if submission.status != MemberSubmission.Status.PENDING:
+            raise ValidationError(
+                {'detail': 'Esta submissão já foi revisada.'}
+            )
+        action = request.data.get('action', '')
+        notes = (request.data.get('notes') or '').strip()
+        if action == 'approve':
+            self._apply(submission, request.user)
+        elif action == 'reject':
+            submission.notes = notes
+        else:
+            raise ValidationError(
+                {'detail': "Informe 'action' = 'approve' ou 'reject'."}
+            )
+        submission.status = (
+            MemberSubmission.Status.APPROVED
+            if action == 'approve'
+            else MemberSubmission.Status.REJECTED
+        )
+        submission.reviewed_at = timezone.now()
+        submission.reviewed_by = request.user
+        submission.save()
+        return Response(MemberSubmissionSerializer(submission).data)
+
+    def _apply(self, submission, reviewer):
+        """Aplica os dados da submissão: atualiza o membro ou cria o candidato."""
+        data = dict(submission.data)
+        for date_field in ('birth_date', 'marriage_date'):
+            if data.get(date_field) in (None, ''):
+                data[date_field] = None
+        if submission.member is not None:
+            for field in PUBLIC_SUBMISSION_FIELDS:
+                if field in data and field not in ('name',):
+                    setattr(submission.member, field, data[field])
+            if data.get('name'):
+                submission.member.name = data['name'].strip()
+            submission.member.save()
+            submission.notes = 'Dados aplicados ao membro existente.'
+            return
+        submission.member = Member.objects.create(
+            church=submission.church,
+            status=Member.Status.ACTIVE,
+            **{k: v for k, v in data.items() if k in (
+                'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+                'born_in_city', 'born_in_state', 'profession',
+                'education_level', 'marital_status', 'marriage_date',
+                'father_name', 'mother_name', 'church_entry',
+                'church_entry_other', 'street', 'number', 'complement',
+                'neighborhood', 'city', 'state', 'cep', 'notes',
+            )},
+        )
+        submission.member.card_number = services.next_member_card_number(submission.church)
+        submission.member.save(update_fields=['card_number'])
+        submission.notes = 'Candidato criado a partir do formulário público.'
+
+
+class BirthdayMembersView(APIView):
+    """Aniversariantes da igreja ativa por mês.
+
+    Por padrão retorna os membros ATIVOS do mês (1-12) ordenados pelo dia,
+    com a idade calculada. `?status=INACTIVE` filtra inativos; `?status=ALL`
+    inclui ambos. Usuários sem igreja recebem lista vazia.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from django.utils import timezone  # noqa: PLC0415
+
+        church = request.user.church
+        if church is None:
+            return Response([])
+
+        month_param = request.query_params.get('month')
+        if month_param is None:
+            month = timezone.localdate().month
+        else:
+            try:
+                month = int(month_param)
+            except (TypeError, ValueError):
+                raise ValidationError({'month': 'Mês inválido (1 a 12).'})
+            if not 1 <= month <= 12:
+                raise ValidationError({'month': 'Mês inválido (1 a 12).'})
+
+        status_filter = (request.query_params.get('status') or '').strip().upper()
+        qs = Member.objects.filter(
+            church=church, birth_date__isnull=False, birth_date__month=month,
+        )
+        if status_filter in {Member.Status.ACTIVE, Member.Status.INACTIVE}:
+            qs = qs.filter(status=status_filter)
+        elif status_filter and status_filter != 'ALL':
+            raise ValidationError({'status': 'Status inválido.'})
+        elif not status_filter:
+            qs = qs.filter(status=Member.Status.ACTIVE)
+
+        qs = qs.order_by('birth_date__day', 'name')
+        return Response([
+            {
+                'id': m.id,
+                'name': m.name,
+                'birth_date': m.birth_date.isoformat(),
+                'day': m.birth_date.day,
+                'age': services.member_age(m.birth_date),
+                'phone': m.phone,
+                'email': m.email,
+            }
+            for m in qs
+        ])
+
+
+class AlertsView(APIView):
+    """Alertas computados da igreja ativa (polling).
+
+    Disponível para qualquer usuário autenticado com igreja ativa: aniversariantes
+    (hoje e próximos 7 dias), validade da carteirinha (vence em <=30 dias ou já
+    vencida) e devoluções de empréstimos (hoje, próximos 7 dias ou atrasadas —
+    estes últimos somente para PASTOR/SECRETARIA/ADMIN, que acessam o inventário).
+    Usuários sem igreja recebem lista vazia.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from django.utils import timezone  # noqa: PLC0415
+
+        church = request.user.church
+        if church is None:
+            alerts = []
+        else:
+            role = request.user.get_role_for(church)
+            include_loans = request.user.is_staff or role in ('PASTOR', 'SECRETARIA')
+            alerts = services.compute_church_alerts(
+                church,
+                include_loans=include_loans,
+            )
+        return Response({
+            'alerts': alerts,
+            'generated_at': timezone.now().isoformat(),
+        })
+
+
+# --------------------------------------------------------------------------- #
+# Painel Admin (nacional) legado — mantido para ADMIN (staff/superuser).
+# --------------------------------------------------------------------------- #
+class AdminChurchesView(APIView):
+    """Lista todas as igrejas (todas os status) para o painel admin (apenas staff)."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request):
+        churches = (
+            Church.objects.select_related('parent_church')
+            .order_by('name', 'id')
+        )
+        serializer = PendingChurchSerializer(churches, many=True)
+        return Response(serializer.data)
+
+
+class AdminPendingChurchesView(APIView):
+    """Lista as igrejas pendentes de aprovação (apenas staff)."""
+
+    permission_classes = [IsStaffPermission]
+
+    def get(self, request):
+        # Apenas Igrejas Independentes caem na fila de aprovação do Admin:
+        # congregações são aprovadas pela Sede na Central de Aprovação.
+        churches = Church.objects.filter(
+            status='PENDING',
+            church_type=Church.ChurchType.INDEPENDENT,
+        ).order_by('created_at')
+        serializer = PendingChurchSerializer(churches, many=True)
+        return Response(serializer.data)
+
+
+class AdminApproveChurchView(APIView):
+    """Aprova a igreja e ativa o usuário vinculado (apenas staff)."""
+
+    permission_classes = [IsStaffPermission]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        church = get_object_or_404(Church, pk=pk)
+        if church.church_type == Church.ChurchType.CONGREGATION:
+            raise PermissionDenied(
+                'Congregações são aprovadas pela Igreja Sede na Central de Aprovação.'
+            )
+        if church.status != 'PENDING':
+            return Response(
+                {'detail': f'Igreja já está com status {church.status}.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        church.status = 'ACTIVE'
+        church.is_approved = True
+        church.save(update_fields=['status', 'is_approved'])
+
+        user = church.responsible_user
+        if user is not None:
+            user.is_active = True
+            user.save(update_fields=['is_active'])
+            ChurchMembership.objects.get_or_create(
+                user=user, church=church, defaults={'role': 'PASTOR'},
+            )
+            services.send_approval_notification(
+                email=user.email,
+                church_name=church.name,
+                account_name=user.name,
+            )
+
+        # Semeia os eventos padrão do calendário financeiro.
+        try:
+            from finance.services import seed_default_calendar_events
+            seed_default_calendar_events(church)
+        except Exception:  # noqa: BLE001
             pass
 
         return Response(
@@ -143,7 +1733,7 @@ class AdminRejectChurchView(APIView):
         church = get_object_or_404(Church, pk=pk)
         church.status = 'REJECTED'
         church.save()
-        user = getattr(church, 'user_account', None)
+        user = church.responsible_user
         if user is not None:
             services.send_rejection_notification(
                 email=user.email,
@@ -217,6 +1807,34 @@ class AdminChurchProfileView(APIView):
         return self.put(request, pk)
 
 
+class ChurchProfileManageView(APIView):
+    """Perfil de uma igreja específica para quem a gerencia (Sede Pastor, ativa).
+
+    Mesmo formato do AdminChurchProfileView, mas autoriado por
+    CanAccessTargetChurch: a Sede (PASTOR) opera o perfil das suas
+    congregações, e usuários operam o perfil da própria igreja ativa.
+    """
+
+    permission_classes = [CanAccessTargetChurch]
+
+    def _church(self, pk):
+        return get_object_or_404(Church, pk=pk)
+
+    def get(self, request, pk):
+        church = self._church(pk)
+        return Response(ChurchProfileSerializer(church).data)
+
+    def put(self, request, pk):
+        church = self._church(pk)
+        serializer = ChurchProfileSerializer(church, data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    def patch(self, request, pk):
+        return self.put(request, pk)
+
+
 def _validate_new_password(password) -> Response | None:
     """Valida a nova senha. Retorna None quando válida, ou uma Response 400."""
     if not isinstance(password, str) or not password:
@@ -236,36 +1854,41 @@ def _validate_new_password(password) -> Response | None:
     return None
 
 
-def _reset_church_user_password(church, new_password) -> Response | None:
-    """Define a nova senha do login responsável e envia e-mail. Retorna Response 400 se não houver usuário."""
-    user = getattr(church, 'user_account', None)
-    if user is None:
-        return Response(
-            {'detail': 'Esta igreja não possui um login responsável vinculado.'},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+def _set_new_user_password(user, new_password, church_name):
+    """Define a nova senha do usuário e envia o e-mail (sem quebrar em erro)."""
     user.set_password(new_password)
     user.save(update_fields=['password'])
     try:
         services.send_password_reset(
             email=user.email,
             password=new_password,
-            church_name=church.name,
+            church_name=church_name,
             account_name=user.name,
         )
     except Exception:  # noqa: BLE001 — envio de e-mail não pode quebrar o reset
         pass
+
+
+def _reset_church_user_password(church, new_password) -> Response | None:
+    """Define a nova senha do login responsável e envia e-mail. Retorna Response 400 se não houver usuário."""
+    user = church.responsible_user
+    if user is None:
+        return Response(
+            {'detail': 'Esta igreja não possui um login responsável vinculado.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    _set_new_user_password(user, new_password, church.name)
     return None
 
 
 class ResetOwnPasswordView(APIView):
-    """Reset da senha do login responsável pelo próprio usuário."""
+    """Reset da senha do próprio usuário autenticado."""
 
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        church = request.user.church
-        if church is None:
+        user = request.user
+        if user.church is None and not is_admin(user):
             return Response(
                 {'detail': 'Usuário sem igreja vinculada.'},
                 status=status.HTTP_404_NOT_FOUND,
@@ -274,9 +1897,8 @@ class ResetOwnPasswordView(APIView):
         error = _validate_new_password(new_password)
         if error is not None:
             return error
-        result = _reset_church_user_password(church, new_password)
-        if result is not None:
-            return result
+        church_name = user.church.name if user.church else user.name
+        _set_new_user_password(user, new_password, church_name)
         return Response({'detail': 'Senha redefinida com sucesso.'}, status=status.HTTP_200_OK)
 
 

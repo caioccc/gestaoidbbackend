@@ -10,13 +10,14 @@ from django.db.models import Sum
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import Church
-from accounts.viewsets import IsStaffPermission
+from accounts.models import Church, Member
+from accounts.permissions import CanAccessTargetChurch, is_admin
 
 from .models import (
     CalendarEvent,
@@ -31,6 +32,7 @@ from .serializers import (
     CategorySerializer,
     FinancialEntrySerializer,
     FinancialExitSerializer,
+    PublicCalendarEventSerializer,
     TitherSerializer,
 )
 from . import services
@@ -323,7 +325,7 @@ class ExistingMonthDataView(APIView):
 class AdminChurchExistingMonthDataView(APIView):
     """Idem ExistingMonthDataView, porém para staff sobre a igreja da URL."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         competence = _parse_competence(request)
@@ -531,6 +533,21 @@ class MonthlyClosingsView(APIView):
         )
 
 
+def _reject_if_congregation(church) -> Response | None:
+    """Relatório Regional existe apenas para Sedes (guarda compartilhado)."""
+    if church is None:
+        return Response(
+            {'detail': 'Usuário sem igreja vinculada.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if not church.is_sede():
+        return Response(
+            {'detail': 'Congregações não possuem Relatório Regional.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
 class RegionalReportView(APIView):
     """Remessa regional e balancete do mÃªs."""
 
@@ -544,8 +561,12 @@ class RegionalReportView(APIView):
                 {'detail': 'month deve estar entre 1 e 12.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        church = request.user.church
+        rejected = _reject_if_congregation(church)
+        if rejected is not None:
+            return rejected
         remittance = services.calc_regional_remittance(
-            request.user.church, year, month,
+            church, year, month,
         )
         balance = services.build_monthly_balance(
             request.user.church, year, month,
@@ -553,6 +574,7 @@ class RegionalReportView(APIView):
         closing, _ = services.get_or_create_monthly_closing(
             request.user.church, year, month,
         )
+        church = request.user.church
         return Response({
             'remittance': remittance,
             'monthly_balance': balance,
@@ -582,11 +604,9 @@ class RegionalReportPdfView(APIView):
             )
 
         church = request.user.church
-        if church is None:
-            return Response(
-                {'detail': 'UsuÃ¡rio sem congregaÃ§Ã£o vinculada.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        rejected = _reject_if_congregation(church)
+        if rejected is not None:
+            return rejected
 
         remittance = services.calc_regional_remittance(church, year, month)
         balance = services.build_monthly_balance(church, year, month)
@@ -652,7 +672,7 @@ class AdminChurchEntriesViewSet(viewsets.ModelViewSet):
     """CRUD de entradas para a igreja indicada na rota (apenas staff)."""
 
     serializer_class = FinancialEntrySerializer
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def _church(self):
         return _get_admin_church(self.kwargs['church_pk'])
@@ -678,7 +698,7 @@ class AdminChurchExitsViewSet(viewsets.ModelViewSet):
     """CRUD de saÃ­das para a igreja indicada na rota (apenas staff)."""
 
     serializer_class = FinancialExitSerializer
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def _church(self):
@@ -705,7 +725,7 @@ class AdminChurchTithersViewSet(viewsets.ModelViewSet):
     """CRUD de membros dizimistas para a igreja indicada na rota (staff)."""
 
     serializer_class = TitherSerializer
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def _church(self):
         return _get_admin_church(self.kwargs['church_pk'])
@@ -722,7 +742,7 @@ class AdminChurchTithersViewSet(viewsets.ModelViewSet):
 class AdminChurchTitherTitheRecordsView(APIView):
     """Grava os 12 valores mensais de dízimo de um membro (staff)."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def patch(self, request, church_pk, tither_pk):
         church = _get_admin_church(church_pk)
@@ -739,7 +759,7 @@ class AdminChurchTitherTitheRecordsView(APIView):
 
 
 class AdminChurchDashboardView(APIView):
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -750,7 +770,7 @@ class AdminChurchDashboardView(APIView):
 class AdminChurchImportView(APIView):
     """Importação de planilhas (staff) — competência obrigatória, dry_run/commit."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, church_pk):
@@ -809,7 +829,7 @@ class InspectSpreadsheetView(APIView):
 class AdminChurchInspectSpreadsheetView(APIView):
     """Inspeção (staff) de uma planilha para mapeamento de colunas."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, church_pk):
@@ -947,7 +967,7 @@ class MonthlyValidationView(APIView):
 class AdminChurchDreSummaryView(APIView):
     """DRE por natureza — papel Liderança (staff)."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -966,7 +986,7 @@ class AdminChurchDreSummaryView(APIView):
 class AdminChurchTitherRepeatAuditView(APIView):
     """Repetição de dizimistas (~90%) — papel Liderança (staff)."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -987,7 +1007,7 @@ class AdminChurchMonthlyValidationView(APIView):
     Tesouraria.
     """
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -1079,7 +1099,7 @@ class AdminChurchMonthlyValidationView(APIView):
 
 
 class AdminChurchTithersReconciliationView(APIView):
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -1094,7 +1114,7 @@ class AdminChurchTithersReconciliationView(APIView):
 
 
 class AdminChurchTithersMatrixView(APIView):
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -1151,7 +1171,7 @@ class AdminChurchTithersMatrixView(APIView):
 
 
 class AdminChurchMonthlyClosingsView(APIView):
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -1225,7 +1245,7 @@ class AdminChurchMonthlyClosingsView(APIView):
 
 
 class AdminChurchRegionalReportView(APIView):
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -1236,6 +1256,9 @@ class AdminChurchRegionalReportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         church = _get_admin_church(church_pk)
+        rejected = _reject_if_congregation(church)
+        if rejected is not None:
+            return rejected
         remittance = services.calc_regional_remittance(church, year, month)
         balance = services.build_monthly_balance(church, year, month)
         closing, _ = services.get_or_create_monthly_closing(church, year, month)
@@ -1254,7 +1277,7 @@ class AdminChurchRegionalReportView(APIView):
 
 
 class AdminChurchRegionalReportPdfView(APIView):
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         year = _int_param(request, 'year', datetime.now().year)
@@ -1266,6 +1289,9 @@ class AdminChurchRegionalReportPdfView(APIView):
             )
 
         church = _get_admin_church(church_pk)
+        rejected = _reject_if_congregation(church)
+        if rejected is not None:
+            return rejected
         remittance = services.calc_regional_remittance(church, year, month)
         balance = services.build_monthly_balance(church, year, month)
 
@@ -1283,33 +1309,131 @@ class AdminChurchRegionalReportPdfView(APIView):
 class AdminChurchCategoriesView(APIView):
     """Lista as categorias disponÃ­veis para selects (apenas staff)."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         return Response(CategorySerializer.many_categories())
 
 
+def _role(user) -> Optional[str]:
+    """Papel do usuário na igreja ativa (None se admin ou sem igreja)."""
+    if not (user and user.is_authenticated) or user.church is None:
+        return None
+    return user.get_role_for(user.church)
+
+
+def _can_manage_finance(user) -> bool:
+    """TESOUREIRO, PASTOR ou ADMIN controlam eventos FINANCE."""
+    if is_admin(user):
+        return True
+    return _role(user) in ('TESOUREIRO', 'PASTOR')
+
+
+def _can_manage_general(user) -> bool:
+    """SECRETARIA, PASTOR ou ADMIN controlam eventos GENERAL (agenda)."""
+    if is_admin(user):
+        return True
+    return _role(user) in ('SECRETARIA', 'PASTOR')
+
+
+def _can_edit_event(user, event) -> bool:
+    """Regras de edição/exclusão por audiência do evento."""
+    if event.audience == CalendarEvent.Audience.FINANCE:
+        return _can_manage_finance(user)
+    return _can_manage_general(user)
+
+
+def _default_audience_for(user) -> str:
+    """Audiência imposta na criação conforme o papel do criador."""
+    if is_admin(user):
+        return ''  # ADMIN escolhe
+    role = _role(user)
+    if role == 'TESOUREIRO':
+        return CalendarEvent.Audience.FINANCE
+    if role == 'SECRETARIA':
+        return CalendarEvent.Audience.GENERAL
+    return ''  # PASTOR escolhe
+
+
 class CalendarEventViewSet(viewsets.ModelViewSet):
-    """CRUD de eventos do calendário financeiro do usuário (igreja vinculada)."""
+    """Calendário geral da igreja ativa do usuário.
+
+    TESOUREIRO/PASTOR/ADMIN enxergam todos os eventos (financeiros e gerais) e
+    controlam os financeiros. SECRETARIA enxerga apenas os gerais (agenda da
+    igreja) e os controla. O tesoureiro lê a agenda, mas não a edita.
+    """
 
     serializer_class = CalendarEventSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = None
 
     def get_queryset(self):
-        return CalendarEvent.objects.filter(
-            church=self.request.user.church
-        ).order_by('title')
+        user = self.request.user
+        qs = CalendarEvent.objects.filter(church=user.church)
+        if _can_manage_finance(user):
+            return qs.select_related('created_by').order_by('title')
+        return qs.filter(
+            audience=CalendarEvent.Audience.GENERAL
+        ).select_related('created_by').order_by('title')
+
+    def _check_can_edit(self, event):
+        if not _can_edit_event(self.request.user, event):
+            raise PermissionDenied(
+                'Você não pode editar/excluir este evento.'
+            )
 
     def perform_create(self, serializer):
-        serializer.save(church=self.request.user.church)
+        user = self.request.user
+        audience = serializer.validated_data.get('audience', '')
+        forced = _default_audience_for(user)
+        if forced:
+            audience = forced
+        if audience not in CalendarEvent.Audience.values:
+            audience = CalendarEvent.Audience.GENERAL
+        member_ids = serializer.validated_data.pop('members', None)
+        self._validate_members(user.church, member_ids)
+        event = serializer.save(
+            church=user.church,
+            created_by=user,
+            audience=audience,
+        )
+        if member_ids:
+            event.members.set(member_ids)
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        event = self.get_object()
+        self._check_can_edit(event)
+        serializer.validated_data.pop('audience', None)
+        member_ids = serializer.validated_data.pop('members', None)
+        if member_ids is not None:
+            self._validate_members(user.church, member_ids)
+        updated = serializer.save(audience=event.audience)
+        if member_ids is not None:
+            updated.members.set(member_ids)
+
+    def perform_destroy(self, instance):
+        self._check_can_edit(instance)
+        instance.delete()
+
+    @staticmethod
+    def _validate_members(church, members):
+        ids = []
+        for m in (members or []):
+            ids.append(m.id if hasattr(m, 'id') else int(m))
+        if not ids:
+            return
+        if Member.objects.filter(pk__in=ids, church=church).count() != len(set(ids)):
+            raise ValidationError({
+                'members': 'Membros inválidos para esta igreja.',
+            })
 
 
 class AdminChurchCalendarEventsViewSet(viewsets.ModelViewSet):
     """CRUD de eventos do calendário de uma igreja específica (apenas staff)."""
 
     serializer_class = CalendarEventSerializer
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
     pagination_class = None
 
     def _church(self):
@@ -1318,10 +1442,39 @@ class AdminChurchCalendarEventsViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return CalendarEvent.objects.filter(
             church=self._church()
-        ).order_by('title')
+        ).select_related('created_by').order_by('title')
 
     def perform_create(self, serializer):
-        serializer.save(church=self._church())
+        serializer.save(church=self._church(), created_by=self.request.user)
+
+
+class PublicCalendarEventsView(APIView):
+    """Eventos gerais (agenda) da igreja via hash público — sem autenticação.
+
+    Nunca expõe dados de membros nem autores. Acesso pela URL pública
+    /calendar/<hash> da igreja.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, hash):
+        church = Church.objects.filter(calendar_public_hash=hash).first()
+        if church is None:
+            return Response(
+                {'detail': 'Calendário não encontrado.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        qs = CalendarEvent.objects.filter(
+            church=church,
+            audience=CalendarEvent.Audience.GENERAL,
+        )
+        return Response({
+            'church': {
+                'id': church.id,
+                'name': church.name,
+            },
+            'events': PublicCalendarEventSerializer(qs, many=True).data,
+        })
 
 
 # --------------------------------------------------------------------------- #
@@ -1409,7 +1562,7 @@ class ExportClosingsView(APIView):
 class AdminChurchExportEntriesView(APIView):
     """Variante admin do export de Entradas para uma igreja específica."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         church = _get_admin_church(church_pk)
@@ -1425,7 +1578,7 @@ class AdminChurchExportEntriesView(APIView):
 class AdminChurchExportExitsView(APIView):
     """Variante admin do export de Saídas para uma igreja específica."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         church = _get_admin_church(church_pk)
@@ -1441,7 +1594,7 @@ class AdminChurchExportExitsView(APIView):
 class AdminChurchExportClosingsView(APIView):
     """Variante admin do export do Fechamento Mensal."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         church = _get_admin_church(church_pk)
@@ -1474,7 +1627,7 @@ def _xls_file_response(data: bytes, filename: str) -> HttpResponse:
 class AdminChurchCaixaDownloadView(APIView):
     """Baixa o Caixa IDB (Balanço Local) preenchido (.xls) para uma igreja."""
 
-    permission_classes = [IsStaffPermission]
+    permission_classes = [CanAccessTargetChurch]
 
     def get(self, request, church_pk):
         church = _get_admin_church(church_pk)

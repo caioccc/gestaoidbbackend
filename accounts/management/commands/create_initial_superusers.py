@@ -10,7 +10,7 @@ class Command(BaseCommand):
         initial_users = [
             {
                 "email": "admin@gmail.com",
-                "password": "admin",
+                "password": "Admin123!",
                 "name": "Administrador do Sistema",
             },
             {

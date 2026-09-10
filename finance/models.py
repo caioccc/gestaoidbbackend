@@ -71,9 +71,6 @@ class FinancialExit(models.Model):
         'Categoria', max_length=30, choices=DepartmentCategory.choices,
     )
     amount = models.DecimalField('Valor', max_digits=12, decimal_places=2)
-    receipt = models.FileField(
-        'Comprovante', upload_to='receipts/', null=True, blank=True,
-    )
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
 
     class Meta:
@@ -133,7 +130,12 @@ class TitheRecord(models.Model):
 
 
 class CalendarEvent(models.Model):
-    """Evento do calendário financeiro da congregação.
+    """Calendário geral da igreja (agenda da secretaria + financeiro do tesoureiro).
+
+    `audience=GENERAL`: eventos criados pela secretaria — visíveis a qualquer
+    usuário com igreja ativa e, anonimamente, na página pública por hash.
+    `audience=FINANCE`: eventos do tesoureiro — visíveis e editáveis apenas por
+    TESOUREIRO/PASTOR/ADMIN (a secretaria não os enxerga).
 
     Suporta eventos recorrentes (repeat_monthly=True, usando month/day) e
     eventos pontuais (repeat_monthly=False, usando date).
@@ -144,6 +146,12 @@ class CalendarEvent(models.Model):
         DEADLINE = 'deadline', 'Prazo / Vencimento'
         MEETING = 'meeting', 'Reunião'
         EVENT = 'event', 'Evento'
+        CULTO = 'culto', 'Culto'
+        ENSAIO = 'ensaio', 'Ensaio'
+
+    class Audience(models.TextChoices):
+        GENERAL = 'GENERAL', 'Agenda da Igreja (Secretaria)'
+        FINANCE = 'FINANCE', 'Financeiro (Tesouraria)'
 
     church = models.ForeignKey(
         'accounts.Church',
@@ -151,9 +159,30 @@ class CalendarEvent(models.Model):
         related_name='calendar_events',
         verbose_name='Igreja',
     )
+    audience = models.CharField(
+        'Audiência', max_length=20, choices=Audience.choices,
+        default=Audience.FINANCE,
+        help_text='GENERAL: visível a todos e na página pública. FINANCE: só tesouraria.',
+    )
+    created_by = models.ForeignKey(
+        'accounts.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='calendar_events_created',
+        verbose_name='Criado por',
+    )
     title = models.CharField('Título', max_length=150)
     category = models.CharField(
         'Categoria', max_length=20, choices=Category.choices, default=Category.EVENT,
+    )
+    description = models.TextField('Descrição', blank=True)
+    start_time = models.TimeField('Horário de início', null=True, blank=True)
+    members = models.ManyToManyField(
+        'accounts.Member',
+        related_name='calendar_events',
+        blank=True,
+        verbose_name='Membros envolvidos',
     )
     repeat_monthly = models.BooleanField('Recorre mensalmente', default=False)
     date = models.DateField(

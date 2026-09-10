@@ -1,43 +1,210 @@
+import os
+import re
+from datetime import date
+
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
 
 from . import services
-from .models import Church
+from .models import (
+    AccountingCategory,
+    Church,
+    ChurchMembership,
+    ChurchMinutes,
+    Loan,
+    MaterialItem,
+    Member,
+    MemberDocument,
+    MemberRelative,
+    MemberSubmission,
+    MemberTransfer,
+    MinistryArea,
+    StorageLocation,
+    WorshipService,
+)
 
 User = get_user_model()
 
 
 class ChurchSerializer(serializers.ModelSerializer):
-    """Serializa a congregação para listagem/consulta."""
+    """Serializa a igreja para listagem/consulta."""
+
+    church_type_display = serializers.CharField(
+        source='get_church_type_display', read_only=True,
+    )
+    responsible_user_id = serializers.IntegerField(
+        source='responsible_user.id', read_only=True, allow_null=True,
+    )
 
     class Meta:
         model = Church
         fields = [
-            'id', 'name', 'pastor_name', 'treasurer_name', 'phone',
+            'id', 'name', 'church_type', 'church_type_display',
+            'parent_church', 'is_approved', 'accounting_category',
+            'responsible_user_id',
+            'pastor_name', 'treasurer_name', 'phone',
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
             'latitude', 'longitude', 'status', 'created_at', 'updated_at',
             'pastoral_prebenda_percent',
         ]
-        read_only_fields = ['id', 'status', 'created_at', 'updated_at']
+        read_only_fields = [
+            'id', 'status', 'is_approved', 'created_at', 'updated_at',
+        ]
+
+
+class ChurchCreateSerializer(ChurchSerializer):
+    """Criação direta de congregação pela Sede (ou ADMIN).
+
+    A Categoria Contábil é obrigatória e a congregação já nasce aprovada,
+    sem passar pela fila de /approvals. Opcionalmente vincula o responsável
+    local (Pastor(a)/Tesoureiro(a)/Secretário(a)).
+    """
+
+    responsible_user = serializers.DictField(
+        required=False, write_only=True,
+        help_text='{email, name, role} — responsável local (opcional).',
+    )
+
+    class Meta(ChurchSerializer.Meta):
+        fields = ChurchSerializer.Meta.fields + ['responsible_user']
+
+    def validate(self, attrs):
+        church_type = attrs.get('church_type')
+        is_congregation = (
+            church_type == Church.ChurchType.CONGREGATION
+            or church_type is None
+        )
+        if is_congregation and not attrs.get('accounting_category'):
+            raise serializers.ValidationError({
+                'accounting_category': 'Informe a categoria contábil do repasse.',
+            })
+        return attrs
+
+    def validate_accounting_category(self, value):
+        normalized = services.persist_accounting_category(value)
+        if not normalized:
+            raise serializers.ValidationError(
+                'Informe a categoria contábil do repasse.'
+            )
+        return normalized
+
+    def validate_responsible_user(self, value):
+        user_id = value.get('user_id')
+        email = (value.get('email') or '').strip().lower()
+        name = (value.get('name') or '').strip()
+        role = (value.get('role') or '').strip().upper()
+        valid_roles = (
+            ChurchMembership.Role.PASTOR,
+            ChurchMembership.Role.TESOUREIRO,
+            ChurchMembership.Role.SECRETARIA,
+        )
+        if role and role not in valid_roles:
+            raise serializers.ValidationError(
+                'O papel deve ser PASTOR, TESOUREIRO ou SECRETARIA.'
+            )
+        if user_id:
+            user = User.objects.filter(pk=user_id).first()
+            if user is None:
+                raise serializers.ValidationError(
+                    'Usuário responsável não encontrado.'
+                )
+            if not role:
+                raise serializers.ValidationError(
+                    'Informe o papel do usuário responsável.'
+                )
+            return {
+                'user_id': user.id,
+                'role': role,
+                'name': user.name,
+            }
+        if not email:
+            raise serializers.ValidationError(
+                'Informe o e-mail do primeiro usuário.'
+            )
+        if role not in valid_roles:
+            raise serializers.ValidationError(
+                'O papel deve ser PASTOR, TESOUREIRO ou SECRETARIA.'
+            )
+        return {'email': email, 'name': name, 'role': role}
+
+
+class ChurchUpdateSerializer(ChurchSerializer):
+    """Edição de congregação pela Sede: dados gerais + reclassificação contábil.
+
+    Bloqueia a alteração de church_type/parent_church/status após a criação
+    (a congregação pertence à mesma Sede) e persiste nova categoria contábil.
+    Aceita a troca opcional do usuário responsável ({user_id, role}).
+    """
+
+    responsible_user = serializers.DictField(
+        required=False, write_only=True,
+        help_text='{user_id, role} — novo usuário responsável (opcional).',
+    )
+
+    class Meta(ChurchSerializer.Meta):
+        fields = ChurchSerializer.Meta.fields + ['responsible_user']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for field_name in ('church_type', 'parent_church', 'is_approved', 'status'):
+            self.fields[field_name].read_only = True
+
+    def validate_responsible_user(self, value):
+        user_id = value.get('user_id')
+        role = (value.get('role') or '').strip().upper()
+        valid_roles = (
+            ChurchMembership.Role.PASTOR,
+            ChurchMembership.Role.TESOUREIRO,
+            ChurchMembership.Role.SECRETARIA,
+        )
+        if not user_id:
+            raise serializers.ValidationError(
+                'Informe o usuário responsável (user_id).'
+            )
+        user = User.objects.filter(pk=user_id).first()
+        if user is None:
+            raise serializers.ValidationError(
+                'Usuário responsável não encontrado.'
+            )
+        if role not in valid_roles:
+            raise serializers.ValidationError(
+                'O papel deve ser PASTOR, TESOUREIRO ou SECRETARIA.'
+            )
+        return {'user_id': user.id, 'role': role}
+
+    def validate_accounting_category(self, value):
+        normalized = services.persist_accounting_category(value)
+        if not normalized:
+            raise serializers.ValidationError(
+                'Informe a categoria contábil do repasse.'
+            )
+        return normalized
 
 
 class ChurchProfileSerializer(serializers.ModelSerializer):
     """Consulta e atualização dos dados da congregação (perfil)."""
 
     responsible_email = serializers.EmailField(
-        source='user_account.email', read_only=True
+        source='responsible_user.email', read_only=True
+    )
+    church_type_display = serializers.CharField(
+        source='get_church_type_display', read_only=True,
     )
 
     class Meta:
         model = Church
         fields = [
-            'id', 'name', 'pastor_name', 'treasurer_name', 'phone',
+            'id', 'name', 'church_type', 'church_type_display',
+            'parent_church', 'is_approved', 'accounting_category',
+            'pastor_name', 'treasurer_name', 'phone',
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
             'latitude', 'longitude', 'pastoral_prebenda_percent',
+            'card_primary_color', 'card_secondary_color', 'card_valid_until',
+            'card_front_phrase', 'card_back_phrase',
             'responsible_email',
         ]
-        read_only_fields = ['id']
+        read_only_fields = ['id', 'church_type', 'parent_church', 'is_approved']
 
     def validate_state(self, value):
         value = (value or '').upper()
@@ -47,16 +214,53 @@ class ChurchProfileSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def _validate_hex_color(self, value):
+        value = (value or '').strip().upper()
+        if value and not re.fullmatch(r'#[0-9A-F]{6}', value):
+            raise serializers.ValidationError(
+                'Cor inválida. Use o formato #RRGGBB.'
+            )
+        return value
+
+    def validate_card_primary_color(self, value):
+        return self._validate_hex_color(value)
+
+    def validate_card_secondary_color(self, value):
+        return self._validate_hex_color(value)
+
+    def validate_card_valid_until(self, value):
+        if value is not None and value.year > date.today().year + 10:
+            raise serializers.ValidationError(
+                'A validade máximo permitida é de 10 anos.'
+            )
+        return value
+
 
 class RegisterSerializer(serializers.Serializer):
-    """Cadastro público da congregação.
+    """Cadastro público de uma igreja (auto-cadastro com aprovação).
 
-    Cria a Church como PENDING e o User como inativo (aguarda moderação).
+    - Sede (INDEPENDENT): PENDING + is_approved=False, aguarda aprovação de um
+      administrador da IDB.
+    - Congregação (CONGREGATION): PENDING + is_approved=False, aguarda a
+      aprovação da Igreja Sede (parent_church obrigatória).
+    Cria também o User ativo e o ChurchMembership com o papel escolhido.
     """
+    ROLE_CHOICES = [
+        ChurchMembership.Role.PASTOR,
+        ChurchMembership.Role.TESOUREIRO,
+    ]
+    CHURCH_TYPE_CHOICES = [
+        Church.ChurchType.INDEPENDENT,
+        Church.ChurchType.CONGREGATION,
+    ]
+
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=6)
     name = serializers.CharField(max_length=150)
     church_name = serializers.CharField(max_length=200)
+    church_type = serializers.ChoiceField(choices=CHURCH_TYPE_CHOICES, required=True)
+    parent_church = serializers.IntegerField(required=False, allow_null=True)
+    role = serializers.ChoiceField(choices=ROLE_CHOICES, required=True)
     pastor_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
     treasurer_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
@@ -84,30 +288,70 @@ class RegisterSerializer(serializers.Serializer):
             )
         return value
 
+    def validate_parent_church(self, value):
+        if value is None:
+            return None
+        church = Church.objects.filter(pk=value).first()
+        if church is None or not church.is_sede():
+            raise serializers.ValidationError(
+                'A igreja Sede informada é inválida.'
+            )
+        if church.status != 'ACTIVE':
+            raise serializers.ValidationError(
+                'A igreja Sede informada não está ativa.'
+            )
+        return church
+
+    def validate(self, attrs):
+        church_type = attrs.get('church_type')
+        parent_church = attrs.get('parent_church')
+        if church_type == Church.ChurchType.CONGREGATION:
+            if parent_church is None:
+                raise serializers.ValidationError({
+                    'parent_church': [
+                        'Selecione a Igreja Sede à qual a congregação pertencerá.'
+                    ]
+                })
+        else:
+            attrs['parent_church'] = None
+        return attrs
+
     @transaction.atomic
     def create(self, validated_data):
-        church_data = {
-            'name': validated_data['church_name'],
-            'pastor_name': validated_data.get('pastor_name', ''),
-            'treasurer_name': validated_data.get('treasurer_name', ''),
-            'phone': validated_data.get('phone', ''),
-            'cep': validated_data.get('cep', ''),
-            'street': validated_data.get('street', ''),
-            'number': validated_data.get('number', ''),
-            'neighborhood': validated_data.get('neighborhood', ''),
-            'city': validated_data['city'],
-            'state': validated_data['state'],
-            'latitude': validated_data.get('latitude'),
-            'longitude': validated_data.get('longitude'),
-        }
-        church = Church.objects.create(status='PENDING', **church_data)
+        parent_church = validated_data.get('parent_church')
+        role = validated_data['role']
+        church_type = validated_data['church_type']
+
+        church = Church.objects.create(
+            status='PENDING',
+            is_approved=False,
+            church_type=church_type,
+            parent_church=parent_church,
+            name=validated_data['church_name'],
+            pastor_name=validated_data.get('pastor_name', ''),
+            treasurer_name=validated_data.get('treasurer_name', ''),
+            phone=validated_data.get('phone', ''),
+            cep=validated_data.get('cep', ''),
+            street=validated_data.get('street', ''),
+            number=validated_data.get('number', ''),
+            neighborhood=validated_data.get('neighborhood', ''),
+            city=validated_data['city'],
+            state=validated_data['state'],
+            latitude=validated_data.get('latitude'),
+            longitude=validated_data.get('longitude'),
+        )
 
         user = User.objects.create_user(
             email=validated_data['email'],
             password=validated_data['password'],
             name=validated_data['name'],
             church=church,
-            is_active=False,
+            # Ativo desde o cadastro: o bloqueio de acesso até a aprovação é
+            # feito no login, pela aprovação da igreja (is_approved=False -> 403).
+            is_active=True,
+        )
+        ChurchMembership.objects.create(
+            user=user, church=church, role=role,
         )
 
         # Envia as credenciais (email + senha) no momento do cadastro.
@@ -124,24 +368,767 @@ class RegisterSerializer(serializers.Serializer):
 class UserSerializer(serializers.ModelSerializer):
     """Payload do usuário para login e sessão."""
     church = ChurchSerializer(read_only=True)
+    role = serializers.CharField(source='active_role', read_only=True)
+    role_display = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'name', 'is_staff', 'is_active', 'church']
+        fields = [
+            'id', 'email', 'name', 'is_staff', 'is_active', 'church', 'role',
+            'role_display',
+        ]
 
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        # A congregação pendente pode não ter dados relevantes ainda.
-        return data
+    def get_role_display(self, instance):
+        role = instance.active_role
+        if not role:
+            return 'Admin' if (instance.is_staff or instance.is_superuser) else ''
+        choices = dict(ChurchMembership.Role.choices)
+        return choices.get(role, role)
 
 
 class PendingChurchSerializer(serializers.ModelSerializer):
-    user = UserSerializer(source='user_account', read_only=True)
+    user = UserSerializer(source='responsible_user', read_only=True)
+    church_type_display = serializers.CharField(
+        source='get_church_type_display', read_only=True,
+    )
+    parent_church_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Church
         fields = [
-            'id', 'name', 'pastor_name', 'treasurer_name', 'phone',
+            'id', 'name', 'church_type', 'church_type_display',
+            'parent_church', 'parent_church_name',
+            'is_approved', 'accounting_category',
+            'pastor_name', 'treasurer_name', 'phone',
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
             'latitude', 'longitude', 'status', 'created_at', 'user',
         ]
+
+    def get_parent_church_name(self, obj):
+        if obj.parent_church_id is None:
+            return None
+        return obj.parent_church.name
+
+
+class PendingCongregationSerializer(PendingChurchSerializer):
+    """Solicitação de vínculo (congregação pendente) com contato do solicitante."""
+
+    requester_role = serializers.SerializerMethodField()
+
+    class Meta(PendingChurchSerializer.Meta):
+        fields = PendingChurchSerializer.Meta.fields + ['requester_role']
+
+    def get_requester_role(self, obj):
+        user = obj.responsible_user
+        if user is None:
+            return None
+        membership = user.church_memberships.filter(church=obj).first()
+        if membership is None:
+            return None
+        choices = dict(ChurchMembership.Role.choices)
+        return {
+            'role': membership.role,
+            'role_display': choices.get(membership.role, membership.role),
+        }
+
+
+class ChurchMembershipSerializer(serializers.ModelSerializer):
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    user_name = serializers.CharField(source='user.name', read_only=True)
+    user_is_active = serializers.BooleanField(source='user.is_active', read_only=True)
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+
+    class Meta:
+        model = ChurchMembership
+        fields = [
+            'id', 'user_id', 'user_email', 'user_name', 'user_is_active',
+            'role', 'role_display', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
+def is_strong_password(password) -> bool:
+    """Mínimo 8 caracteres, ao menos 1 número e 1 caractere especial."""
+    return (
+        isinstance(password, str)
+        and len(password) >= 8
+        and any(c.isdigit() for c in password)
+        and any(not c.isalnum() for c in password)
+    )
+
+
+class AddChurchUserSerializer(serializers.Serializer):
+    """Vincula/cria um usuário em uma igreja com um papel e senha inicial."""
+    email = serializers.EmailField()
+    name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    role = serializers.ChoiceField(choices=ChurchMembership.Role.choices)
+    password = serializers.CharField(write_only=True)
+    password2 = serializers.CharField(write_only=True)
+
+    def validate_password(self, value):
+        if not is_strong_password(value):
+            raise serializers.ValidationError(
+                'A senha deve ter ao menos 8 caracteres e conter ao menos 1 '
+                'número e 1 caractere especial.'
+            )
+        return value
+
+    def validate(self, attrs):
+        if attrs.get('password') != attrs.get('password2'):
+            raise serializers.ValidationError({
+                'password2': ['As senhas não coincidem.'],
+            })
+        return attrs
+
+
+class MemberPhotoField(serializers.Field):
+    """Campo de foto de membro: aceita data URL (base64) e devolve a URL."""
+
+    def to_internal_value(self, data):
+        if data in (None, '', False):
+            return None
+        uploaded = services.data_url_to_file(data, 'member_photo.png')
+        if uploaded is None:
+            raise serializers.ValidationError('Imagem de perfil inválida.')
+        return uploaded
+
+    def to_representation(self, value):
+        return services.cloudinary_url(value)
+
+
+class MinistryAreaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MinistryArea
+        fields = ['id', 'church', 'name', 'created_at']
+        read_only_fields = ['id', 'church', 'created_at']
+
+    def validate(self, attrs):
+        name = (attrs.get('name') or '').strip()
+        if not name:
+            raise serializers.ValidationError({'name': ['Informe o nome da área.']})
+        attrs['name'] = name
+        church = self.context.get('church')
+        if church is None:
+            request = self.context.get('request')
+            church = getattr(getattr(request, 'user', None), 'church', None)
+        if church is not None:
+            existing = MinistryArea.objects.filter(
+                church=church, name__iexact=name,
+            ).exclude(pk=self.instance.pk if self.instance else None)
+            if existing.exists():
+                raise serializers.ValidationError(
+                    {'name': ['Já existe uma área de atuação com este nome.']}
+                )
+        return attrs
+
+
+class StorageLocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StorageLocation
+        fields = ['id', 'church', 'name', 'created_at']
+        read_only_fields = ['id', 'church', 'created_at']
+
+    def validate(self, attrs):
+        name = (attrs.get('name') or '').strip()
+        if not name:
+            raise serializers.ValidationError({'name': ['Informe o nome do local.']})
+        attrs['name'] = name
+        church = self.context.get('church')
+        if church is None:
+            request = self.context.get('request')
+            church = getattr(getattr(request, 'user', None), 'church', None)
+        if church is not None:
+            existing = StorageLocation.objects.filter(
+                church=church, name__iexact=name,
+            ).exclude(pk=self.instance.pk if self.instance else None)
+            if existing.exists():
+                raise serializers.ValidationError(
+                    {'name': ['Já existe um local com este nome.']}
+                )
+        return attrs
+
+
+class MaterialItemSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(
+        source='location.name', read_only=True, default=None,
+    )
+    location = serializers.PrimaryKeyRelatedField(
+        queryset=StorageLocation.objects.all(),
+        required=True,
+        error_messages={
+            'required': 'Selecione o local do material.',
+            'null': 'Selecione o local do material.',
+        },
+    )
+    current_loan = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MaterialItem
+        fields = [
+            'id', 'church', 'name', 'description', 'location', 'location_name',
+            'current_loan', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'church', 'created_at', 'updated_at']
+
+    def get_current_loan(self, obj):
+        loan = obj.current_open_loan()
+        if loan is None:
+            return None
+        return {
+            'loan_id': loan.id,
+            'borrower_display': loan.borrower_display,
+            'borrowed_at': loan.borrowed_at.isoformat(),
+            'expected_return': loan.expected_return.isoformat(),
+        }
+
+    def validate(self, attrs):
+        name = (attrs.get('name') or '').strip()
+        if not name:
+            raise serializers.ValidationError({'name': ['Informe o nome do material.']})
+        attrs['name'] = name
+        if 'description' in attrs:
+            attrs['description'] = (attrs.get('description') or '').strip()
+        church = self.context.get('church')
+        if church is None:
+            request = self.context.get('request')
+            church = getattr(getattr(request, 'user', None), 'church', None)
+        location = attrs.get('location')
+        if (
+            location is not None
+            and church is not None
+            and location.church_id != church.id
+        ):
+            raise serializers.ValidationError(
+                {'location': ['O local selecionado não pertence a esta igreja.']}
+            )
+        return attrs
+
+
+class LoanSerializer(serializers.ModelSerializer):
+    item_name = serializers.CharField(source='item.name', read_only=True)
+    member_name = serializers.CharField(
+        source='member.name', read_only=True, default=None,
+    )
+    borrower_display = serializers.CharField(read_only=True)
+    status = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Loan
+        fields = [
+            'id', 'church', 'item', 'item_name', 'member', 'member_name',
+            'borrower_name', 'borrower_display', 'borrowed_at',
+            'expected_return', 'returned_at', 'status', 'notes',
+            'created_by_name', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'returned_at', 'status', 'created_by_name',
+            'created_at', 'updated_at',
+        ]
+
+    def get_status(self, obj):
+        return obj.status_on()
+
+    def get_created_by_name(self, obj):
+        return obj.created_by.name if obj.created_by_id else None
+
+    def _context_church(self):
+        church = self.context.get('church')
+        if church is None:
+            request = self.context.get('request')
+            church = getattr(getattr(request, 'user', None), 'church', None)
+        return church
+
+    def validate(self, attrs):
+        instance = self.instance
+        church = self._context_church()
+
+        item = attrs.get('item', getattr(instance, 'item', None) if instance else None)
+        member = (
+            attrs.get('member')
+            if 'member' in attrs
+            else (getattr(instance, 'member', None) if instance else None)
+        )
+
+        if item is None:
+            raise serializers.ValidationError({'item': ['Informe o material emprestado.']})
+        if church is not None and item.church_id != church.id:
+            raise serializers.ValidationError(
+                {'item': ['O material não pertence a esta igreja.']}
+            )
+        if member is not None and church is not None and member.church_id != church.id:
+            raise serializers.ValidationError(
+                {'member': ['O membro não pertence a esta igreja.']}
+            )
+
+        if instance is None:
+            borrower = (attrs.get('borrower_name') or '').strip()
+            if attrs.get('member') is None and not borrower:
+                raise serializers.ValidationError(
+                    {'borrower_name': ['Informe o tomador (membro ou nome) do empréstimo.']}
+                )
+            attrs['borrower_name'] = borrower
+        elif 'borrower_name' in attrs:
+            attrs['borrower_name'] = (attrs.get('borrower_name') or '').strip()
+
+        borrowed_at = attrs.get(
+            'borrowed_at', getattr(instance, 'borrowed_at', None) if instance else None,
+        )
+        expected_return = attrs.get(
+            'expected_return',
+            getattr(instance, 'expected_return', None) if instance else None,
+        )
+        if borrowed_at and expected_return and expected_return < borrowed_at:
+            raise serializers.ValidationError(
+                {'expected_return': ['A devolução prevista deve ser maior ou igual à data do empréstimo.']}
+            )
+
+        conflict = Loan.objects.filter(
+            church=church, item=item, returned_at__isnull=True,
+        ).exclude(pk=instance.pk if instance else None)
+        if conflict.exists():
+            raise serializers.ValidationError(
+                {'item': ['Este material já está emprestado e ainda não foi devolvido.']}
+            )
+        return attrs
+
+
+class MemberRelativeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MemberRelative
+        fields = ['id', 'name', 'kinship', 'birth_date', 'phone']
+        read_only_fields = ['id']
+
+    def validate_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Informe o nome do parente.')
+        return value
+
+
+class MemberSerializer(serializers.ModelSerializer):
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    church_entry_display = serializers.SerializerMethodField()
+    marital_status_display = serializers.CharField(
+        source='get_marital_status_display', read_only=True,
+    )
+    education_level_display = serializers.CharField(
+        source='get_education_level_display', read_only=True,
+    )
+    card_number = serializers.CharField(read_only=True)
+    photo = MemberPhotoField(required=False, allow_null=True)
+    ministry_areas = serializers.PrimaryKeyRelatedField(
+        queryset=MinistryArea.objects.all(),
+        many=True,
+        required=False,
+    )
+    ministry_areas_display = serializers.SerializerMethodField()
+    relatives = MemberRelativeSerializer(many=True, required=False)
+
+    class Meta:
+        model = Member
+        fields = [
+            'id', 'church', 'name', 'phone', 'email', 'birth_date',
+            'baptism_date', 'cpf', 'rg', 'born_in_city', 'born_in_state',
+            'profession', 'education_level', 'education_level_display',
+            'marital_status', 'marital_status_display', 'marriage_date',
+            'father_name', 'mother_name', 'card_number',
+            'church_entry', 'church_entry_display', 'church_entry_other',
+            'ministry_areas', 'ministry_areas_display', 'photo',
+            'relatives',
+            'status', 'status_display', 'notes',
+            'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
+            'public_hash',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'church', 'created_at', 'updated_at', 'card_number', 'public_hash']
+
+    def get_ministry_areas_display(self, obj):
+        return MinistryAreaSerializer(obj.ministry_areas.all(), many=True).data
+
+    def get_church_entry_display(self, obj):
+        if (
+            obj.church_entry == Member.ChurchEntry.OUTRO
+            and obj.church_entry_other
+        ):
+            return obj.church_entry_other
+        return obj.get_church_entry_display() or ''
+
+    def validate_ministry_areas(self, value):
+        if not value:
+            return value
+        church = getattr(self.instance, 'church', None)
+        if church is None:
+            church = self.context.get('church')
+        if church is None:
+            request = self.context.get('request')
+            church = getattr(getattr(request, 'user', None), 'church', None)
+        if church is not None and any(a.church_id != church.id for a in value):
+            raise serializers.ValidationError(
+                'Uma das áreas de atuação pertence a outra igreja.'
+            )
+        return value
+
+    def validate_born_in_state(self, value):
+        value = (value or '').upper().strip()
+        if value and len(value) != 2:
+            raise serializers.ValidationError('A UF deve conter 2 letras.')
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        church_entry = attrs.get('church_entry')
+        if church_entry is None and self.instance:
+            church_entry = self.instance.church_entry
+        other = (attrs.get('church_entry_other') or '').strip()
+        if church_entry == Member.ChurchEntry.OUTRO:
+            if not other:
+                raise serializers.ValidationError(
+                    {'church_entry_other': 'Informe a outra forma de entrada.'}
+                )
+            attrs['church_entry_other'] = other
+        else:
+            attrs['church_entry_other'] = ''
+        return attrs
+
+    def _sync_relatives(self, instance, relatives):
+        """Sincroniza a lista de parentes: cria, atualiza (por id) e remove os ausentes."""
+        incoming_ids = set()
+        seen = set()
+        for data in relatives:
+            rel_id = data.pop('id', None)
+            rel_id = int(rel_id) if rel_id else None
+            if rel_id is not None and rel_id in seen:
+                continue
+            seen.add(rel_id)
+            if rel_id is not None:
+                rel = MemberRelative.objects.filter(pk=rel_id, member=instance).first()
+                if rel is None:
+                    continue
+                for field in ('name', 'kinship', 'birth_date', 'phone'):
+                    if field in data:
+                        setattr(rel, field, data[field])
+                rel.save()
+                incoming_ids.add(rel.id)
+            else:
+                rel = MemberRelative.objects.create(member=instance, **data)
+                incoming_ids.add(rel.id)
+        instance.relatives.exclude(pk__in=incoming_ids).delete()
+
+    def create(self, validated_data):
+        relatives = validated_data.pop('relatives', [])
+        member = super().create(validated_data)
+        with transaction.atomic():
+            if relatives:
+                self._sync_relatives(member, list(relatives))
+            if not member.card_number:
+                member.card_number = services.next_member_card_number(member.church)
+                member.save(update_fields=['card_number'])
+        return member
+
+    def update(self, instance, validated_data):
+        relatives = validated_data.pop('relatives', None)
+        member = super().update(instance, validated_data)
+        if relatives is not None:
+            self._sync_relatives(member, list(relatives))
+        return member
+
+
+class MemberTransferSerializer(serializers.ModelSerializer):
+    """Transferência de membresia entre igrejas (saída/entrada, somente leitura)."""
+
+    source_church_name = serializers.CharField(
+        source='source_church.name', read_only=True,
+    )
+    target_church_name = serializers.CharField(
+        source='target_church.name', read_only=True,
+    )
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True,
+    )
+
+    class Meta:
+        model = MemberTransfer
+        fields = [
+            'id', 'source_church', 'source_church_name', 'source_member',
+            'target_church', 'target_church_name',
+            'status', 'status_display',
+            'issued_at', 'received_at',
+            'member_name', 'member_cpf', 'member_rg',
+            'member_birth_date', 'member_baptism_date',
+            'member_phone', 'member_email', 'member_profession',
+            'member_father_name', 'member_mother_name',
+            'member_street', 'member_number', 'member_complement',
+            'member_neighborhood', 'member_city', 'member_state', 'member_cep',
+            'member_notes',
+        ]
+        read_only_fields = fields
+
+
+class MemberDocumentSerializer(serializers.ModelSerializer):
+    """Documento anexado ao membro (saída; upload é tratado pela view)."""
+
+    doc_type_display = serializers.CharField(
+        source='get_doc_type_display', read_only=True,
+    )
+    file_name = serializers.SerializerMethodField()
+    uploaded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MemberDocument
+        fields = [
+            'id', 'member', 'doc_type', 'doc_type_display', 'file_name',
+            'notes', 'uploaded_by', 'uploaded_by_name', 'uploaded_at',
+        ]
+        read_only_fields = fields
+
+    def get_file_name(self, obj):
+        return os.path.basename(obj.file.name or '')
+
+    def get_uploaded_by_name(self, obj):
+        return obj.uploaded_by.name if obj.uploaded_by else ''
+
+
+class WorshipServiceSerializer(serializers.ModelSerializer):
+    """Registro de culto da igreja ativa."""
+
+    service_type_display = serializers.CharField(
+        source='get_service_type_display', read_only=True,
+    )
+
+    class Meta:
+        model = WorshipService
+        fields = [
+            'id', 'church', 'date', 'time', 'service_type', 'service_type_display',
+            'presider', 'preacher', 'theme', 'scripture',
+            'attendees', 'visitors', 'conversions', 'offering',
+            'notes', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'church', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        for field in ('presider', 'preacher', 'theme', 'scripture', 'notes'):
+            if field in attrs and isinstance(attrs.get(field), str):
+                attrs[field] = (attrs.get(field) or '').strip()
+        for field in ('attendees', 'visitors', 'conversions'):
+            value = attrs.get(field)
+            if value is not None and value < 0:
+                raise serializers.ValidationError(
+                    {field: ['O valor não pode ser negativo.']}
+                )
+        offering = attrs.get('offering')
+        if offering is not None and offering < 0:
+            raise serializers.ValidationError(
+                {'offering': ['O valor não pode ser negativo.']}
+            )
+        return attrs
+
+
+class ChurchMinutesSerializer(serializers.ModelSerializer):
+    """Ata da igreja ativa, com PDF opcional e hash público."""
+
+    meeting_type_display = serializers.CharField(
+        source='get_meeting_type_display', read_only=True,
+    )
+    pdf_name = serializers.SerializerMethodField()
+    remove_pdf = serializers.BooleanField(required=False, write_only=True, default=False)
+
+    class Meta:
+        model = ChurchMinutes
+        fields = [
+            'id', 'church', 'title', 'meeting_type', 'meeting_type_display',
+            'meeting_date', 'location', 'recorder', 'participants', 'content',
+            'pdf', 'pdf_name', 'public_hash', 'remove_pdf',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'public_hash', 'created_by', 'created_at', 'updated_at',
+        ]
+
+    def get_pdf_name(self, obj):
+        return os.path.basename(obj.pdf.name or '') if obj.pdf else None
+
+    def create(self, validated_data):
+        validated_data.pop('remove_pdf', None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        remove_pdf = validated_data.pop('remove_pdf', False)
+        instance = super().update(instance, validated_data)
+        if remove_pdf:
+            if instance.pdf and instance.pdf.name:
+                instance.pdf.delete(save=False)
+            instance.pdf = None
+            instance.save(update_fields=['pdf', 'updated_at'])
+        return instance
+
+    def validate(self, attrs):
+        for field in ('title', 'location', 'recorder'):
+            if field in attrs and isinstance(attrs.get(field), str):
+                attrs[field] = (attrs.get(field) or '').strip()
+        for field in ('participants', 'content'):
+            if field in attrs and isinstance(attrs.get(field), str):
+                attrs[field] = (attrs.get(field) or '').strip()
+        title = attrs.get('title')
+        if title is not None and not title:
+            raise serializers.ValidationError(
+                {'title': ['Informe o título da ata.']}
+            )
+        content = attrs.get('content')
+        if content is not None and not content:
+            raise serializers.ValidationError(
+                {'content': ['Informe o texto da ata.']}
+            )
+        return attrs
+
+
+class PublicMemberCardSerializer(serializers.Serializer):
+    """Dados públicos do cartão de membro (frente e verso), SEM endereço."""
+
+    name = serializers.CharField()
+    card_number = serializers.SerializerMethodField()
+    photo = serializers.SerializerMethodField()
+    birth_date = serializers.DateField(format='%d/%m/%Y', required=False, allow_null=True)
+    status = serializers.CharField()
+    church_name = serializers.CharField(source='church.name')
+    church_city = serializers.CharField(source='church.city')
+    church_state = serializers.CharField(source='church.state')
+    church_phone = serializers.CharField(source='church.phone')
+    card_primary_color = serializers.CharField(source='church.card_primary_color')
+    card_secondary_color = serializers.CharField(source='church.card_secondary_color')
+    card_valid_until = serializers.DateField(
+        format='%d/%m/%Y', source='church.card_valid_until', required=False, allow_null=True,
+    )
+    card_front_phrase = serializers.CharField(source='church.card_front_phrase')
+    card_back_phrase = serializers.CharField(source='church.card_back_phrase')
+
+    def get_card_number(self, obj):
+        return obj.card_number or ''
+
+    def get_photo(self, obj):
+        if obj.photo and getattr(obj.photo, 'url', None):
+            try:
+                return obj.photo.url
+            except Exception:
+                return None
+        return None
+
+
+class PublicMemberFormSerializer(serializers.Serializer):
+    """Metadados públicos do formulário (link do cartão ou genérico da igreja).
+
+    - `type = "member"`   → o hash é de um cartão de membro (atualização).
+    - `type = "candidate"` → o hash é o formulário genérico da igreja (novo candidato).
+    """
+
+    type = serializers.CharField()
+    church_name = serializers.CharField()
+    church_city = serializers.CharField()
+    church_state = serializers.CharField()
+    church_phone = serializers.CharField()
+    member_name = serializers.CharField(read_only=True, default=None)
+    card_number = serializers.CharField(read_only=True, default=None)
+
+
+PUBLIC_SUBMISSION_FIELDS = (
+    'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+    'born_in_city', 'born_in_state', 'profession', 'education_level',
+    'marital_status', 'marriage_date', 'father_name', 'mother_name',
+    'church_entry', 'church_entry_other', 'street', 'number', 'complement',
+    'neighborhood', 'city', 'state', 'cep', 'notes',
+)
+
+
+class PublicSubmissionSerializer(serializers.Serializer):
+    """Valida a submissão pública do formulário de membro.
+
+    Os dados chegam em `data` (dict) e são armazenados para revisão.
+    Campos de escritura seguem as mesmas regras do cadastro interno.
+    """
+
+    data = serializers.DictField()
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        data = attrs.get('data') or {}
+
+        name = (data.get('name') or '').strip()
+        if not name:
+            raise serializers.ValidationError(
+                {'data': ['O nome é obrigatório.']}
+            )
+        data['name'] = name
+
+        marital_status = data.get('marital_status')
+        if marital_status:
+            valid = list(Member.MaritalStatus.values)
+            if marital_status not in valid:
+                raise serializers.ValidationError(
+                    {'data': [f'Estado civil inválido: {marital_status}.']}
+                )
+
+        education_level = data.get('education_level')
+        if education_level:
+            valid = list(Member.EducationLevel.values)
+            if education_level not in valid:
+                raise serializers.ValidationError(
+                    {'data': [f'Escolaridade inválida: {education_level}.']}
+                )
+
+        church_entry = data.get('church_entry')
+        if church_entry:
+            valid = list(Member.ChurchEntry.values)
+            if church_entry not in valid:
+                raise serializers.ValidationError(
+                    {'data': [f'Forma de entrada inválida: {church_entry}.']}
+                )
+            other = (data.get('church_entry_other') or '').strip()
+            if church_entry == Member.ChurchEntry.OUTRO and not other:
+                raise serializers.ValidationError(
+                    {'data': ['Informe a outra forma de entrada.']}
+                )
+            if church_entry != Member.ChurchEntry.OUTRO:
+                data['church_entry_other'] = ''
+        state = (data.get('state') or '').upper().strip()
+        if state and len(state) != 2:
+            raise serializers.ValidationError(
+                {'data': ['A UF deve conter 2 letras.']}
+            )
+        data['state'] = state
+
+        data = {k: (data.get(k) or '') for k in PUBLIC_SUBMISSION_FIELDS}
+        if notes := data.get('notes'):
+            data['notes'] = notes
+        attrs['data'] = data
+        return attrs
+
+
+class MemberSubmissionSerializer(serializers.ModelSerializer):
+    """Submissão pendente de revisão (Secretaria/Pastor)."""
+
+    member_name = serializers.SerializerMethodField()
+    member_card_number = serializers.SerializerMethodField()
+    reviewed_by_name = serializers.SerializerMethodField()
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = MemberSubmission
+        fields = [
+            'id', 'church', 'member', 'member_name', 'member_card_number',
+            'source_hash', 'data', 'status', 'status_display',
+            'reviewed_by', 'reviewed_by_name', 'notes',
+            'created_at', 'updated_at', 'reviewed_at',
+        ]
+        read_only_fields = fields
+
+    def get_member_name(self, obj):
+        return obj.member.name if obj.member else None
+
+    def get_member_card_number(self, obj):
+        return obj.member.card_number if obj.member else None
+
+    def get_reviewed_by_name(self, obj):
+        if not obj.reviewed_by:
+            return None
+        return obj.reviewed_by.name or obj.reviewed_by.email

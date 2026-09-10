@@ -34,24 +34,14 @@ class FinancialExitSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(
         source='get_category_display', read_only=True,
     )
-    receipt_url = serializers.SerializerMethodField()
 
     class Meta:
         model = FinancialExit
         fields = [
             'id', 'church', 'date', 'description', 'category',
-            'category_display', 'amount', 'receipt', 'receipt_url',
-            'created_at',
+            'category_display', 'amount', 'created_at',
         ]
         read_only_fields = ['church', 'created_at']
-
-    def get_receipt_url(self, obj):
-        if obj.receipt:
-            request = self.context.get('request')
-            if request is not None:
-                return request.build_absolute_uri(obj.receipt.url)
-            return obj.receipt.url
-        return None
 
     def validate_amount(self, value):
         if value <= 0:
@@ -97,14 +87,30 @@ class CalendarEventSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(
         source='get_category_display', read_only=True,
     )
+    audience_display = serializers.CharField(
+        source='get_audience_display', read_only=True,
+    )
+    created_by_name = serializers.SerializerMethodField()
+    members_names = serializers.SerializerMethodField()
 
     class Meta:
         model = CalendarEvent
         fields = [
-            'id', 'church', 'title', 'category', 'category_display',
+            'id', 'church', 'audience', 'audience_display', 'created_by',
+            'created_by_name', 'title', 'category', 'category_display',
+            'description', 'start_time', 'members', 'members_names',
             'repeat_monthly', 'date', 'month', 'day', 'created_at',
         ]
-        read_only_fields = ['church', 'created_at']
+        read_only_fields = ['church', 'created_by', 'created_at']
+
+    def get_created_by_name(self, obj):
+        return obj.created_by.name if obj.created_by else ''
+
+    def get_members_names(self, obj):
+        return [
+            {'id': m.id, 'name': m.name}
+            for m in obj.members.all().order_by('name')
+        ]
 
     def validate(self, attrs):
         repeat_monthly = attrs.get('repeat_monthly')
@@ -117,6 +123,21 @@ class CalendarEventSerializer(serializers.ModelSerializer):
                 {'day': 'Informe o dia para um evento recorrente.'}
             )
         return attrs
+
+
+class PublicCalendarEventSerializer(serializers.ModelSerializer):
+    """Evento exposto na página pública (hash) — sem membros nem autores."""
+    category_display = serializers.CharField(
+        source='get_category_display', read_only=True,
+    )
+
+    class Meta:
+        model = CalendarEvent
+        fields = [
+            'id', 'title', 'category', 'category_display',
+            'description', 'start_time',
+            'repeat_monthly', 'date', 'month', 'day',
+        ]
 
 
 class CategorySerializer(serializers.Serializer):

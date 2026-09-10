@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <title>Rol de Membros</title>
+    <style>
+        @page { size: A4 landscape; margin: 1.4cm; }
+        body { font-family: Helvetica, Arial, sans-serif; font-size: 10.5px; color: #111; line-height: 1.5; }
+        .header { text-align: center; border-bottom: 3px double #1f4e79; padding-bottom: 8px; margin-bottom: 14px; }
+        .header .church-name { font-size: 16px; font-weight: bold; color: #1f4e79; text-transform: uppercase; }
+        .header .church-address { font-size: 10px; color: #555; margin-top: 3px; }
+        h1 { text-align: center; font-size: 14px; letter-spacing: 1px; margin: 0 0 4px 0; text-transform: uppercase; }
+        .meta { text-align: center; font-size: 10px; color: #555; margin: 0 0 12px 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+        th, td { border: 1px solid #999; padding: 4px 6px; text-align: left; }
+        th { background: #1f4e79; color: #fff; font-size: 10px; text-transform: uppercase; }
+        tr:nth-child(even) td { background: #eef3f8; }
+        .num { text-align: center; }
+        .footer { margin-top: 14px; text-align: center; font-size: 9px; color: #999; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="church-name">{{ church.name }}</div>
+        {% if church.city or church.state %}
+        <div class="church-address">{{ church.city }}{% if church.state %} - {{ church.state }}{% endif %}</div>
+        {% endif %}
+    </div>
+
+    <h1>Rol de Membros</h1>
+    <p class="meta">Total de membros: {{ total }} &mdash; gerado em {{ generated_date }}</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th class="num">Matrícula</th>
+                <th>Nome</th>
+                <th>CPF</th>
+                <th>Nascimento</th>
+                <th>Batismo</th>
+                <th>Forma de Entrada</th>
+                <th>Cidade / UF</th>
+                <th>Situação</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for member in members %}
+            <tr>
+                <td class="num">{{ member.card_number|default:'—' }}</td>
+                <td>{{ member.name }}</td>
+                <td>{{ member.cpf|default:'—' }}</td>
+                <td>{{ member.birth_date|date:'d/m/Y'|default:'—' }}</td>
+                <td>{{ member.baptism_date|date:'d/m/Y'|default:'—' }}</td>
+                <td>{{ member.get_church_entry_display|default:'—' }}</td>
+                <td>
+                    {% if member.city %}{{ member.city }}{% if member.state %}/{{ member.state }}{% endif %}{% else %}—{% endif %}
+                </td>
+                <td>{{ member.get_status_display }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="footer">Documento gerado pelo Sistema Financeiro Eclésia IDB.</div>
+</body>
+</html>
