@@ -1036,8 +1036,23 @@ PUBLIC_SUBMISSION_FIELDS = (
     'born_in_city', 'born_in_state', 'profession', 'education_level',
     'marital_status', 'marriage_date', 'father_name', 'mother_name',
     'church_entry', 'church_entry_other', 'street', 'number', 'complement',
-    'neighborhood', 'city', 'state', 'cep', 'notes',
+    'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
 )
+
+
+def _valid_cpf(value: str) -> bool:
+    """Valida CPF (11 dígitos + dígitos verificadores)."""
+    digits = [int(c) for c in value if c.isdigit()]
+    if len(digits) != 11 or len(set(digits)) == 1:
+        return False
+    for length in (9, 10):
+        total = sum(d * (length + 1 - i) for i, d in enumerate(digits[:length]))
+        check = (total * 10) % 11
+        if check == 10:
+            check = 0
+        if check != digits[length]:
+            return False
+    return True
 
 
 class PublicSubmissionSerializer(serializers.Serializer):
@@ -1059,6 +1074,49 @@ class PublicSubmissionSerializer(serializers.Serializer):
                 {'data': ['O nome é obrigatório.']}
             )
         data['name'] = name
+
+        email = (data.get('email') or '').strip()
+        if email and not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$', email):
+            raise serializers.ValidationError(
+                {'data': ['E-mail inválido.']}
+            )
+        data['email'] = email
+
+        phone = (data.get('phone') or '').strip()
+        phone_digits = re.sub(r'\D', '', phone)
+        if phone and len(phone_digits) < 10:
+            raise serializers.ValidationError(
+                {'data': ['Telefone inválido (mínimo 10 dígitos).']}
+            )
+        data['phone'] = phone
+
+        cpf = (data.get('cpf') or '').strip()
+        if cpf:
+            if not _valid_cpf(cpf):
+                raise serializers.ValidationError(
+                    {'data': ['CPF inválido.']}
+                )
+        data['cpf'] = cpf
+
+        cep = (data.get('cep') or '').strip()
+        if cep and len(re.sub(r'\D', '', cep)) != 8:
+            raise serializers.ValidationError(
+                {'data': ['CEP inválido (8 dígitos).']}
+            )
+        data['cep'] = cep
+
+        photo = (data.get('photo') or '').strip()
+        if photo:
+            data_url = photo.split(',', 1)
+            if not photo.startswith('data:image/') or len(data_url) != 2:
+                raise serializers.ValidationError(
+                    {'data': ['Foto inválida (use uma imagem em base64).']}
+                )
+            if len(data_url[1]) > 2_800_000:
+                raise serializers.ValidationError(
+                    {'data': ['Foto muito grande (limite ~2MB).']}
+                )
+        data['photo'] = photo
 
         marital_status = data.get('marital_status')
         if marital_status:
@@ -1097,9 +1155,40 @@ class PublicSubmissionSerializer(serializers.Serializer):
             )
         data['state'] = state
 
+        relatives = data.get('relatives')
+        clean_relatives = []
+        if relatives is not None:
+            if not isinstance(relatives, list):
+                raise serializers.ValidationError(
+                    {'data': ['Parentes devem ser uma lista.']}
+                )
+            valid_kinships = list(MemberRelative.Kinship.values)
+            for rel in relatives:
+                rel_name = (rel.get('name') or '').strip()
+                kinship = (rel.get('kinship') or '').strip().upper()
+                if not rel_name:
+                    raise serializers.ValidationError(
+                        {'data': ['Todo parente precisa de nome.']}
+                    )
+                if kinship not in valid_kinships:
+                    raise serializers.ValidationError(
+                        {'data': [f'Grau de parentesco inválido: {kinship}.']}
+                    )
+                clean_relatives.append({
+                    'name': rel_name,
+                    'kinship': kinship,
+                    'birth_date': (rel.get('birth_date') or '') or None,
+                    'phone': (rel.get('phone') or '').strip(),
+                })
+        data['relatives'] = clean_relatives
+
         data = {k: (data.get(k) or '') for k in PUBLIC_SUBMISSION_FIELDS}
         if notes := data.get('notes'):
             data['notes'] = notes
+        if photo := data.get('photo'):
+            data['photo'] = photo
+        if data.get('relatives'):
+            data['relatives'] = clean_relatives
         attrs['data'] = data
         return attrs
 

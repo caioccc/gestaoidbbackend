@@ -1376,7 +1376,7 @@ class MinistryAreaAndMemberTests(BaseChurchTestCase):
         self.assertEqual(deleted.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(MinistryArea.objects.filter(pk=area.pk).exists())
 
-    def test_tesoureiro_cannot_manage_ministry_areas(self):
+    def test_tesoureiro_can_manage_ministry_areas(self):
         tesoureira = self._user(
             'tesoureira@teste.com', church=self.sede,
             role=ChurchMembership.Role.TESOUREIRO,
@@ -1384,7 +1384,23 @@ class MinistryAreaAndMemberTests(BaseChurchTestCase):
         resp = self._client(tesoureira).post(
             reverse('ministry-area-list'), {'name': 'Coral'}, format='json'
         )
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+    def test_tesoureiro_manages_members(self):
+        tesoureira = self._user(
+            'tesoureira@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        client = self._client(tesoureira)
+        created = client.post(
+            reverse('member-self-list'),
+            {'name': 'Marta Dias', 'cpf': '987.654.321-00'},
+            format='json',
+        )
+        self.assertEqual(created.status_code, status.HTTP_201_CREATED)
+        detail = client.get(reverse('member-self-detail', args=[created.data['id']]))
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data['name'], 'Marta Dias')
 
     def test_sede_manages_congregation_ministry_areas(self):
         MinistryArea.objects.create(church=self.sede, name='Coral')
@@ -1827,6 +1843,35 @@ class MemberFilterTests(BaseChurchTestCase):
         self.assertEqual(self._names({'status': 'ETC'}), ['Ana Lima', 'Bruno Reis', 'Carla Dias'])
         self.assertEqual(self._names({'age_min': 'abc'}), ['Ana Lima', 'Bruno Reis', 'Carla Dias'])
 
+    def test_without_paginate_returns_plain_list(self):
+        client = self._client(self._pastor())
+        resp = client.get(reverse('member-self-list'), {})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(resp.data, list)
+        self.assertEqual(len(resp.data), 3)
+
+    def test_paginate_returns_count_and_results(self):
+        client = self._client(self._pastor())
+        resp = client.get(reverse('member-self-list'), {'paginate': '1', 'page_size': 2})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertIsNotNone(resp.data['next'])
+        self.assertIsNone(resp.data['previous'])
+        self.assertEqual(len(resp.data['results']), 2)
+        resp2 = client.get(resp.data['next'])
+        self.assertEqual(resp2.data['count'], 3)
+        self.assertIsNone(resp2.data['next'])
+        self.assertEqual(len(resp2.data['results']), 1)
+
+    def test_paginate_respects_server_filters_and_order(self):
+        client = self._client(self._pastor())
+        resp = client.get(
+            reverse('member-self-list'),
+            {'paginate': '1', 'status': 'ACTIVE', 'page_size': 1},
+        )
+        self.assertEqual(resp.data['count'], 2)
+        self.assertEqual([m['name'] for m in resp.data['results']], ['Ana Lima'])
+
 
 class MemberImportTests(BaseChurchTestCase):
     """Importação do rol de membros (inspect + dry-run + commit)."""
@@ -2119,7 +2164,7 @@ class MemberDeclarationTests(BaseChurchTestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_declaration_requires_privileged_role(self):
+    def test_declaration_allows_treasurer(self):
         member = self._member()
         treasurer = self._user(
             'tesoureiro@teste.com',
@@ -2129,7 +2174,7 @@ class MemberDeclarationTests(BaseChurchTestCase):
         resp = self._client(treasurer).get(
             reverse('member-declaration', args=[member.id])
         )
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_declaration_requires_authentication(self):
         member = self._member()
@@ -2317,13 +2362,13 @@ class MemberTransferTests(BaseChurchTestCase):
         names = [c['name'] for c in resp2.data]
         self.assertIn('Congregação Teste', names)
 
-    def test_transfer_requires_privileged_role(self):
+    def test_transfer_allows_treasurer(self):
         treasurer = self._user(
             'tesouro@teste.com', church=self.sede,
             role=ChurchMembership.Role.TESOUREIRO,
         )
         resp = self._client(treasurer).get(reverse('member-transfers'))
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
 class MemberDocumentTests(BaseChurchTestCase):
@@ -2434,16 +2479,11 @@ class MemberDocumentTests(BaseChurchTestCase):
         )
         self.assertEqual(resp2.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_document_requires_privileged_role(self):
-        for method in ('get', 'upload'):
-            client = self._client(self.treasurer)
-            url = reverse('member-documents', args=[self.member.id])
-            resp = (
-                client.post(url, {}, format='multipart')
-                if method == 'upload'
-                else client.get(url)
-            )
-            self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+    def test_document_allows_treasurer(self):
+        resp = self._client(self.treasurer).get(
+            reverse('member-documents', args=[self.member.id])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
 class MemberReportTests(BaseChurchTestCase):
@@ -2507,9 +2547,9 @@ class MemberReportTests(BaseChurchTestCase):
         self.assertIn('Zé Inativo', html)
         self.assertNotIn('Ana Ativa', html)
 
-    def test_report_requires_privileged_role(self):
+    def test_report_allows_treasurer(self):
         resp = self._client(self.treasurer).get(reverse('member-report'))
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
 class CalendarPublicLinkTests(BaseChurchTestCase):
@@ -2561,14 +2601,14 @@ class CalendarPublicLinkTests(BaseChurchTestCase):
         resp = self._client(self.pastor).get(self.url())
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_treasurer_forbidden(self):
+    def test_treasurer_manages_public_link(self):
         self.assertEqual(
             self._client(self.treasurer).get(self.url()).status_code,
-            status.HTTP_403_FORBIDDEN,
+            status.HTTP_200_OK,
         )
         self.assertEqual(
             self._client(self.treasurer).post(self.regenerate_url()).status_code,
-            status.HTTP_403_FORBIDDEN,
+            status.HTTP_200_OK,
         )
 
     def test_requires_authentication(self):
@@ -2980,7 +3020,7 @@ class InventoryTests(BaseChurchTestCase):
         self.assertEqual(len(resp.data), 1)
         self.assertEqual(resp.data[0]['item_name'], 'Violão')
 
-    def test_tesoureiro_cannot_access_inventory(self):
+    def test_tesoureiro_accesses_inventory(self):
         tes = self._client(self.treasurer)
         for url in (
             reverse('storage-location-list'),
@@ -2988,7 +3028,7 @@ class InventoryTests(BaseChurchTestCase):
             reverse('loan-list'),
         ):
             resp = tes.get(url)
-            self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
 class LoanAlertsTests(BaseChurchTestCase):
@@ -3470,9 +3510,114 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         resp = self._submit(self.card_hash, name='')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_submissions_list_only_role(self):
+    def test_public_submission_rejects_invalid_cpf(self):
+        resp = self._submit(self.card_hash, cpf='11111111111')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_submission_rejects_invalid_email(self):
+        resp = self._submit(self.card_hash, email='nao-e-email')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_submission_rejects_short_phone(self):
+        resp = self._submit(self.card_hash, phone='(83) 999-9999')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_submission_rejects_bad_cep(self):
+        resp = self._submit(self.card_hash, cep='123')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_submission_validates_relatives(self):
+        resp = self._submit(self.card_hash, relatives=[{'name': '', 'kinship': 'FILHO'}])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        resp = self._submit(self.card_hash, relatives=[{'name': 'Filho', 'kinship': 'ETC'}])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_submission_accepts_valid_photo_and_relatives(self):
+        resp = self._submit(
+            self.card_hash,
+            photo=(
+                'data:image/png;base64,'
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+                'AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+            ),
+            relatives=[{'name': 'José Filho', 'kinship': 'FILHO', 'phone': '(83) 98888-0000'}],
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        sub = MemberSubmission.objects.get(pk=resp.data['id'])
+        self.assertEqual(sub.data['relatives'][0]['name'], 'José Filho')
+        self.assertTrue(sub.data['photo'].startswith('data:image/png'))
+
+    def test_approve_candidate_creates_photo_and_relatives(self):
+        from unittest import mock
+
+        church_hash = self.sede.ensure_member_form_hash()
+        self.sede.save(update_fields=['member_form_hash'])
+        self._submit(
+            church_hash,
+            name='Carlos Souza',
+            photo=(
+                'data:image/png;base64,'
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+                'AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+            ),
+            relatives=[{'name': 'Carla Filha', 'kinship': 'FILHO'}],
+        )
+        sub = MemberSubmission.objects.get()
+        with mock.patch('cloudinary.uploader.upload') as mock_upload:
+            mock_upload.return_value = {
+                'public_id': 'members/member_photo.png',
+                'secure_url': 'https://res.cloudinary.com/demo/image/upload/members/member_photo.png',
+                'url': 'http://res.cloudinary.com/demo/image/upload/members/member_photo.png',
+                'format': 'png', 'version': 1, 'type': 'upload',
+                'resource_type': 'image', 'width': 400, 'height': 400,
+                'bytes': 1024, 'created_at': '2026-01-01T00:00:00Z',
+                'signature': 'abc',
+            }
+            resp = self._client(self.secretaria).post(
+                reverse('member-submission-review', args=[sub.pk]),
+                {'action': 'approve'},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        member = Member.objects.get(name='Carlos Souza')
+        self.assertTrue(member.photo)
+        self.assertEqual(member.relatives.count(), 1)
+        self.assertEqual(member.relatives.first().name, 'Carla Filha')
+
+    def test_approve_member_updates_photo_and_replaces_relatives(self):
+        from unittest import mock
+
+        MemberRelative.objects.create(
+            member=self.member, name='Parente Antigo', kinship='IRMAO',
+        )
+        self._submit(
+            self.card_hash,
+            relatives=[{'name': 'Mariazinha', 'kinship': 'MAE'}],
+        )
+        sub = MemberSubmission.objects.get()
+        with mock.patch('cloudinary.uploader.upload') as mock_upload:
+            mock_upload.return_value = {
+                'public_id': 'members/member_photo.png',
+                'secure_url': 'https://res.cloudinary.com/demo/image/upload/members/member_photo.png',
+                'url': 'http://res.cloudinary.com/demo/image/upload/members/member_photo.png',
+                'format': 'png', 'version': 1, 'type': 'upload',
+                'resource_type': 'image', 'width': 400, 'height': 400,
+                'bytes': 1024, 'created_at': '2026-01-01T00:00:00Z',
+                'signature': 'abc',
+            }
+            resp = self._client(self.pastor).post(
+                reverse('member-submission-review', args=[sub.pk]),
+                {'action': 'approve'},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.relatives.count(), 1)
+        self.assertEqual(self.member.relatives.first().name, 'Mariazinha')
+
+    def test_submissions_list_allowed_roles(self):
         resp = self._client(self.tesoureiro).get(reverse('member-submissions'))
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
         resp = self._client(self.secretaria).get(reverse('member-submissions'))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 

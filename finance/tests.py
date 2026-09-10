@@ -362,6 +362,100 @@ class CalendarEventUnifiedTests(RepasseTestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
 
+class CalendarRecurrenceTests(RepasseTestCase):
+    """Recorrência semanal/quinzenal de eventos do calendário."""
+
+    def setUp(self):
+        super().setUp()
+        self.sec = self._user('sec@teste.com', self.sede, ChurchMembership.Role.SECRETARIA)
+
+    def url(self, pk=None):
+        base = reverse('calendar-event-list')
+        return base if pk is None else reverse('calendar-event-detail', args=[pk])
+
+    def _post(self, **extra):
+        payload = {
+            'title': 'Ensaio da Banda',
+            'category': 'ensaio',
+            'repeat_weekly': True,
+            'weekdays': [6],
+            'repeat_interval': 1,
+            'date': '2026-09-06',
+            'start_time': '09:00:00',
+            'end_time': '12:00:00',
+            **extra,
+        }
+        return self._client(self.sec).post(self.url(), payload, format='json')
+
+    def test_create_weekly_event_with_block(self):
+        resp = self._post()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(resp.data['repeat_weekly'])
+        self.assertEqual(resp.data['weekdays'], [6])
+        self.assertEqual(resp.data['repeat_interval'], 1)
+        self.assertEqual(resp.data['end_time'], '12:00:00')
+        ev = CalendarEvent.objects.get(pk=resp.data['id'])
+        self.assertFalse(ev.repeat_monthly)
+        self.assertIsNone(ev.month)
+        self.assertIsNone(ev.day)
+
+    def test_create_biweekly_event(self):
+        resp = self._post(repeat_interval=2, date='2026-09-06')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['repeat_interval'], 2)
+
+    def test_biweekly_requires_anchor(self):
+        resp = self._post(repeat_interval=2, date=None)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_anchor_weekday_must_match(self):
+        resp = self._post(repeat_interval=2, date='2026-09-09', weekdays=[0])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_weekly_requires_weekdays(self):
+        resp = self._post(weekdays=[])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_weekly_rejects_out_of_range_weekday(self):
+        resp = self._post(weekdays=[7])
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mixed_recurrence_rejected(self):
+        resp = self._post(repeat_monthly=True)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_end_time_must_follow_start(self):
+        resp = self._post(start_time='12:00:00', end_time='09:00:00')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_patch_partial_keeps_recurrence(self):
+        resp = self._post()
+        ev_id = resp.data['id']
+        resp = self._client(self.sec).patch(
+            self.url(ev_id), {'title': 'Renomeado'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ev = CalendarEvent.objects.get(pk=ev_id)
+        self.assertTrue(ev.repeat_weekly)
+        self.assertEqual(ev.weekdays, [6])
+        self.assertEqual(ev.title, 'Renomeado')
+
+    def test_public_serializer_exposes_weekly_fields(self):
+        ev = CalendarEvent.objects.create(
+            church=self.sede, audience='GENERAL', title='EBD',
+            category='culto', repeat_weekly=True, weekdays=[6],
+            repeat_interval=1, date='2026-09-06', start_time='17:00:00',
+        )
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=['calendar_public_hash'])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        item = resp.data['events'][0]
+        self.assertTrue(item['repeat_weekly'])
+        self.assertEqual(item['weekdays'], [6])
+        self.assertEqual(item['repeat_interval'], 1)
+
+
 class ValidationChecksCongregationTests(RepasseTestCase):
     """Congregações não possuem prebenda pastoral (paga pela Sede)."""
 

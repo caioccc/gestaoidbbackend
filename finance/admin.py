@@ -13,8 +13,8 @@ from .models import (
 
 @admin.register(CalendarEvent)
 class CalendarEventAdmin(admin.ModelAdmin):
-    list_display = ['title', 'church', 'category', 'repeat_monthly', 'date', 'day', 'created_at']
-    list_filter = ['category', 'repeat_monthly', 'church']
+    list_display = ['title', 'church', 'category', 'repeat_monthly', 'repeat_weekly', 'date', 'day', 'created_at']
+    list_filter = ['category', 'repeat_monthly', 'repeat_weekly', 'church']
     search_fields = ['title', 'church__name']
 
 

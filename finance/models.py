@@ -137,8 +137,10 @@ class CalendarEvent(models.Model):
     `audience=FINANCE`: eventos do tesoureiro — visíveis e editáveis apenas por
     TESOUREIRO/PASTOR/ADMIN (a secretaria não os enxerga).
 
-    Suporta eventos recorrentes (repeat_monthly=True, usando month/day) e
-    eventos pontuais (repeat_monthly=False, usando date).
+    Suporta eventos recorrentes — mensais (repeat_monthly=True, usando
+    month/day), semanais/quinzenais (repeat_weekly=True, usando weekdays +
+    repeat_interval + date como âncora) — e eventos pontuais
+    (repeat_monthly=False/repeat_weekly=False, usando date).
     """
 
     class Category(models.TextChoices):
@@ -178,6 +180,8 @@ class CalendarEvent(models.Model):
     )
     description = models.TextField('Descrição', blank=True)
     start_time = models.TimeField('Horário de início', null=True, blank=True)
+    end_time = models.TimeField('Horário de fim', null=True, blank=True,
+                                help_text='Usado p/ blocos de horário (ex.: 9h às 12h).')
     members = models.ManyToManyField(
         'accounts.Member',
         related_name='calendar_events',
@@ -185,9 +189,26 @@ class CalendarEvent(models.Model):
         verbose_name='Membros envolvidos',
     )
     repeat_monthly = models.BooleanField('Recorre mensalmente', default=False)
+    repeat_weekly = models.BooleanField('Recorre semanalmente', default=False)
+    weekdays = models.JSONField(
+        'Dias da semana (ISO: 0=Seg..6=Dom)',
+        default=list,
+        blank=True,
+        help_text='Usado quando repeat_weekly=True.',
+    )
+    repeat_interval = models.PositiveIntegerField(
+        'Intervalo em semanas',
+        default=1,
+        validators=[MinValueValidator(1), MaxValueValidator(2)],
+        help_text='1 = toda semana; 2 = quinzenal (âncora = date).',
+    )
+    repeat_end_date = models.DateField(
+        'Fim da recorrência', null=True, blank=True,
+        help_text='Último dia de repetição (opcional).',
+    )
     date = models.DateField(
         'Data (evento pontual)', null=True, blank=True,
-        help_text='Preenchido quando o evento não recorre mensalmente.',
+        help_text='Evento pontual, ou âncora/início de eventos semanais/quinzenais.',
     )
     month = models.PositiveIntegerField(
         'Mês (recorrente)',

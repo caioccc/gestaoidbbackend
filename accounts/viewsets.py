@@ -14,6 +14,7 @@ from django.utils.text import slugify
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
@@ -30,6 +31,7 @@ from .models import (
     MaterialItem,
     Member,
     MemberDocument,
+    MemberRelative,
     MemberSubmission,
     MemberTransfer,
     MinistryArea,
@@ -658,18 +660,38 @@ def apply_member_filters(qs, params):
     return qs
 
 
+class MemberListPagination(PageNumberPagination):
+    """Paginação da listagem de membros (ativa com `?paginate=1`)."""
+
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+
 class MemberSelfViewSet(viewsets.ModelViewSet):
     """CRUD de membros da igreja ativa (Secretaria/Pastor/Admin). Sem dados
-    financeiros."""
+    financeiros.
+
+    `list` retorna todos quando chamado sem `paginate`, e paginado
+    ({count, next, previous, results}) quando `?paginate=1`. Os filtros
+    (search/status/area/education/marital_status/church_entry) aplicam-se
+    nos dois modos.
+    """
 
     serializer_class = MemberSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context['church'] = self.request.user.church
         return context
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get('paginate') != '1':
+            return super().list(request, *args, **kwargs)
+        self.pagination_class = MemberListPagination
+        return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
         church = self.request.user.church
@@ -706,7 +728,7 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
 class MemberImportInspectView(APIView):
     """Inspeciona a planilha do rol e sugere o mapeamento de colunas."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def post(self, request):
         file = request.FILES.get('file')
@@ -726,7 +748,7 @@ class MemberImportInspectView(APIView):
 class MemberImportView(APIView):
     """Importa o rol de membros (dry_run=1 apenas simula, sem gravar)."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def post(self, request):
         file = request.FILES.get('file')
@@ -761,7 +783,7 @@ class MinistryAreaViewSet(viewsets.ModelViewSet):
     """CRUD das áreas de atuação da igreja ativa (Secretaria/Pastor/Admin)."""
 
     serializer_class = MinistryAreaSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def get_serializer_context(self):
@@ -783,7 +805,7 @@ class StorageLocationViewSet(viewsets.ModelViewSet):
     """CRUD dos locais de armazenamento da igreja ativa."""
 
     serializer_class = StorageLocationSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def get_serializer_context(self):
@@ -805,7 +827,7 @@ class MaterialItemViewSet(viewsets.ModelViewSet):
     """CRUD dos materiais/equipamentos do inventário da igreja ativa."""
 
     serializer_class = MaterialItemSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def get_serializer_context(self):
@@ -834,7 +856,7 @@ class LoanViewSet(viewsets.ModelViewSet):
     """CRUD dos empréstimos de materiais/equipamentos da igreja ativa."""
 
     serializer_class = LoanSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def get_serializer_context(self):
@@ -987,7 +1009,7 @@ class ChurchMembersViewSet(viewsets.ModelViewSet):
     """CRUD de membros de uma igreja específica da rota (Secretaria/Pastor/Admin)."""
 
     serializer_class = MemberSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def _church(self):
@@ -1017,7 +1039,7 @@ class ChurchMinistryAreasViewSet(viewsets.ModelViewSet):
     é a dona das áreas, não a igreja ativa do usuário."""
 
     serializer_class = MinistryAreaSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def _church(self):
@@ -1067,7 +1089,7 @@ class AccountingCategoriesView(APIView):
 class TransferTargetChurchesView(APIView):
     """Busca igrejas ativas como destino de transferência (exclui a própria)."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request):
         church = request.user.church
@@ -1087,7 +1109,7 @@ class TransferTargetChurchesView(APIView):
 class MemberTransferView(APIView):
     """Transferências emitidas pela igreja ativa (lista) e emissão."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def _church(self, request):
         church = request.user.church
@@ -1120,7 +1142,7 @@ class MemberTransferView(APIView):
 class IncomingMemberTransfersView(APIView):
     """Transferências recebidas pela igreja ativa (entrada)."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request):
         church = request.user.church
@@ -1133,7 +1155,7 @@ class IncomingMemberTransfersView(APIView):
 class ReceiveMemberTransferView(APIView):
     """Recebe uma transferência pendente e cria o membro no rol."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def post(self, request, pk):
         church = request.user.church
@@ -1149,7 +1171,7 @@ class ReceiveMemberTransferView(APIView):
 class CancelMemberTransferView(APIView):
     """Cancela uma transferência pendente (somente a igreja de origem)."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def post(self, request, pk):
         church = request.user.church
@@ -1169,7 +1191,7 @@ class MemberDeclarationView(APIView):
     (Secretaria/Pastor/Admin).
     """
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request, pk):
         church = request.user.church
@@ -1193,7 +1215,7 @@ class MemberDeclarationView(APIView):
 class MemberDocumentsView(APIView):
     """Listagem e upload de documentos de um membro da igreja ativa."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def _church(self, request):
         church = request.user.church
@@ -1238,7 +1260,7 @@ class MemberDocumentsView(APIView):
 class MemberDocumentDetailView(APIView):
     """Exclusão de um documento (restrito à igreja do membro)."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def delete(self, request, pk):
         church = request.user.church
@@ -1255,7 +1277,7 @@ class MemberDocumentDetailView(APIView):
 class MemberDocumentDownloadView(APIView):
     """Download autenticado de um documento da igreja ativa."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request, pk):
         church = request.user.church
@@ -1286,7 +1308,7 @@ class MemberReportPdfView(APIView):
     padrão; `?status=INACTIVE` para inativos), no padrão xhtml2pdf.
     """
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request):
         church = request.user.church
@@ -1312,7 +1334,7 @@ class CalendarPublicLinkView(APIView):
     GET retorna o hash atual, gerando-o caso não exista ainda.
     """
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request):
         church = request.user.church
@@ -1335,7 +1357,7 @@ class CalendarPublicLinkRegenerateView(APIView):
     Regenerar invalida a URL antiga que já estiver divulgada.
     """
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def post(self, request):
         church = request.user.church
@@ -1359,7 +1381,7 @@ class ChurchMemberFormLinkView(APIView):
     POST → regenera o hash (invalida o link antigo divulgado).
     """
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def get(self, request):
         church = request.user.church
@@ -1475,7 +1497,7 @@ class MemberSubmissionsView(APIView):
     PASTOR/SECRETARIA. `?status=PENDING|APPROVED|REJECTED` filtra.
     """
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
     pagination_class = None
 
     def get(self, request):
@@ -1492,7 +1514,7 @@ class MemberSubmissionsView(APIView):
 class MemberSubmissionReviewView(APIView):
     """Aprova ou rejeita uma submissão (aplica os dados ou arquiva)."""
 
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
     def post(self, request, pk):
         submission = MemberSubmission.objects.filter(
@@ -1530,30 +1552,58 @@ class MemberSubmissionReviewView(APIView):
         for date_field in ('birth_date', 'marriage_date'):
             if data.get(date_field) in (None, ''):
                 data[date_field] = None
+        photo_raw = (data.pop('photo', '') or '')
+        photo_file = services.data_url_to_file(photo_raw, 'member_photo.png')
+        relatives = data.pop('relatives', None) or []
+        if not isinstance(relatives, list):
+            relatives = []
+
+        def save_member_photo(member):
+            if photo_file is not None:
+                member.photo = photo_file
+
         if submission.member is not None:
             for field in PUBLIC_SUBMISSION_FIELDS:
-                if field in data and field not in ('name',):
+                if field in data and field not in ('name', 'photo', 'relatives'):
                     setattr(submission.member, field, data[field])
             if data.get('name'):
                 submission.member.name = data['name'].strip()
+            save_member_photo(submission.member)
             submission.member.save()
+            submission.member.relatives.all().delete()
+            self._create_relatives(submission.member, relatives)
             submission.notes = 'Dados aplicados ao membro existente.'
             return
+        member_kwargs = {k: v for k, v in data.items() if k in (
+            'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+            'born_in_city', 'born_in_state', 'profession',
+            'education_level', 'marital_status', 'marriage_date',
+            'father_name', 'mother_name', 'church_entry',
+            'church_entry_other', 'street', 'number', 'complement',
+            'neighborhood', 'city', 'state', 'cep', 'notes',
+        )}
+        if photo_file is not None:
+            member_kwargs['photo'] = photo_file
         submission.member = Member.objects.create(
             church=submission.church,
             status=Member.Status.ACTIVE,
-            **{k: v for k, v in data.items() if k in (
-                'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
-                'born_in_city', 'born_in_state', 'profession',
-                'education_level', 'marital_status', 'marriage_date',
-                'father_name', 'mother_name', 'church_entry',
-                'church_entry_other', 'street', 'number', 'complement',
-                'neighborhood', 'city', 'state', 'cep', 'notes',
-            )},
+            **member_kwargs,
         )
         submission.member.card_number = services.next_member_card_number(submission.church)
         submission.member.save(update_fields=['card_number'])
+        self._create_relatives(submission.member, relatives)
         submission.notes = 'Candidato criado a partir do formulário público.'
+
+    @staticmethod
+    def _create_relatives(member, relatives):
+        for rel in relatives:
+            MemberRelative.objects.create(
+                member=member,
+                name=(rel.get('name') or '').strip(),
+                kinship=rel.get('kinship'),
+                birth_date=rel.get('birth_date') or None,
+                phone=(rel.get('phone') or '').strip(),
+            )
 
 
 class BirthdayMembersView(APIView):
