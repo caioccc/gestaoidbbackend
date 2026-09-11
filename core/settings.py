@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
@@ -28,6 +29,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # configuração de e-mail (SMTP), DATABASE_URL etc. são lidos de os.environ.
 from dotenv import load_dotenv  # noqa: E402
 load_dotenv(BASE_DIR / '.env')
+
+# Durante a suíte de testes (manage.py test) as mídias vão para o filesystem
+# local (core/storage.py) — mantém os testes herméticos, sem rede/Cloudinary.
+if 'test' in sys.argv:
+    os.environ.setdefault('USE_LOCAL_MEDIA_STORAGE', '1')
 
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-dev-key')
 DEBUG = config('DEBUG', default=True, cast=bool)
@@ -192,15 +198,29 @@ FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
 PDF_ENGINE = os.getenv('PDF_ENGINE', 'xhtml2pdf')
 
+# Cloudinary (armazenamento de mídia) — credenciais SEMPRE vêm do ambiente.
+# Nada de credenciais hardcoded: em produção (DEBUG=False) a ausência das
+# variáveis encerra o boot com erro explícito.
+_cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME', '')
+_cloud_api_key = os.environ.get('CLOUDINARY_API_KEY', '')
+_cloud_api_secret = os.environ.get('CLOUDINARY_API_SECRET', '')
+
+if not DEBUG and not all((_cloud_name, _cloud_api_key, _cloud_api_secret)):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        'Cloudinary não configurado. Defina CLOUDINARY_CLOUD_NAME, '
+        'CLOUDINARY_API_KEY e CLOUDINARY_API_SECRET no .env.'
+    )
+
 cloudinary.config(
-    cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME', 'freelancerinc'),
-    api_key=os.environ.get('CLOUDINARY_API_KEY', '977733565746842'),
-    api_secret=os.environ.get('CLOUDINARY_API_SECRET', 'q552mjrVeEmgPs1kUxfKzp4wz2o'),
+    cloud_name=_cloud_name,
+    api_key=_cloud_api_key,
+    api_secret=_cloud_api_secret,
 )
 
 CLOUDINARY_STORAGE = {
-    'CLOUD_NAME': os.environ.get('CLOUDINARY_CLOUD_NAME', 'freelancerinc'),
-    'API_KEY': os.environ.get('CLOUDINARY_API_KEY', '977733565746842'),
-    'API_SECRET': os.environ.get('CLOUDINARY_API_SECRET', 'q552mjrVeEmgPs1kUxfKzp4wz2o'),
+    'CLOUD_NAME': _cloud_name,
+    'API_KEY': _cloud_api_key,
+    'API_SECRET': _cloud_api_secret,
     'SECURE': True,
 }

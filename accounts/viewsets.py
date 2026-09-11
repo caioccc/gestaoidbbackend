@@ -6,7 +6,7 @@ import uuid
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -27,6 +27,7 @@ from .models import (
     Church,
     ChurchMembership,
     ChurchMinutes,
+    ChurchPublicLink,
     Loan,
     MaterialItem,
     Member,
@@ -52,9 +53,11 @@ from .serializers import (
     PUBLIC_SUBMISSION_FIELDS,
     AddChurchUserSerializer,
     ChurchCreateSerializer,
+    ChurchLinksConfigSerializer,
     ChurchMembershipSerializer,
     ChurchMinutesSerializer,
     ChurchProfileSerializer,
+    ChurchPublicLinkSerializer,
     ChurchSerializer,
     ChurchUpdateSerializer,
     LoanSerializer,
@@ -66,6 +69,7 @@ from .serializers import (
     MinistryAreaSerializer,
     PendingChurchSerializer,
     PendingCongregationSerializer,
+    PublicChurchLinksSerializer,
     PublicMemberCardSerializer,
     PublicMemberFormSerializer,
     PublicSubmissionSerializer,
@@ -181,6 +185,15 @@ class SwitchChurchView(APIView):
             'user': UserSerializer(request.user).data,
             'detail': 'Contexto alterado com sucesso.',
         })
+
+
+class MeView(APIView):
+    """Sessão atual do usuário autenticado (dados frescos para o frontend)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        return Response({'user': UserSerializer(request.user).data})
 
 
 class SearchParentChurchesView(APIView):
@@ -495,6 +508,8 @@ class ChurchViewSet(viewsets.ModelViewSet):
             raise PermissionDenied(
                 'Apenas administradores podem excluir uma Igreja Sede.'
             )
+        if not instance.is_sede():
+            self._assert_sede_manager()
         with transaction.atomic():
             instance.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -951,6 +966,72 @@ class ChurchMinutesViewSet(viewsets.ModelViewSet):
             as_attachment=True,
             filename=os.path.basename(minutes.pdf.name or 'ata.pdf'),
         )
+
+
+class ChurchPublicLinkViewSet(viewsets.ModelViewSet):
+    """CRUD de links públicos da igreja ativa (PASTOR / SECRETARIA)."""
+
+    serializer_class = ChurchPublicLinkSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return ChurchPublicLink.objects.none()
+        return ChurchPublicLink.objects.filter(church=church).order_by('order', 'id')
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def perform_create(self, serializer):
+        church = self.request.user.church
+        count = ChurchPublicLink.objects.filter(church=church).count()
+        serializer.save(church=church, order=count)
+
+    @action(detail=False, methods=['post'])
+    def reorder(self, request):
+        """Recebe `{"order": [5, 3, 1]}` e atualiza a ordem em bloco."""
+        church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Nenhuma igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ids = request.data.get('order', [])
+        if not isinstance(ids, list):
+            raise ValidationError({'order': 'Esperado uma lista de IDs.'})
+        with transaction.atomic():
+            links = {
+                l.id: l
+                for l in ChurchPublicLink.objects.filter(church=church, id__in=ids)
+            }
+            for position, pk in enumerate(ids):
+                link = links.get(pk)
+                if link is None:
+                    continue
+                ChurchPublicLink.objects.filter(pk=pk).update(order=position)
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get', 'patch'], url_path='config')
+    def config(self, request):
+        """Consulta e edição da configuração de links da igreja."""
+        church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Nenhuma igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if request.method == 'PATCH':
+            serializer = ChurchLinksConfigSerializer(
+                church, data=request.data, partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data)
+        return Response(ChurchLinksConfigSerializer(church).data)
 
 
 class PublicMinutesView(APIView):
@@ -1489,6 +1570,53 @@ class PublicMemberFormView(APIView):
             'id': submission.id,
             'status': submission.status,
         }, status=status.HTTP_201_CREATED)
+
+
+class PublicChurchLinksView(APIView):
+    """Página pública de links da igreja (https://.../p/{slug}).
+
+    Aceita o slug amigável ou o `links_hash` alternativo. Retorna 404 quando
+    o recurso não existe ou a página pública está desabilitada.
+    """
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, slug):
+        church = (
+            Church.objects.select_related('parent_church')
+            .filter(slug=slug, public_links_enabled=True)
+            .first()
+        )
+        if church is None:
+            church = (
+                Church.objects.select_related('parent_church')
+                .filter(links_hash=slug, public_links_enabled=True)
+                .first()
+            )
+        if church is None:
+            raise NotFound('Página não encontrada.')
+        links = church.public_links.filter(is_active=True).order_by('order', 'id')
+        return Response(
+            PublicChurchLinksSerializer(
+                {'church': church, 'links': links}, context={'request': request},
+            ).data
+        )
+
+
+class PublicChurchLinkClickView(APIView):
+    """Incrementa (de forma atômica) o contador de cliques de um link."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, pk):
+        updated = ChurchPublicLink.objects.filter(pk=pk).update(
+            click_count=F('click_count') + 1
+        )
+        if not updated:
+            raise NotFound('Link não encontrado.')
+        return Response({'status': 'ok'})
 
 
 class MemberSubmissionsView(APIView):

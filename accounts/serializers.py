@@ -1,9 +1,13 @@
 import os
 import re
 from datetime import date
+from decimal import Decimal
+from urllib.parse import quote
 
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.db import transaction
+from django.utils.text import slugify
 from rest_framework import serializers
 
 from . import services
@@ -12,6 +16,7 @@ from .models import (
     Church,
     ChurchMembership,
     ChurchMinutes,
+    ChurchPublicLink,
     Loan,
     MaterialItem,
     Member,
@@ -27,6 +32,21 @@ from .models import (
 User = get_user_model()
 
 
+class ChurchLogoField(serializers.Field):
+    """Campo de logo da igreja: aceita data URL (base64) e devolve a URL."""
+
+    def to_internal_value(self, data):
+        if data in (None, '', False):
+            return None
+        uploaded = services.data_url_to_file(data, 'church_logo.png')
+        if uploaded is None:
+            raise serializers.ValidationError('Logo inválido.')
+        return uploaded
+
+    def to_representation(self, value):
+        return services.cloudinary_url(value)
+
+
 class ChurchSerializer(serializers.ModelSerializer):
     """Serializa a igreja para listagem/consulta."""
 
@@ -36,11 +56,13 @@ class ChurchSerializer(serializers.ModelSerializer):
     responsible_user_id = serializers.IntegerField(
         source='responsible_user.id', read_only=True, allow_null=True,
     )
+    logo = ChurchLogoField(required=False, allow_null=True)
 
     class Meta:
         model = Church
         fields = [
             'id', 'name', 'church_type', 'church_type_display',
+            'logo',
             'parent_church', 'is_approved', 'accounting_category',
             'responsible_user_id',
             'pastor_name', 'treasurer_name', 'phone',
@@ -191,12 +213,14 @@ class ChurchProfileSerializer(serializers.ModelSerializer):
     church_type_display = serializers.CharField(
         source='get_church_type_display', read_only=True,
     )
+    logo = ChurchLogoField(required=False, allow_null=True)
 
     class Meta:
         model = Church
         fields = [
             'id', 'name', 'church_type', 'church_type_display',
             'parent_church', 'is_approved', 'accounting_category',
+            'logo',
             'pastor_name', 'treasurer_name', 'phone',
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
             'latitude', 'longitude', 'pastoral_prebenda_percent',
@@ -370,12 +394,14 @@ class UserSerializer(serializers.ModelSerializer):
     church = ChurchSerializer(read_only=True)
     role = serializers.CharField(source='active_role', read_only=True)
     role_display = serializers.SerializerMethodField()
+    can_manage_churches = serializers.BooleanField(read_only=True)
+    can_approve_congregations = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'email', 'name', 'is_staff', 'is_active', 'church', 'role',
-            'role_display',
+            'role_display', 'can_manage_churches', 'can_approve_congregations',
         ]
 
     def get_role_display(self, instance):
@@ -562,11 +588,14 @@ class MaterialItemSerializer(serializers.ModelSerializer):
         },
     )
     current_loan = serializers.SerializerMethodField()
+    photo = serializers.FileField(required=False, allow_null=True)
+    manual = serializers.FileField(required=False, allow_null=True)
 
     class Meta:
         model = MaterialItem
         fields = [
             'id', 'church', 'name', 'description', 'location', 'location_name',
+            'photo', 'manual',
             'current_loan', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'church', 'created_at', 'updated_at']
@@ -1221,3 +1250,320 @@ class MemberSubmissionSerializer(serializers.ModelSerializer):
         if not obj.reviewed_by:
             return None
         return obj.reviewed_by.name or obj.reviewed_by.email
+
+
+DEFAULT_LINK_ICONS = {
+    ChurchPublicLink.LinkType.CUSTOM: 'link',
+    ChurchPublicLink.LinkType.PIX: 'qrcode',
+    ChurchPublicLink.LinkType.WHATSAPP: 'brand-whatsapp',
+    ChurchPublicLink.LinkType.YOUTUBE: 'brand-youtube',
+    ChurchPublicLink.LinkType.MAPS: 'map-pin',
+    ChurchPublicLink.LinkType.INSTAGRAM: 'brand-instagram',
+    ChurchPublicLink.LinkType.CALENDAR: 'calendar',
+    ChurchPublicLink.LinkType.MEMBERSHIP: 'user-plus',
+}
+
+
+class ChurchPublicLinkSerializer(serializers.ModelSerializer):
+    """CRUD de links no painel (escopo da igreja ativa)."""
+
+    link_type_display = serializers.CharField(
+        source='get_link_type_display', read_only=True,
+    )
+
+    class Meta:
+        model = ChurchPublicLink
+        fields = [
+            'id', 'church', 'title', 'url', 'link_type', 'link_type_display',
+            'pix_key', 'pix_type', 'pix_amount_mode', 'pix_fixed_amount',
+            'pix_grid_amounts', 'pix_open_amount', 'whatsapp_number',
+            'address_cep', 'address_street', 'address_number',
+            'address_neighborhood', 'address_city', 'address_state',
+            'icon_key', 'order', 'is_active', 'highlight', 'click_count',
+            'created_at',
+        ]
+        read_only_fields = ['church', 'click_count', 'created_at', 'order']
+
+    def _context_church(self):
+        church = self.context.get('church')
+        if church is not None:
+            return church
+        request = self.context.get('request')
+        return request.user.church if request else None
+
+    def _clear_other(self, attrs):
+        """Mantém apenas os campos relevantes ao tipo do link."""
+        for f in (
+            'whatsapp_number', 'address_cep', 'address_street', 'address_number',
+            'address_neighborhood', 'address_city', 'address_state',
+        ):
+            attrs[f] = attrs.get(f, '') or ''
+        for f in (
+            'pix_key', 'pix_type', 'pix_fixed_amount', 'pix_grid_amounts',
+        ):
+            attrs[f] = None
+        attrs['pix_amount_mode'] = 'OPEN'
+        attrs['pix_open_amount'] = False
+
+    def validate(self, attrs):
+        link_type = attrs.get('link_type') or getattr(self.instance, 'link_type', None)
+        url = attrs.get('url', getattr(self.instance, 'url', ''))
+
+        if link_type == ChurchPublicLink.LinkType.PIX:
+            pix_key = attrs.get('pix_key', getattr(self.instance, 'pix_key', None))
+            if not pix_key:
+                raise serializers.ValidationError(
+                    {'pix_key': 'Informe a chave PIX para este link.'}
+                )
+            attrs['url'] = url or ''
+            if not attrs.get('pix_type'):
+                attrs['pix_type'] = getattr(self.instance, 'pix_type', None)
+
+            mode = attrs.get(
+                'pix_amount_mode',
+                getattr(self.instance, 'pix_amount_mode', 'OPEN'),
+            ) or 'OPEN'
+            if mode not in ('OPEN', 'FIXED', 'GRID'):
+                mode = 'OPEN'
+            attrs['pix_amount_mode'] = mode
+
+            attrs['whatsapp_number'] = ''
+            for f in ('address_cep', 'address_street', 'address_number',
+                      'address_neighborhood', 'address_city', 'address_state'):
+                attrs[f] = ''
+
+            if mode == 'FIXED':
+                amount = attrs.get(
+                    'pix_fixed_amount',
+                    getattr(self.instance, 'pix_fixed_amount', None),
+                )
+                if amount is None:
+                    amount = 0
+                try:
+                    amount_dec = Decimal(str(amount)).quantize(Decimal('0.01'))
+                except Exception:
+                    amount_dec = Decimal('0')
+                if amount_dec <= 0:
+                    raise serializers.ValidationError(
+                        {'pix_fixed_amount': 'Informe um valor fixo válido.'}
+                    )
+                attrs['pix_fixed_amount'] = float(amount_dec)
+                attrs['pix_grid_amounts'] = None
+                attrs['pix_open_amount'] = False
+            elif mode == 'GRID':
+                grid = attrs.get(
+                    'pix_grid_amounts',
+                    getattr(self.instance, 'pix_grid_amounts', None),
+                )
+                if not grid:
+                    grid = [30, 50, 100, 200]
+                try:
+                    values = [Decimal(str(v)) for v in grid]
+                except Exception:
+                    raise serializers.ValidationError(
+                        {'pix_grid_amounts': 'Informe valores válidos.'}
+                    )
+                if not values or any(v <= 0 for v in values):
+                    raise serializers.ValidationError(
+                        {'pix_grid_amounts': 'Informe ao menos um valor positivo.'}
+                    )
+                values = values[:10]
+                attrs['pix_grid_amounts'] = [
+                    float(v.quantize(Decimal('0.01'))) for v in values
+                ]
+                attrs['pix_fixed_amount'] = None
+                if 'pix_open_amount' not in attrs:
+                    attrs['pix_open_amount'] = getattr(
+                        self.instance, 'pix_open_amount', True
+                    )
+            else:  # OPEN
+                attrs['pix_fixed_amount'] = None
+                attrs['pix_grid_amounts'] = None
+                attrs['pix_open_amount'] = False
+        elif link_type == ChurchPublicLink.LinkType.WHATSAPP:
+            number = attrs.get(
+                'whatsapp_number',
+                getattr(self.instance, 'whatsapp_number', ''),
+            )
+            digits = re.sub(r'\D', '', number or '')
+            if len(digits) in (10, 11):
+                digits = f'55{digits}'
+            if len(digits) < 12 or len(digits) > 15:
+                raise serializers.ValidationError(
+                    {'whatsapp_number': 'Número de WhatsApp inválido.'}
+                )
+            attrs['whatsapp_number'] = digits
+            attrs['url'] = f'https://wa.me/{digits}'
+            for f in ('pix_key', 'pix_type', 'pix_fixed_amount', 'pix_grid_amounts'):
+                attrs[f] = None
+            attrs['pix_amount_mode'] = 'OPEN'
+            attrs['pix_open_amount'] = False
+            for f in ('address_cep', 'address_street', 'address_number',
+                      'address_neighborhood', 'address_city', 'address_state'):
+                attrs[f] = ''
+        elif link_type == ChurchPublicLink.LinkType.MAPS:
+            street = (attrs.get('address_street', getattr(self.instance, 'address_street', '')) or '').strip()
+            num = (attrs.get('address_number', getattr(self.instance, 'address_number', '')) or '').strip()
+            city = (attrs.get('address_city', getattr(self.instance, 'address_city', '')) or '').strip()
+            if not street or not num or not city:
+                raise serializers.ValidationError(
+                    {'address_number': 'Informe CEP, logradouro e número para o mapa.'}
+                )
+            for f in ('address_cep', 'address_street', 'address_number',
+                      'address_neighborhood', 'address_city', 'address_state'):
+                attrs[f] = (attrs.get(f, getattr(self.instance, f, '')) or '').strip()
+            parts = [
+                attrs['address_street'], attrs['address_number'],
+                attrs['address_neighborhood'], attrs['address_city'],
+                attrs['address_state'],
+            ]
+            query = ', '.join(p for p in parts if p)
+            attrs['url'] = f'https://www.google.com/maps/search/?api=1&query={quote(query)}'
+            for f in ('pix_key', 'pix_type', 'pix_fixed_amount', 'pix_grid_amounts'):
+                attrs[f] = None
+            attrs['pix_amount_mode'] = 'OPEN'
+            attrs['pix_open_amount'] = False
+            attrs['whatsapp_number'] = ''
+        elif link_type in (
+            ChurchPublicLink.LinkType.CALENDAR,
+            ChurchPublicLink.LinkType.MEMBERSHIP,
+        ):
+            # Sistema: a URL é resolvida a partir dos hashes públicos da igreja.
+            attrs['url'] = ''
+            attrs['pix_key'] = None
+            attrs['pix_type'] = None
+            self._clear_other(attrs)
+        else:
+            if not url:
+                raise serializers.ValidationError(
+                    {'url': 'Informe a URL do link.'}
+                )
+            if not url.startswith(('http://', 'https://')):
+                raise serializers.ValidationError(
+                    {'url': 'URL inválida. Use http:// ou https://.'}
+                )
+            attrs['pix_key'] = None
+            attrs['pix_type'] = None
+            self._clear_other(attrs)
+
+        if not attrs.get('icon_key'):
+            default_icon = DEFAULT_LINK_ICONS.get(link_type)
+            if default_icon:
+                attrs['icon_key'] = default_icon
+        return attrs
+
+
+class ChurchLinksConfigSerializer(serializers.ModelSerializer):
+    """Configuração global da página de links da igreja ativa."""
+
+    slug = serializers.SlugField(required=False, allow_blank=True)
+
+    class Meta:
+        model = Church
+        fields = [
+            'slug', 'public_links_enabled', 'theme_color',
+            'default_pix_key', 'default_pix_type',
+        ]
+
+    def validate_theme_color(self, value):
+        value = (value or '').strip().upper()
+        if value and not re.fullmatch(r'#[0-9A-F]{6}', value):
+            raise serializers.ValidationError(
+                'Cor inválida. Use o formato #RRGGBB.'
+            )
+        return value
+
+    def validate_slug(self, value):
+        value = (value or '').strip()
+        if not value:
+            return value
+        value = slugify(value)[:100]
+
+        def taken(candidate):
+            qs = Church.objects.filter(slug=candidate)
+            if self.instance is not None:
+                qs = qs.exclude(pk=self.instance.pk)
+            return qs.exists()
+
+        if not taken(value):
+            return value
+        base = value
+        suffix = 2
+        while taken(f'{base[:100 - len(f"-{suffix}")]}-{suffix}'):
+            suffix += 1
+        return f'{base[:100 - len(f"-{suffix}")]}-{suffix}'
+
+
+class PublicChurchPublicLinkSerializer(serializers.ModelSerializer):
+    """Link exibido na página pública, com URL resolvida para tipos do sistema."""
+
+    link_type_display = serializers.CharField(
+        source='get_link_type_display', read_only=True,
+    )
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ChurchPublicLink
+        fields = [
+            'id', 'title', 'url', 'link_type', 'link_type_display',
+            'icon_key', 'highlight', 'click_count',
+            'pix_key', 'pix_type', 'pix_amount_mode', 'pix_fixed_amount',
+            'pix_grid_amounts', 'pix_open_amount',
+        ]
+
+    def get_url(self, obj):
+        if obj.link_type == ChurchPublicLink.LinkType.CALENDAR:
+            if obj.church.calendar_public_hash:
+                return f'{settings.FRONTEND_URL}/calendario/{obj.church.calendar_public_hash}'
+            return ''
+        if obj.link_type == ChurchPublicLink.LinkType.MEMBERSHIP:
+            if obj.church.member_form_hash:
+                return f'{settings.FRONTEND_URL}/formulario/{obj.church.member_form_hash}'
+            return ''
+        return obj.url
+
+
+class PublicChurchLinksSerializer(serializers.Serializer):
+    """Payload completo da página pública `/p/{slug}`."""
+
+    church = serializers.SerializerMethodField()
+    system_links = serializers.SerializerMethodField()
+    links = serializers.SerializerMethodField()
+
+    def get_church(self, obj):
+        church = obj['church']
+        return {
+            'name': church.name,
+            'city': church.city,
+            'state': church.state,
+            'neighborhood': church.neighborhood,
+            'logo': services.cloudinary_url(church.logo),
+            'theme_color': church.theme_color,
+        }
+
+    def get_system_links(self, obj):
+        church = obj['church']
+        stored = {link.link_type for link in obj['links']}
+        system = []
+        if church.calendar_public_hash and ChurchPublicLink.LinkType.CALENDAR not in stored:
+            system.append({
+                'link_type': ChurchPublicLink.LinkType.CALENDAR,
+                'title': 'Agenda de Cultos',
+                'url': f'{settings.FRONTEND_URL}/calendario/{church.calendar_public_hash}',
+                'icon_key': 'calendar',
+                'highlight': False,
+            })
+        if church.member_form_hash and ChurchPublicLink.LinkType.MEMBERSHIP not in stored:
+            system.append({
+                'link_type': ChurchPublicLink.LinkType.MEMBERSHIP,
+                'title': 'Ficha de Membro / Cadastro',
+                'url': f'{settings.FRONTEND_URL}/formulario/{church.member_form_hash}',
+                'icon_key': 'user-plus',
+                'highlight': False,
+            })
+        return system
+
+    def get_links(self, obj):
+        return PublicChurchPublicLinkSerializer(
+            obj['links'], many=True, context=self.context,
+        ).data

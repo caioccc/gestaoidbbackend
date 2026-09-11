@@ -34,12 +34,13 @@ class FinancialExitSerializer(serializers.ModelSerializer):
     category_display = serializers.CharField(
         source='get_category_display', read_only=True,
     )
+    receipt = serializers.FileField(required=False, allow_null=True)
 
     class Meta:
         model = FinancialExit
         fields = [
             'id', 'church', 'date', 'description', 'category',
-            'category_display', 'amount', 'created_at',
+            'category_display', 'amount', 'receipt', 'created_at',
         ]
         read_only_fields = ['church', 'created_at']
 

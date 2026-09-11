@@ -12,6 +12,7 @@ from .models import (
     Church,
     ChurchMembership,
     ChurchMinutes,
+    ChurchPublicLink,
     Loan,
     MaterialItem,
     Member,
@@ -164,6 +165,168 @@ class LoginFlowTests(BaseChurchTestCase):
         client = self._client(pastor)
         resp = client.post(reverse('switch-church'), {'church_id': other_sede.id})
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_sede_pastor_can_return_to_sede_from_congregation(self):
+        """Pastor de Sede sem vínculo local na congregação herda o papel e o
+        seletor de igreja continua disponível, permitindo voltar à Sede."""
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        client = self._client(pastor)
+
+        resp = client.post(reverse('switch-church'), {'church_id': self.congregation.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data['user']
+        self.assertEqual(data['church']['id'], self.congregation.id)
+        self.assertTrue(data['can_manage_churches'])
+
+        resp_detail = client.get(reverse('church-detail', args=[self.congregation.id]))
+        self.assertEqual(resp_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp_detail.data['id'], self.congregation.id)
+
+        resp2 = client.post(reverse('switch-church'), {'church_id': self.sede.id})
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp2.data['user']['church']['id'], self.sede.id)
+
+    def test_accessible_churches_include_sede_when_active_congregation(self):
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        client = self._client(pastor)
+        client.post(reverse('switch-church'), {'church_id': self.congregation.id})
+
+        resp = client.get(reverse('church-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {c['id'] for c in resp.data}
+        self.assertEqual(ids, {self.congregation.id, self.sede.id})
+
+    def test_sede_pastor_sees_and_switches_directly_between_congregations(self):
+        cong_b1 = Church.objects.create(
+            name='Congregação Bairro 1',
+            church_type=Church.ChurchType.CONGREGATION,
+            parent_church=self.sede,
+            status='ACTIVE',
+            is_approved=True,
+            accounting_category='DIZIMO',
+            city='Campina Grande',
+            state='PB',
+        )
+        cong_b2 = Church.objects.create(
+            name='Congregação Bairro 2',
+            church_type=Church.ChurchType.CONGREGATION,
+            parent_church=self.sede,
+            status='ACTIVE',
+            is_approved=True,
+            accounting_category='DIZIMO',
+            city='Campina Grande',
+            state='PB',
+        )
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        client = self._client(pastor)
+        client.post(reverse('switch-church'), {'church_id': cong_b1.id})
+
+        resp = client.get(reverse('church-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {c['id'] for c in resp.data}
+        self.assertIn(self.sede.id, ids)
+        self.assertIn(cong_b1.id, ids)
+        self.assertIn(cong_b2.id, ids)
+        # Congregação pendente não aparece nem é operável.
+        self.assertNotIn(self.pending_congregation.id, ids)
+
+        resp2 = client.post(reverse('switch-church'), {'church_id': cong_b2.id})
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp2.data['user']['church']['id'], cong_b2.id)
+
+    def test_congregation_treasurer_only_sees_congregation_and_sede(self):
+        treasurer = self._user(
+            'tesoureiro@teste.com',
+            church=self.congregation,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        client = self._client(treasurer)
+        resp = client.get(reverse('church-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = {c['id'] for c in resp.data}
+        self.assertEqual(ids, {self.congregation.id, self.sede.id})
+
+    def test_active_congregation_role_inherits_pastor_without_membership(self):
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        client = self._client(pastor)
+        resp = client.post(reverse('switch-church'), {'church_id': self.congregation.id})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['user']['role'], 'PASTOR')
+
+    def test_local_role_has_precedence_over_inheritance(self):
+        other_sede = Church.objects.create(
+            name='Outra Sede',
+            church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE',
+            is_approved=True,
+            city='Recife',
+            state='PE',
+        )
+        other_congregation = Church.objects.create(
+            name='Outra Congregação',
+            church_type=Church.ChurchType.CONGREGATION,
+            parent_church=other_sede,
+            status='ACTIVE',
+            is_approved=True,
+            accounting_category='DIZIMO',
+            city='Recife',
+            state='PE',
+        )
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        ChurchMembership.objects.create(
+            user=pastor, church=other_congregation,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        client = self._client(pastor)
+        resp = client.post(reverse('switch-church'), {'church_id': other_congregation.id})
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_me_endpoint_returns_fresh_session_in_congregation(self):
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        client = self._client(pastor)
+        client.post(reverse('switch-church'), {'church_id': self.congregation.id})
+
+        resp = client.get(reverse('me'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user_data = resp.data['user']
+        self.assertEqual(user_data['church']['id'], self.congregation.id)
+        self.assertEqual(user_data['role'], 'PASTOR')
+        self.assertTrue(user_data['can_manage_churches'])
+
+    def test_me_endpoint_for_plain_congregation_treasurer(self):
+        treasurer = self._user(
+            'tesoureiro@teste.com',
+            church=self.congregation,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        client = self._client(treasurer)
+        resp = client.get(reverse('me'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data['user']['can_manage_churches'])
 
 
 class ApprovalFlowTests(BaseChurchTestCase):
@@ -1704,24 +1867,8 @@ class MinistryAreaAndMemberTests(BaseChurchTestCase):
                 'AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
             ),
         }
-        with mock.patch('cloudinary.uploader.upload') as mock_upload:
-            mock_upload.return_value = {
-                'public_id': 'members/member_photo.png',
-                'secure_url': 'https://res.cloudinary.com/demo/image/upload/members/member_photo.png',
-                'url': 'http://res.cloudinary.com/demo/image/upload/members/member_photo.png',
-                'format': 'png',
-                'version': 1,
-                'type': 'upload',
-                'resource_type': 'image',
-                'width': 400,
-                'height': 400,
-                'bytes': 1024,
-                'created_at': '2026-01-01T00:00:00Z',
-                'signature': 'abc',
-            }
-            resp = client.post(reverse('member-self-list'), payload, format='json')
+        resp = client.post(reverse('member-self-list'), payload, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(mock_upload.called)
         self.assertTrue(resp.data['photo'])
         member = Member.objects.get(pk=resp.data['id'])
         self.assertTrue(member.photo)
@@ -2392,7 +2539,7 @@ class MemberDocumentTests(BaseChurchTestCase):
             church=self.sede, name='João Silva', cpf='111.222.333-44',
         )
 
-    def _upload(self, client=None, name='rg.pdf', doc_type='RG', notes=''):
+    def _upload(self, client=None, name='doc.pdf', doc_type='RESIDENCE_PROOF', notes=''):
         client = client or self._client(self.sec)
         data = {'file': SimpleUploadedFile(
             name, b'fake-content-pdf', content_type='application/pdf',
@@ -2408,8 +2555,8 @@ class MemberDocumentTests(BaseChurchTestCase):
     def test_upload_and_list_documents(self):
         resp = self._upload()
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data['doc_type'], 'RG')
-        self.assertTrue(resp.data['file_name'].startswith('rg'))
+        self.assertEqual(resp.data['doc_type'], 'RESIDENCE_PROOF')
+        self.assertTrue(resp.data['file_name'].startswith('doc'))
         self.assertTrue(resp.data['file_name'].endswith('.pdf'))
         self.assertEqual(resp.data['uploaded_by_name'], self.sec.name)
 
@@ -2436,7 +2583,7 @@ class MemberDocumentTests(BaseChurchTestCase):
     def test_upload_rejects_missing_file(self):
         resp = self._client(self.sec).post(
             reverse('member-documents', args=[self.member.id]),
-            {'doc_type': 'RG'},
+            {'doc_type': 'RESIDENCE_PROOF'},
             format='multipart',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
@@ -3311,7 +3458,7 @@ class ChurchMinutesTests(BaseChurchTestCase):
             format='multipart',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertTrue(resp.data['pdf_name'].startswith('ata_'))
+        self.assertTrue(resp.data['pdf_name'].startswith('ata'))
 
         resp = self.client.get(reverse('minutes-download-pdf', args=[mid]))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -3683,3 +3830,462 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class ChurchPublicLinkTests(BaseChurchTestCase):
+    """Agregador de links público por igreja (painel + página pública)."""
+
+    def setUp(self):
+        super().setUp()
+        self.pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        self.secretaria = self._user(
+            'secretaria@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.tesoureiro = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+
+    def _create_link(self, church=None, **kwargs):
+        defaults = dict(
+            church=church or self.sede,
+            title='Culto ao Vivo',
+            link_type=ChurchPublicLink.LinkType.YOUTUBE,
+            url='https://youtube.com/watch?v=abc',
+        )
+        defaults.update(kwargs)
+        return ChurchPublicLink.objects.create(**defaults)
+
+    # --- model ---
+    def test_slug_auto_generated_and_unique(self):
+        self.assertTrue(self.sede.slug)
+        dupe = Church.objects.create(
+            name='Igreja Teste', church_type=Church.ChurchType.CONGREGATION,
+            parent_church=self.sede, status='ACTIVE', is_approved=True,
+            city='X', state='PB',
+        )
+        self.assertNotEqual(dupe.slug, self.sede.slug)
+        self.assertIn('igreja-teste', dupe.slug)
+
+    def test_links_hash_generated_on_save(self):
+        self.assertTrue(self.sede.links_hash)
+
+    # --- painel (permissões) ---
+    def test_anonymous_forbidden(self):
+        resp = APIClient().get(reverse('church-link-list'))
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_treasurer_forbidden(self):
+        resp = self._client(self.tesoureiro).get(reverse('church-link-list'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_pastor_can_create_and_list(self):
+        client = self._client(self.pastor)
+        resp = client.post(
+            reverse('church-link-list'),
+            {'title': 'PIX da Igreja', 'link_type': 'PIX', 'pix_key': '123456'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['church'], self.sede.id)
+        self.assertEqual(resp.data['icon_key'], 'qrcode')
+
+        listed = client.get(reverse('church-link-list'))
+        self.assertEqual(listed.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(listed.data), 1)
+
+    def test_secretaria_can_manage(self):
+        client = self._client(self.secretaria)
+        resp = client.post(
+            reverse('church-link-list'),
+            {'title': 'WhatsApp', 'link_type': 'WHATSAPP',
+             'whatsapp_number': '(83) 99999-9999'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(
+            resp.data['url'], 'https://wa.me/5583999999999'
+        )
+
+    def test_pix_requires_key(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'PIX', 'link_type': 'PIX'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_pix_fixed_requires_amount(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'PIX', 'link_type': 'PIX',
+             'pix_key': 'pix@igreja.com.br', 'pix_type': 'E-mail',
+             'pix_amount_mode': 'FIXED'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('pix_fixed_amount', resp.data)
+
+    def test_pix_fixed_saves_amount(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'PIX', 'link_type': 'PIX',
+             'pix_key': '11.111.111/0001-01', 'pix_type': 'CNPJ',
+             'pix_amount_mode': 'FIXED', 'pix_fixed_amount': '50'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['pix_amount_mode'], 'FIXED')
+        self.assertEqual(resp.data['pix_fixed_amount'], '50.00')
+        self.assertIsNone(resp.data['pix_grid_amounts'])
+
+    def test_pix_grid_defaults_presets(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'PIX', 'link_type': 'PIX',
+             'pix_key': 'pix@igreja.com.br', 'pix_type': 'E-mail',
+             'pix_amount_mode': 'GRID', 'pix_open_amount': True},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['pix_amount_mode'], 'GRID')
+        self.assertEqual(resp.data['pix_grid_amounts'], [30.0, 50.0, 100.0, 200.0])
+        self.assertTrue(resp.data['pix_open_amount'])
+
+    def test_pix_grid_rejects_invalid_amounts(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'PIX', 'link_type': 'PIX',
+             'pix_key': 'pix@igreja.com.br', 'pix_type': 'E-mail',
+             'pix_amount_mode': 'GRID', 'pix_grid_amounts': [30, 0, -5]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_whatsapp_builds_wa_me_url(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'WhatsApp', 'link_type': 'WHATSAPP',
+             'whatsapp_number': '+55 83 99999-9999'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['whatsapp_number'], '5583999999999')
+        self.assertEqual(resp.data['url'], 'https://wa.me/5583999999999')
+
+    def test_maps_builds_google_maps_url(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'Encontre-nos', 'link_type': 'MAPS',
+             'address_cep': '58400-000', 'address_street': 'Rua das Flores',
+             'address_number': '123', 'address_neighborhood': 'Centro',
+             'address_city': 'Campina Grande', 'address_state': 'PB'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(resp.data['url'].startswith('https://www.google.com/maps/search/'))
+        self.assertIn('Rua%20das%20Flores', resp.data['url'])
+
+    def test_maps_requires_address(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'Encontre-nos', 'link_type': 'MAPS',
+             'address_cep': '58400-000', 'address_street': 'Rua das Flores'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_custom_requires_url(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'Site', 'link_type': 'CUSTOM', 'url': ''},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_url_rejected(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'Site', 'link_type': 'CUSTOM', 'url': 'nao-e-url'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_calendar_and_membership_store_blank_url(self):
+        resp = self._client(self.pastor).post(
+            reverse('church-link-list'),
+            {'title': 'Agenda', 'link_type': 'CALENDAR', 'url': 'https://x.io'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['url'], '')
+
+    def test_scoped_to_active_church(self):
+        other = Church.objects.create(
+            name='Outra Igreja', church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE', is_approved=True, city='A', state='PB',
+        )
+        link = ChurchPublicLink.objects.create(
+            church=other, title='Fora', link_type='CUSTOM', url='https://a.io',
+        )
+        listed = self._client(self.pastor).get(reverse('church-link-list'))
+        self.assertEqual(listed.data, [])
+
+        resp = self._client(self.pastor).get(
+            reverse('church-link-detail', args=[link.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_patch_toggle_active(self):
+        link = self._create_link()
+        resp = self._client(self.pastor).patch(
+            reverse('church-link-detail', args=[link.pk]),
+            {'is_active': False}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data['is_active'])
+
+    def test_delete(self):
+        link = self._create_link()
+        resp = self._client(self.pastor).delete(
+            reverse('church-link-detail', args=[link.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ChurchPublicLink.objects.filter(pk=link.pk).exists())
+
+    # --- reorder ---
+    def test_reorder_updates_orders(self):
+        a = self._create_link(title='A')
+        b = self._create_link(title='B')
+        c = self._create_link(title='C')
+        resp = self._client(self.pastor).post(
+            reverse('church-link-reorder'),
+            {'order': [c.id, a.id, b.id]}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        order = list(
+            ChurchPublicLink.objects.filter(church=self.sede)
+            .order_by('order').values_list('id', flat=True)
+        )
+        self.assertEqual(order, [c.id, a.id, b.id])
+
+    def test_reorder_ignores_alien_ids(self):
+        other = Church.objects.create(
+            name='Outra', church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE', is_approved=True, city='A', state='PB',
+        )
+        a = self._create_link(title='A')
+        alien = ChurchPublicLink.objects.create(
+            church=other, title='X', link_type='CUSTOM', url='https://x.io',
+        )
+        resp = self._client(self.pastor).post(
+            reverse('church-link-reorder'),
+            {'order': [alien.id, a.id]}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        # o link alheio é ignorado; o próprio recebe a posição informada
+        self.assertEqual(ChurchPublicLink.objects.get(pk=a.pk).order, 1)
+        self.assertEqual(ChurchPublicLink.objects.get(pk=alien.pk).order, 0)
+
+    # --- config ---
+    def test_config_get_and_patch(self):
+        client = self._client(self.pastor)
+        cfg = client.get(reverse('church-link-config'))
+        self.assertEqual(cfg.status_code, status.HTTP_200_OK)
+        self.assertEqual(cfg.data['slug'], self.sede.slug)
+        self.assertTrue(cfg.data['public_links_enabled'])
+        self.assertEqual(cfg.data['theme_color'], '#1c7ed6')
+
+        resp = client.patch(
+            reverse('church-link-config'),
+            {'theme_color': '#ff0000', 'default_pix_key': 'pix@sede.com',
+             'default_pix_type': 'E-mail'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['theme_color'], '#FF0000')
+        self.sede.refresh_from_db()
+        self.assertEqual(self.sede.default_pix_key, 'pix@sede.com')
+
+    def test_config_invalid_color(self):
+        resp = self._client(self.pastor).patch(
+            reverse('church-link-config'),
+            {'theme_color': 'red'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_config_duplicate_slug_gets_suffix(self):
+        other = Church.objects.create(
+            name='Outra', church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE', is_approved=True, city='A', state='PB',
+        )
+        # tentar adotar o slug já usado pela outra igreja
+        resp = self._client(self.pastor).patch(
+            reverse('church-link-config'),
+            {'slug': other.slug}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(resp.data['slug'], other.slug)
+        self.assertTrue(resp.data['slug'].startswith(other.slug))
+        # manter o próprio slug continua válido (idempotente)
+        resp = self._client(self.pastor).patch(
+            reverse('church-link-config'),
+            {'slug': self.sede.slug}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['slug'], self.sede.slug)
+
+    # --- página pública ---
+    def test_public_by_slug(self):
+        yt = self._create_link(
+            title='YouTube', link_type='YOUTUBE', url='https://youtube.com/watch?v=abc',
+        )
+        pix = self._create_link(
+            title='PIX', link_type='PIX', pix_key='1234', pix_type='CNPJ',
+        )
+        inactive = self._create_link(
+            title='Inativo', link_type='CUSTOM',
+            url='https://inativo.io', is_active=False,
+        )
+        url = reverse('public-church-links', args=[self.sede.slug])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data
+        self.assertEqual(data['church']['name'], self.sede.name)
+        self.assertEqual(data['church']['state'], 'PB')
+        self.assertIn('1c7ed6', data['church']['theme_color'])
+
+        active_ids = [l['id'] for l in data['links']]
+        self.assertIn(yt.id, active_ids)
+        self.assertIn(pix.id, active_ids)
+        self.assertNotIn(inactive.id, active_ids)
+
+        # tipos do sistema presentes
+        system_types = {s['link_type'] for s in data['system_links']}
+        self.assertIn('CALENDAR', system_types)
+        self.assertIn('MEMBERSHIP', system_types)
+
+    def test_public_resolves_calendar_system_url(self):
+        link = self._create_link(
+            title='Agenda', link_type='CALENDAR',
+        )
+        url = reverse('public-church-links', args=[self.sede.slug])
+        resp = self.client.get(url)
+        cal = next(l for l in resp.data['links'] if l['id'] == link.id)
+        self.assertIn(f'/calendario/{self.sede.calendar_public_hash}', cal['url'])
+        # tipo do sistema coberto pelo link cadastrado: não duplica em system_links
+        self.assertEqual(
+            [s for s in resp.data['system_links'] if s['link_type'] == 'CALENDAR'], []
+        )
+
+    def test_public_by_links_hash(self):
+        url = reverse('public-church-links', args=[self.sede.links_hash])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['church']['name'], self.sede.name)
+
+    def test_public_unknown_404(self):
+        url = reverse('public-church-links', args=['nao-existe'])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_disabled_404(self):
+        self.sede.public_links_enabled = False
+        self.sede.save(update_fields=['public_links_enabled'])
+        url = reverse('public-church-links', args=[self.sede.slug])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    # --- contador de cliques ---
+    def test_click_increments_atomically(self):
+        link = self._create_link()
+        url = reverse('public-church-link-click', args=[link.pk])
+        for _ in range(3):
+            resp = self.client.post(url)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        link.refresh_from_db()
+        self.assertEqual(link.click_count, 3)
+
+    def test_click_unknown_404(self):
+        url = reverse('public-church-link-click', args=[99999])
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SedeTreasurerGovernanceTests(BaseChurchTestCase):
+    """Tesoureiro(a) de Sede: vê e navega entre as congregações (somente leitura)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tesoureira = self._user(
+            'tesoureira@teste.com', 'Tesoureira',
+            church=self.sede, role=ChurchMembership.Role.TESOUREIRO,
+        )
+
+    def test_me_flags(self):
+        resp = self._client(self.tesoureira).get(reverse('me'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data['user']
+        self.assertTrue(data['can_manage_churches'])
+        self.assertFalse(data['can_approve_congregations'])
+
+    def test_me_flags_for_admin(self):
+        admin = self._user('admin@teste.com', is_staff=True, church=self.sede)
+        resp = self._client(admin).get(reverse('me'))
+        data = resp.data['user']
+        self.assertTrue(data['can_manage_churches'])
+        self.assertTrue(data['can_approve_congregations'])
+
+    def test_can_manage_churches_false_for_congregation_treasurer(self):
+        cong_tesoureiro = self._user(
+            'cong.tesoureiro@teste.com', church=self.congregation,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        resp = self._client(cong_tesoureiro).get(reverse('me'))
+        data = resp.data['user']
+        self.assertFalse(data['can_manage_churches'])
+        self.assertFalse(data['can_approve_congregations'])
+
+    def test_churches_list_includes_sede_and_congregations(self):
+        client = self._client(self.tesoureira)
+        churches = client.get(reverse('church-list'))
+        self.assertEqual(churches.status_code, status.HTTP_200_OK)
+        ids = {c['id'] for c in churches.data}
+        self.assertIn(self.sede.id, ids)
+        self.assertIn(self.congregation.id, ids)
+
+    def test_switch_to_congregation_succeeds(self):
+        resp = self._client(self.tesoureira).post(
+            reverse('switch-church'), {'church_id': self.congregation.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.tesoureira.refresh_from_db()
+        self.assertEqual(self.tesoureira.church_id, self.congregation.id)
+        # propriedade membership-based permanece True mesmo ativo numa congregação
+        self.assertTrue(self.tesoureira.can_manage_churches)
+
+    def test_switch_to_alien_church_forbidden(self):
+        alien = Church.objects.create(
+            name='Alien', church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE', is_approved=True, city='X', state='PB',
+        )
+        resp = self._client(self.tesoureira).post(
+            reverse('switch-church'), {'church_id': alien.id}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_cannot_delete_congregation(self):
+        resp = self._client(self.tesoureira).delete(
+            reverse('church-detail', args=[self.congregation.id])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(Church.objects.filter(pk=self.congregation.id).exists())
+
+    def test_treasurer_still_cannot_approve(self):
+        resp = self._client(self.tesoureira).get(reverse('pending-congregations'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

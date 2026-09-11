@@ -18,7 +18,9 @@ def can_manage_church(user, church) -> bool:
     - ADMIN (staff/superuser) opera qualquer igreja.
     - A igreja ativa (user.church) é sempre operável.
     - Pastor de Sede opera suas congregações aprovadas.
-    - Usuário com congregação ativa opera a própria congregação e a sua Sede.
+    - Congregação ativa: opera a própria congregação e a sua Sede; sendo
+      Pastor da Sede, também as demais congregações da mesma Sede, podendo
+      trocar diretamente entre elas.
     """
     if is_admin(user):
         return True
@@ -33,12 +35,26 @@ def can_manage_church(user, church) -> bool:
             and church.parent_church_id == active.id
             and church.is_approved
         )
-    # Congregação ativa: permite a própria e a Sede governante.
-    return bool(active.parent_church_id and church.id == active.parent_church_id)
+    # Congregação ativa.
+    parent = active.parent_church
+    if parent is None or not parent.is_sede():
+        return False
+    if church.id == parent.id:
+        return True
+    return (
+        user.get_role_for(parent) == ChurchMembership.Role.PASTOR
+        and church.church_type == Church.ChurchType.CONGREGATION
+        and church.parent_church_id == parent.id
+        and church.is_approved
+    )
 
 
 def accessible_churches(user):
-    """Queryset de igrejas acessíveis pelo usuário (ADMIN: todas)."""
+    """Queryset de igrejas acessíveis pelo usuário (ADMIN: todas).
+
+    Espelha can_manage_church: além da igreja ativa, cobre a Sede e as
+    congregações aprovadas no contexto em que o usuário opera.
+    """
     qs = Church.objects.all()
     if is_admin(user):
         return qs
@@ -48,7 +64,19 @@ def accessible_churches(user):
         return Church.objects.filter(
             parent_church=user.church
         ) | Church.objects.filter(pk=user.church.pk)
-    return Church.objects.filter(pk=user.church.pk)
+    # Congregação ativa: a própria congregação e a Sede governante; o Pastor
+    # da Sede também enxerga as demais congregações aprovadas dessa Sede.
+    qs = Church.objects.filter(pk=user.church.pk)
+    parent_id = user.church.parent_church_id
+    if parent_id:
+        qs = qs | Church.objects.filter(pk=parent_id)
+        if user.get_role_for(user.church.parent_church) == ChurchMembership.Role.PASTOR:
+            qs = qs | Church.objects.filter(
+                parent_church_id=parent_id,
+                church_type=Church.ChurchType.CONGREGATION,
+                is_approved=True,
+            )
+    return qs
 
 
 def IsChurchRole(*roles) -> permissions.BasePermission:

@@ -5,6 +5,8 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from cloudinary.models import CloudinaryField
 
+from core.storage import media_storage, church_upload_to
+
 
 class DepartmentCategory(models.TextChoices):
     """Categorias contábeis / departamentos das entradas e saídas."""
@@ -42,6 +44,14 @@ class FinancialEntry(models.Model):
         'Categoria', max_length=30, choices=DepartmentCategory.choices,
     )
     amount = models.DecimalField('Valor', max_digits=12, decimal_places=2)
+    receipt = models.FileField(
+        'Comprovante',
+        storage=media_storage,
+        upload_to=church_upload_to('receipts'),
+        max_length=255,
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
 
     class Meta:
@@ -71,6 +81,14 @@ class FinancialExit(models.Model):
         'Categoria', max_length=30, choices=DepartmentCategory.choices,
     )
     amount = models.DecimalField('Valor', max_digits=12, decimal_places=2)
+    receipt = models.FileField(
+        'Comprovante',
+        storage=media_storage,
+        upload_to=church_upload_to('receipts'),
+        max_length=255,
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
 
     class Meta:
@@ -338,9 +356,11 @@ class MonthlyValidation(models.Model):
     )
     treasury_photo_url = CloudinaryField(
         'Foto do signatário (Tesouraria)', null=True, blank=True,
+        folder='gestao_idb/validations',
     )
     treasury_signature_url = CloudinaryField(
         'Assinatura digital (Tesouraria)', null=True, blank=True,
+        folder='gestao_idb/validations',
     )
     signature_hash = models.CharField(
         'Hash da Assinatura', max_length=64, blank=True, editable=False,

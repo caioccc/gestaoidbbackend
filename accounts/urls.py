@@ -13,12 +13,14 @@ router.register('materials', viewsets.MaterialItemViewSet, basename='material')
 router.register('loans', viewsets.LoanViewSet, basename='loan')
 router.register('cultos', viewsets.WorshipServiceViewSet, basename='worship')
 router.register('minutes', viewsets.ChurchMinutesViewSet, basename='minutes')
+router.register('church-links', viewsets.ChurchPublicLinkViewSet, basename='church-link')
 
 urlpatterns = [
     path('login/', viewsets.LoginView.as_view(), name='login'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('register/', viewsets.RegisterView.as_view(), name='register'),
     path('profile/', viewsets.ProfileView.as_view(), name='profile'),
+    path('me/', viewsets.MeView.as_view(), name='me'),
     path('switch-church/', viewsets.SwitchChurchView.as_view(), name='switch-church'),
     path(
         'churches/search-parents/',
@@ -197,6 +199,16 @@ urlpatterns = [
         'public/minutes/<str:hash>/pdf/',
         viewsets.PublicMinutesPdfView.as_view(),
         name='public-minutes-pdf',
+    ),
+    path(
+        'public/churches/<str:slug>/links/',
+        viewsets.PublicChurchLinksView.as_view(),
+        name='public-church-links',
+    ),
+    path(
+        'public/links/<int:pk>/click/',
+        viewsets.PublicChurchLinkClickView.as_view(),
+        name='public-church-link-click',
     ),
     path(
         'calendar/public-link/',

@@ -4,26 +4,21 @@ from decimal import Decimal
 import secrets
 import uuid
 
-from cloudinary.models import CloudinaryField
-
 from django.conf import settings
 from django.core.files.storage import FileSystemStorage
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
+from django.utils.text import slugify
 
-member_docs_storage = FileSystemStorage(
-    location=settings.MEDIA_ROOT,
-    base_url=settings.MEDIA_URL,
-)
+from core.storage import raw_storage, media_storage, church_upload_to, church_logo_upload_to
 
 
 class MemberDocumentsStorage(FileSystemStorage):
-    """Armazenamento local dos documentos dos membros.
+    """DEPRECIADO — mantido apenas para compatibilidade de migrações.
 
-    Deriva `location`/`base_url` das settings em tempo de instanciação para que
-    a deconstruct cleanup fique portátil (sem caminho absoluto nas migrações).
-
-    Uso: documents FileField(storage=member_doc_storage, ...).
+    Desde a migração para o Cloudinary os documentos de membros usam
+    `raw_storage` (RawMediaCloudinaryStorage). A classe continua importável
+    porque a migração 0013_memberdocument a referencia.
     """
 
     def __init__(self, **kwargs):
@@ -96,6 +91,14 @@ class Church(models.Model):
     )
 
     name = models.CharField("Nome da Congregação", max_length=200)
+    logo = models.FileField(
+        'Logo',
+        storage=media_storage,
+        upload_to=church_logo_upload_to,
+        max_length=255,
+        null=True,
+        blank=True,
+    )
     pastor_name = models.CharField("Pastor Responsável", max_length=150, blank=True)
     treasurer_name = models.CharField("Tesoureiro Responsável", max_length=150, blank=True)
     phone = models.CharField("Telefone / WhatsApp", max_length=20, blank=True)
@@ -153,6 +156,46 @@ class Church(models.Model):
         help_text='Hash usado no link genérico de cadastro de candidatos.',
     )
 
+    slug = models.SlugField(
+        "Slug público",
+        max_length=100,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text='Identificador amigável da página pública de links (/p/{slug}).',
+    )
+    public_links_enabled = models.BooleanField(
+        "Página pública de links habilitada",
+        default=True,
+    )
+    theme_color = models.CharField(
+        "Cor do Tema (página pública)",
+        max_length=20,
+        default='#1c7ed6',
+        help_text='Cor primária usada na página pública de links.',
+    )
+    links_hash = models.CharField(
+        "Hash público dos Links",
+        max_length=64,
+        blank=True,
+        null=True,
+        help_text='Hash alternativo para acessar a página pública (compartilhamento seguro).',
+    )
+    default_pix_key = models.CharField(
+        "Chave PIX padrão",
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text='Sugerida no cadastro de links do tipo PIX.',
+    )
+    default_pix_type = models.CharField(
+        "Tipo da Chave PIX padrão",
+        max_length=20,
+        null=True,
+        blank=True,
+        help_text='CNPJ, CPF, Telefone, E-mail ou Chave Aleatória.',
+    )
+
     status = models.CharField("Status", max_length=20, choices=STATUS_CHOICES, default='PENDING')
     created_at = models.DateTimeField("Cadastrado em", auto_now_add=True)
     updated_at = models.DateTimeField("Atualizado em", auto_now=True)
@@ -173,11 +216,33 @@ class Church(models.Model):
             self.member_form_hash = secrets.token_urlsafe(32)
         return self.member_form_hash
 
+    def _unique_slug(self) -> str:
+        """Gera um slug único a partir do nome (com sufixo incremental)."""
+        base = slugify(self.name)[:100] or 'igreja'
+        slug = base
+        suffix = 2
+        queryset = Church.objects.exclude(pk=self.pk)
+        while queryset.filter(slug=slug).exists():
+            tail = f'-{suffix}'
+            slug = f'{base[:100 - len(tail)]}{tail}'
+            suffix += 1
+        return slug
+
+    def ensure_links_hash(self) -> str:
+        """Retorna (gerando se preciso) o hash alternativo da página de links."""
+        if not self.links_hash:
+            self.links_hash = secrets.token_urlsafe(32)
+        return self.links_hash
+
     def save(self, *args, **kwargs):
         if not self.calendar_public_hash:
             self.calendar_public_hash = uuid.uuid4().hex
         if not self.member_form_hash:
             self.member_form_hash = secrets.token_urlsafe(32)
+        if not self.slug:
+            self.slug = self._unique_slug()
+        if not self.links_hash:
+            self.links_hash = secrets.token_urlsafe(32)
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -395,11 +460,13 @@ class Member(models.Model):
         blank=True,
         verbose_name='Áreas de Atuação',
     )
-    photo = CloudinaryField(
+    photo = models.FileField(
         'Foto',
+        storage=media_storage,
+        upload_to=church_upload_to('members'),
+        max_length=255,
         null=True,
         blank=True,
-        folder='members',
     )
     status = models.CharField(
         'Status', max_length=20, choices=Status.choices, default=Status.ACTIVE,
@@ -452,6 +519,114 @@ class Member(models.Model):
     def regenerate_public_hash(self):
         self.public_hash = secrets.token_urlsafe(32)
         self.save(update_fields=['public_hash', 'updated_at'])
+
+
+class ChurchPublicLink(models.Model):
+    """Link exibido na página pública de agregador de links da igreja (Linktree).
+
+    Tipos dinâmicos (CALENDAR/MEMBERSHIP) não guardam URL própria: a URL é
+    resolvida a partir dos hashes públicos da igreja no momento da leitura.
+    """
+
+    class LinkType(models.TextChoices):
+        CUSTOM = 'CUSTOM', 'Personalizado'
+        PIX = 'PIX', 'Chave PIX'
+        WHATSAPP = 'WHATSAPP', 'WhatsApp'
+        YOUTUBE = 'YOUTUBE', 'YouTube'
+        MAPS = 'MAPS', 'Localização / Mapa'
+        INSTAGRAM = 'INSTAGRAM', 'Instagram'
+        CALENDAR = 'CALENDAR', 'Agenda de Cultos'
+        MEMBERSHIP = 'MEMBERSHIP', 'Ficha de Membro / Cadastro'
+
+    PIX_TYPES = ['CNPJ', 'CPF', 'Telefone', 'E-mail', 'Chave Aleatória']
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='public_links',
+        verbose_name='Igreja',
+    )
+    title = models.CharField('Título', max_length=100)
+    url = models.CharField(
+        'URL',
+        max_length=500,
+        blank=True,
+        default='',
+        help_text='URL externa (tipos CUSTOM/WHATSAPP/YOUTUBE/MAPS/INSTAGRAM).',
+    )
+    link_type = models.CharField(
+        'Tipo do link',
+        max_length=20,
+        choices=LinkType.choices,
+        default=LinkType.CUSTOM,
+    )
+    pix_key = models.CharField('Chave PIX', max_length=100, null=True, blank=True)
+    pix_type = models.CharField('Tipo da chave PIX', max_length=20, null=True, blank=True)
+    pix_amount_mode = models.CharField(
+        'Modo de valor PIX',
+        max_length=10,
+        choices=[
+            ('OPEN', 'Valor livre'),
+            ('FIXED', 'Valor fixo'),
+            ('GRID', 'Grade de valores'),
+        ],
+        default='OPEN',
+        help_text='OPEN = usuário digita o valor; FIXED = valor único; GRID = botões com valores pré-definidos.',
+    )
+    pix_fixed_amount = models.DecimalField(
+        'Valor fixo PIX',
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        default=None,
+        help_text='Usado quando pix_amount_mode = FIXED.',
+    )
+    pix_grid_amounts = models.JSONField(
+        'Valores PIX pré-definidos',
+        null=True,
+        blank=True,
+        default=list,
+        help_text='Botões de valor exibidos quando pix_amount_mode = GRID (padrão: 30, 50, 100, 200).',
+    )
+    pix_open_amount = models.BooleanField(
+        'Permitir valor livre no grid',
+        default=True,
+        help_text='Exibe a opção "Outro valor" além dos presets quando pix_amount_mode = GRID.',
+    )
+    whatsapp_number = models.CharField(
+        'Número do WhatsApp',
+        max_length=20,
+        blank=True,
+        default='',
+        help_text='Só dígitos (com DDI). O link wa.me é montado automaticamente.',
+    )
+    address_cep = models.CharField('CEP', max_length=9, blank=True, default='')
+    address_street = models.CharField('Logradouro', max_length=200, blank=True, default='')
+    address_number = models.CharField('Número', max_length=20, blank=True, default='')
+    address_neighborhood = models.CharField('Bairro', max_length=100, blank=True, default='')
+    address_city = models.CharField('Cidade', max_length=100, blank=True, default='')
+    address_state = models.CharField('UF', max_length=2, blank=True, default='')
+    icon_key = models.CharField(
+        'Ícone', max_length=50, null=True, blank=True,
+        help_text='Chave do ícone (tabler): brand-whatsapp, brand-youtube, ...',
+    )
+    order = models.PositiveIntegerField('Ordem', default=0)
+    is_active = models.BooleanField('Ativo', default=True)
+    highlight = models.BooleanField(
+        'Destaque visual', default=False,
+        help_text='Exibe o link com borda destacada/pulsante na página pública.',
+    )
+    click_count = models.PositiveIntegerField('Cliques', default=0)
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Link público'
+        verbose_name_plural = 'Links públicos'
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return f'{self.title} ({self.get_link_type_display()})'
 
 
 class MemberSubmission(models.Model):
@@ -674,11 +849,55 @@ class User(AbstractBaseUser, PermissionsMixin):
 
         Superadmins (is_staff/is_superuser) não possuem papel: as permissões de
         admin são avaliadas à parte e permitem acesso a tudo.
+
+        Pastor de Sede operando uma de suas congregações sem vínculo local herda
+        o papel de Pastor — ele é o responsável pela igreja. Um vínculo local
+        (ex.: Tesoureiro da congregação) tem precedência sobre a herança.
         """
         if self.is_staff or self.is_superuser:
             return None
         membership = self.church_memberships.filter(church=church).first()
-        return membership.role if membership else None
+        if membership:
+            return membership.role
+        parent = church.parent_church
+        if (
+            parent is not None
+            and parent.is_sede()
+            and self.church_memberships.filter(
+                church=parent, role=ChurchMembership.Role.PASTOR
+            ).exists()
+        ):
+            return ChurchMembership.Role.PASTOR
+        return None
+
+    @property
+    def can_manage_churches(self) -> bool:
+        """Se o usuário opera múltiplas igrejas (ADMIN, Pastor de Sede ou Tesoureiro de Sede).
+
+        Orientada a exibição do seletor de igreja e dos menus de governança no
+        frontend. É membership-based (não depende da igreja ativa): um Pastor ou
+        Tesoureiro de Sede continua podendo trocar de contexto mesmo quando ativo
+        dentro de uma congregação.
+        """
+        if self.is_staff or self.is_superuser:
+            return True
+        return self.church_memberships.filter(
+            church__church_type=Church.ChurchType.INDEPENDENT,
+            role__in=[
+                ChurchMembership.Role.PASTOR,
+                ChurchMembership.Role.TESOUREIRO,
+            ],
+        ).exists()
+
+    @property
+    def can_approve_congregations(self) -> bool:
+        """Se o usuário aprova congregações pendentes (ADMIN ou Pastor de Sede)."""
+        if self.is_staff or self.is_superuser:
+            return True
+        return self.church_memberships.filter(
+            church__church_type=Church.ChurchType.INDEPENDENT,
+            role=ChurchMembership.Role.PASTOR,
+        ).exists()
 
     @property
     def active_role(self) -> str | None:
@@ -689,16 +908,14 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 
 class MemberDocument(models.Model):
-    """Documento anexado ao cadastro do membro (RG, CPF, comprovantes).
+    """Documento anexado ao cadastro do membro (comprovantes e outros).
 
-    Arquivos confidenciais ficam no armazenamento local do servidor
-    (FileSystemStorage), fora do Cloudinary, e são baixados exclusivamente
-    pelo endpoint autenticado e restrito à igreja do membro.
+    Arquivos confidenciais sobem para o Cloudinary (raw) na pasta da igreja e
+    são baixados exclusivamente pelo endpoint autenticado e restrito à igreja
+    do membro. RG/CPF são registrados como texto nos campos do próprio membro.
     """
 
     class DocType(models.TextChoices):
-        RG = 'RG', 'RG'
-        CPF = 'CPF', 'CPF'
         RESIDENCE_PROOF = 'RESIDENCE_PROOF', 'Comprovante de Residência'
         OTHER = 'OTHER', 'Outro'
 
@@ -715,8 +932,8 @@ class MemberDocument(models.Model):
     )
     file = models.FileField(
         'Arquivo',
-        storage=member_doc_storage,
-        upload_to='member_documents',
+        storage=raw_storage,
+        upload_to=church_upload_to('member_documents'),
         max_length=255,
     )
     notes = models.CharField('Observações', max_length=200, blank=True)
@@ -778,6 +995,22 @@ class MaterialItem(models.Model):
     )
     name = models.CharField('Nome', max_length=200)
     description = models.TextField('Características', blank=True)
+    photo = models.FileField(
+        'Foto',
+        storage=media_storage,
+        upload_to=church_upload_to('materials/photos'),
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+    manual = models.FileField(
+        'Manual / Documentação',
+        storage=raw_storage,
+        upload_to=church_upload_to('materials/manuals'),
+        max_length=255,
+        null=True,
+        blank=True,
+    )
     location = models.ForeignKey(
         StorageLocation,
         on_delete=models.SET_NULL,
@@ -952,10 +1185,10 @@ class WorshipService(models.Model):
 
 
 class MinutesStorage(FileSystemStorage):
-    """Armazenamento local dos PDFs de atas.
+    """DEPRECIADO — mantido apenas para compatibilidade de migrações.
 
-    Deriva `location`/`base_url` das settings em tempo de instanciação para que
-    a deconstruct cleanup fique portátil (sem caminho absoluto nas migrações).
+    Desde a migração para o Cloudinary os PDFs de atas usam `raw_storage`
+    (RawMediaCloudinaryStorage).
     """
 
     def __init__(self, **kwargs):
@@ -1007,8 +1240,9 @@ class ChurchMinutes(models.Model):
     content = models.TextField('Texto da ata')
     pdf = models.FileField(
         'PDF da ata',
-        storage=minutes_storage,
-        upload_to='minutes/',
+        storage=raw_storage,
+        upload_to=church_upload_to('minutes'),
+        max_length=255,
         blank=True,
         null=True,
     )
