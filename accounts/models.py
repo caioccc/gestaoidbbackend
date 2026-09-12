@@ -1,4 +1,5 @@
 from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.exceptions import ValidationError
 from django.db import models
 from decimal import Decimal
 import secrets
@@ -519,6 +520,114 @@ class Member(models.Model):
     def regenerate_public_hash(self):
         self.public_hash = secrets.token_urlsafe(32)
         self.save(update_fields=['public_hash', 'updated_at'])
+
+
+class GrowthGroup(models.Model):
+    """Grupo de Crescimento (GC): célula com líder, dia/horário e área de cobertura.
+
+    Reuniões não podem ocorrer em dias de culto oficial (quinta, sábado e
+    domingo). Dias permitidos: segunda (0), terça (1, default), quarta (2) e
+    sexta (4) — mesma convenção de `CalendarEvent.weekdays` (0 = segunda).
+    """
+
+    ALLOWED_WEEKDAYS = [0, 1, 2, 4]
+    FORBIDDEN_WEEKDAYS = [3, 5, 6]
+    DEFAULT_WEEKDAY = 1
+
+    class Weekday(models.IntegerChoices):
+        MONDAY = 0, 'Segunda-feira'
+        TUESDAY = 1, 'Terça-feira'
+        WEDNESDAY = 2, 'Quarta-feira'
+        FRIDAY = 4, 'Sexta-feira'
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='growth_groups',
+        verbose_name='Igreja',
+    )
+    name = models.CharField('Nome do GC', max_length=150)
+    leader = models.ForeignKey(
+        Member,
+        on_delete=models.PROTECT,
+        related_name='linked_growth_groups',
+        verbose_name='Líder',
+    )
+    host = models.ForeignKey(
+        Member,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='hosted_growth_groups',
+        verbose_name='Anfitrião',
+    )
+    weekday = models.PositiveSmallIntegerField(
+        'Dia de encontro', choices=Weekday.choices, default=DEFAULT_WEEKDAY,
+    )
+    time = models.TimeField('Horário')
+    cep = models.CharField('CEP', max_length=9, blank=True, default='')
+    street = models.CharField('Rua / Avenida', max_length=150, blank=True, default='')
+    number = models.CharField('Número', max_length=20, blank=True, default='')
+    complement = models.CharField('Complemento', max_length=100, blank=True, default='')
+    neighborhood = models.CharField('Bairro', max_length=100, blank=True, default='')
+    city = models.CharField('Cidade', max_length=100, blank=True, default='')
+    state = models.CharField('UF', max_length=2, blank=True, default='')
+    radius_meters = models.PositiveIntegerField(
+        'Raio de cobertura (m)', default=1000,
+    )
+    latitude = models.FloatField('Latitude', null=True, blank=True)
+    longitude = models.FloatField('Longitude', null=True, blank=True)
+    is_active = models.BooleanField('Ativo', default=True)
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Registrado por',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Grupo de Crescimento'
+        verbose_name_plural = 'Grupos de Crescimento'
+        ordering = ['weekday', 'name']
+
+    def __str__(self):
+        return f'{self.name} — {self.get_weekday_display()} {self.time}'
+
+    @property
+    def full_address(self) -> str:
+        """Endereço completo formatado, ex.: `Rua X, 100 — Centro — Campina Grande/PB`."""
+        parts = []
+        line = ', '.join(x for x in (self.street, self.number) if x)
+        if line:
+            parts.append(line)
+        if self.complement:
+            parts.append(self.complement)
+        if self.neighborhood:
+            parts.append(self.neighborhood)
+        city_line = self.city
+        if self.state:
+            city_line = f'{city_line}/{self.state}' if city_line else self.state
+        if city_line:
+            parts.append(city_line)
+        if self.cep:
+            parts.append(f'CEP {self.cep}')
+        return ' — '.join(parts)
+
+    def clean(self):
+        super().clean()
+        if self.weekday in self.FORBIDDEN_WEEKDAYS:
+            raise ValidationError(
+                'Reuniões de GC não podem ocorrer em dias de culto oficial '
+                '(quinta-feira, sábado e domingo).'
+            )
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValidationError(
+                'Informe latitude e longitude juntas para o endereço do GC.'
+            )
 
 
 class ChurchPublicLink(models.Model):

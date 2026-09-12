@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.urls import reverse
@@ -13,6 +14,7 @@ from .models import (
     ChurchMembership,
     ChurchMinutes,
     ChurchPublicLink,
+    GrowthGroup,
     Loan,
     MaterialItem,
     Member,
@@ -4169,6 +4171,32 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
         self.assertIn('CALENDAR', system_types)
         self.assertIn('MEMBERSHIP', system_types)
 
+    def test_public_exposes_pix_amount_modes(self):
+        open_pix = self._create_link(
+            title='PIX Livre', link_type='PIX', pix_key='livre@x.com', pix_type='E-mail',
+        )
+        fixed = self._create_link(
+            title='PIX Fixo', link_type='PIX', pix_key='fixo@x.com', pix_type='E-mail',
+            pix_amount_mode='FIXED', pix_fixed_amount='50.00',
+        )
+        grid = self._create_link(
+            title='PIX Grade', link_type='PIX', pix_key='grade@x.com', pix_type='E-mail',
+            pix_amount_mode='GRID', pix_grid_amounts=[30, 50, 100, 200], pix_open_amount=True,
+        )
+        url = reverse('public-church-links', args=[self.sede.slug])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        by_id = {l['id']: l for l in resp.data['links']}
+
+        self.assertEqual(by_id[open_pix.id]['pix_amount_mode'], 'OPEN')
+        self.assertIn('pix_amount_mode', by_id[open_pix.id])
+        self.assertEqual(by_id[fixed.id]['pix_amount_mode'], 'FIXED')
+        self.assertEqual(by_id[fixed.id]['pix_fixed_amount'], '50.00')
+        g = by_id[grid.id]
+        self.assertEqual(g['pix_amount_mode'], 'GRID')
+        self.assertEqual(g['pix_grid_amounts'], [30, 50, 100, 200])
+        self.assertTrue(g['pix_open_amount'])
+
     def test_public_resolves_calendar_system_url(self):
         link = self._create_link(
             title='Agenda', link_type='CALENDAR',
@@ -4289,3 +4317,251 @@ class SedeTreasurerGovernanceTests(BaseChurchTestCase):
     def test_treasurer_still_cannot_approve(self):
         resp = self._client(self.tesoureira).get(reverse('pending-congregations'))
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class GrowthGroupTests(BaseChurchTestCase):
+    """Grupos de Crescimento: RBAC, validação de dias e dashboard/stats."""
+
+    def setUp(self):
+        super().setUp()
+        self.pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        self.secretaria = self._user(
+            'secretaria@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.tesoureiro = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        self.leader = Member.objects.create(
+            church=self.sede, name='Líder de GC', status=Member.Status.ACTIVE,
+        )
+
+    def _group(self, church=None, **kwargs):
+        defaults = dict(
+            church=church or self.sede,
+            name='GC Esperança',
+            leader=self.leader,
+            weekday=GrowthGroup.DEFAULT_WEEKDAY,
+            time='19:30:00',
+            street='Rua A',
+            number='100',
+            neighborhood='Centro',
+            city='Campina Grande',
+            state='PB',
+            cep='58400-000',
+            radius_meters=1000,
+        )
+        defaults.update(kwargs)
+        return GrowthGroup.objects.create(**defaults)
+
+    def _payload(self, **kwargs):
+        payload = dict(
+            name='GC Esperança',
+            leader=self.leader.id,
+            weekday=1,
+            time='19:30',
+            street='Rua A',
+            number='100',
+            neighborhood='Centro',
+            city='Campina Grande',
+            state='PB',
+            cep='58400-000',
+            radius_meters=1000,
+        )
+        payload.update(kwargs)
+        return payload
+
+    # --- model: validação de dias de culto oficial ---
+    def test_forbidden_weekday_rejected_on_clean(self):
+        for weekday in GrowthGroup.FORBIDDEN_WEEKDAYS:
+            with self.assertRaises(ValidationError):
+                g = self._group(weekday=weekday)
+                g.full_clean()
+
+    def test_allowed_weekday_accepted(self):
+        for weekday in GrowthGroup.ALLOWED_WEEKDAYS:
+            g = self._group(weekday=weekday)
+            g.full_clean()  # não deve levantar
+        self.assertEqual(g.weekday, GrowthGroup.Weekday.FRIDAY)
+
+    def test_lat_lng_required_together(self):
+        with self.assertRaises(ValidationError):
+            g = self._group(latitude=-7.22, longitude=None)
+            g.full_clean()
+
+    def test_serializer_rejects_forbidden_weekday(self):
+        resp = self._client(self.secretaria).post(
+            reverse('growth-group-list'), self._payload(weekday=3), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('weekday', resp.data)
+
+    # --- RBAC ---
+    def test_anonymous_forbidden(self):
+        resp = APIClient().get(reverse('growth-group-list'))
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+        resp = APIClient().post(
+            reverse('growth-group-list'), self._payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_read_allows_any_authenticated_with_church(self):
+        for user in (self.pastor, self.secretaria, self.tesoureiro):
+            resp = self._client(user).get(reverse('growth-group-list'))
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, msg=user.email)
+
+    def test_user_without_church_cannot_write(self):
+        user = self._user('sem-igreja@teste.com', church=None)
+        resp = self._client(user).post(
+            reverse('growth-group-list'), self._payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_secretaria_can_create_and_edit(self):
+        client = self._client(self.secretaria)
+        resp = client.post(
+            reverse('growth-group-list'), self._payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['leader_name'], 'Líder de GC')
+        self.assertEqual(resp.data['weekday_display'], 'Terça-feira')
+
+        pk = resp.data['id']
+        resp = client.patch(
+            reverse('growth-group-detail', args=[pk]),
+            {'name': 'GC Renovação', 'weekday': 4}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['name'], 'GC Renovação')
+        self.assertEqual(resp.data['weekday'], 4)
+
+    def test_treasurer_can_create_and_edit_but_not_delete(self):
+        client = self._client(self.tesoureiro)
+        resp = client.post(
+            reverse('growth-group-list'), self._payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        pk = resp.data['id']
+
+        resp = client.patch(
+            reverse('growth-group-detail', args=[pk]),
+            {'radius_meters': 1500}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        resp = client.delete(reverse('growth-group-detail', args=[pk]))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(GrowthGroup.objects.filter(pk=pk).exists())
+
+    def test_secretaria_and_pastor_can_delete(self):
+        group = self._group()
+        for user in (self.secretaria, self.pastor):
+            group.pk = None
+            group.id = None
+            group.save()
+            resp = self._client(user).delete(
+                reverse('growth-group-detail', args=[group.pk])
+            )
+            self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_cannot_manage_group_of_another_church(self):
+        group = self._group(church=self.congregation)
+        resp = self._client(self.tesoureiro).delete(
+            reverse('growth-group-detail', args=[group.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- filtros ---
+    def test_search_by_name_leader_and_address(self):
+        self._group(name='Esperança')
+        self._group(name='Fé')
+        others = Member.objects.create(church=self.sede, name='Irmã Ana')
+        self._group(
+            name='Amor', leader=others,
+            street='Av. Liberdade', number='50', neighborhood='Bairro Centro',
+        )
+        url = reverse('growth-group-list')
+        self.assertEqual(
+            len(self._client(self.secretaria).get(url).data), 3
+        )
+        self.assertEqual(
+            len(self._client(self.secretaria).get(
+                url, {'search': 'esperança'}).data), 1
+        )
+        # busca por líder
+        self.assertEqual(
+            len(self._client(self.secretaria).get(
+                url, {'search': 'irmã ana'}).data), 1
+        )
+        # busca por logradouro/bairro (endereço)
+        self.assertEqual(
+            len(self._client(self.secretaria).get(
+                url, {'search': 'liberdade'}).data), 1
+        )
+        self.assertEqual(
+            len(self._client(self.secretaria).get(
+                url, {'search': 'bairro centro'}).data), 1
+        )
+
+    def test_serializer_exposes_structured_address(self):
+        resp = self._client(self.secretaria).post(
+            reverse('growth-group-list'), self._payload(), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['street'], 'Rua A')
+        self.assertEqual(resp.data['number'], '100')
+        self.assertEqual(resp.data['city'], 'Campina Grande')
+        self.assertEqual(resp.data['state'], 'PB')
+        self.assertEqual(resp.data['cep'], '58400-000')
+        self.assertIn('Rua A, 100', resp.data['address'])
+        self.assertIn('Campina Grande/PB', resp.data['address'])
+
+    def test_serializer_requires_street_and_city(self):
+        payload = self._payload(street='', city='')
+        resp = self._client(self.secretaria).post(
+            reverse('growth-group-list'), payload, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('city', resp.data)
+
+    def test_filter_by_weekday(self):
+        self._group(name='Seg', weekday=0)
+        self._group(name='Ter', weekday=1)
+        self._group(name='Sex', weekday=4)
+        resp = self._client(self.secretaria).get(
+            reverse('growth-group-list'), {'weekday': 1},
+        )
+        data = resp.data
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['name'], 'Ter')
+
+    # --- stats / dashboard ---
+    def test_stats_counts_and_overlap_alert(self):
+        leader_b = Member.objects.create(church=self.sede, name='Líder B')
+        # Sobreposição: ~55m de distância, raios 1000m cada → 55 < 2000.
+        self._group(latitude=-7.2230, longitude=-35.9050, radius_meters=1000)
+        self._group(
+            latitude=-7.2235, longitude=-35.9050, radius_meters=1000,
+        )
+        self._group(
+            name='GC Norte', leader=leader_b, weekday=0, latitude=-7.22,
+            longitude=-35.91, radius_meters=2000,
+        )
+        # Sem coordenadas: entra no total ativo, mas não na cobertura.
+        self._group(name='GC Sem Mapa', leader=leader_b, is_active=False)
+
+        resp = self._client(self.secretaria).get(
+            reverse('growth-group-stats')
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data
+        self.assertEqual(data['total_active'], 3)
+        self.assertEqual(data['total_leaders'], 2)
+        self.assertEqual(data['most_frequent_day'], 1)
+        self.assertEqual(data['coverage'], 3)
+        self.assertGreaterEqual(data['overlap_count'], 1)
+        self.assertTrue(data['overlap_ids'])

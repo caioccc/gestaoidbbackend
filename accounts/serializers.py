@@ -27,6 +27,7 @@ from .models import (
     MinistryArea,
     StorageLocation,
     WorshipService,
+    GrowthGroup,
 )
 
 User = get_user_model()
@@ -952,6 +953,106 @@ class WorshipServiceSerializer(serializers.ModelSerializer):
                 {'offering': ['O valor não pode ser negativo.']}
             )
         return attrs
+
+
+class GrowthGroupSerializer(serializers.ModelSerializer):
+    """Grupo de Crescimento da igreja ativa.
+
+    Endereço segue o padrão do sistema (como `Member`/`Church`): campos
+    estruturados `cep/street/number/complement/neighborhood/city/state`,
+    preenchidos a partir do CEP (ViaCEP) no frontend; `address` é somente
+    leitura e devolve o endereço completo formatado para exibição no mapa/tabela.
+
+    Validações:
+    - Dia de encontro não pode ser dia de culto oficial (quinta/sábado/domingo);
+    - Líder é obrigatório e anfitrião opcional (membros da igreja);
+    - Logradouro e cidade obrigatórios (padrão de endereço do sistema);
+    - Latitude e longitude devem vir juntas.
+    """
+
+    leader_name = serializers.CharField(source='leader.name', read_only=True)
+    host_name = serializers.CharField(source='host.name', read_only=True)
+    weekday_display = serializers.CharField(source='get_weekday_display', read_only=True)
+    address = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = GrowthGroup
+        fields = [
+            'id', 'church', 'name', 'leader', 'leader_name', 'host', 'host_name',
+            'weekday', 'weekday_display', 'time',
+            'cep', 'street', 'number', 'complement', 'neighborhood', 'city', 'state',
+            'address', 'radius_meters',
+            'latitude', 'longitude', 'is_active',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'church', 'created_by', 'created_at', 'updated_at']
+
+    def get_address(self, obj):
+        return obj.full_address
+
+    def validate_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Informe o nome do GC.')
+        return value
+
+    def _clean_str(self, value):
+        return (value or '').strip()
+
+    def validate_cep(self, value):
+        return self._clean_str(value).replace(' ', '')
+
+    def validate_weekday(self, value):
+        if value in GrowthGroup.FORBIDDEN_WEEKDAYS:
+            raise serializers.ValidationError(
+                'Reuniões de GC não podem ocorrer em dias de culto oficial '
+                '(quinta-feira, sábado e domingo).'
+            )
+        return value
+
+    def validate(self, attrs):
+        if attrs.get('street') is not None:
+            attrs['street'] = self._clean_str(attrs['street'])
+        if attrs.get('number') is not None:
+            attrs['number'] = self._clean_str(attrs['number'])
+        if attrs.get('complement') is not None:
+            attrs['complement'] = self._clean_str(attrs['complement'])
+        if attrs.get('neighborhood') is not None:
+            attrs['neighborhood'] = self._clean_str(attrs['neighborhood'])
+        if attrs.get('city') is not None:
+            attrs['city'] = self._clean_str(attrs['city'])
+        if attrs.get('state') is not None:
+            attrs['state'] = self._clean_str(attrs['state']).upper()
+
+        # Em edição parcial, leia os valores atuais da instância.
+        street = attrs.get('street')
+        if street is None and self.instance is not None:
+            street = self.instance.street
+        city = attrs.get('city')
+        if city is None and self.instance is not None:
+            city = self.instance.city
+        if not (street or '').strip() or not (city or '').strip():
+            raise serializers.ValidationError(
+                {'city': ['Informe o endereço do GC (logradouro e cidade).']}
+            )
+
+        lat = attrs.get('latitude')
+        if lat is None and self.instance is not None:
+            lat = self.instance.latitude
+        lng = attrs.get('longitude')
+        if lng is None and self.instance is not None:
+            lng = self.instance.longitude
+        if (lat is None) != (lng is None):
+            raise serializers.ValidationError(
+                {'latitude': ['Informe latitude e longitude juntas.']}
+            )
+        return attrs
+
+    def create(self, validated_data):
+        church = self.context.get('church')
+        if church is not None:
+            validated_data['church'] = church
+        return super().create(validated_data)
 
 
 class ChurchMinutesSerializer(serializers.ModelSerializer):

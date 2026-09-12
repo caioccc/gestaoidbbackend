@@ -6,7 +6,7 @@ import uuid
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F, Q
+from django.db.models import Count, F, Q
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -38,10 +38,12 @@ from .models import (
     MinistryArea,
     StorageLocation,
     WorshipService,
+    GrowthGroup,
     User as UserModel,
 )
 from .permissions import (
     CanAccessTargetChurch,
+    GrowthGroupPermission,
     IsChurchRole,
     IsSedeManager,
     IsStaffPermission,
@@ -77,9 +79,22 @@ from .serializers import (
     StorageLocationSerializer,
     UserSerializer,
     WorshipServiceSerializer,
+    GrowthGroupSerializer,
 )
 
 ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Distância em metros entre dois pontos (fórmula de Haversine)."""
+    from math import asin, cos, radians, sin, sqrt
+
+    r = 6371000.0  # raio médio da Terra (m)
+    phi1, phi2 = radians(lat1), radians(lat2)
+    dphi = radians(lat2 - lat1)
+    dlmb = radians(lng2 - lng1)
+    a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlmb / 2) ** 2
+    return 2 * r * asin(sqrt(a))
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -924,6 +939,105 @@ class WorshipServiceViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church, created_by=self.request.user)
+
+
+class GrowthGroupViewSet(viewsets.ModelViewSet):
+    """Gestão dos Grupos de Crescimento (GCs) da igreja ativa.
+
+    RBAC: leitura para todos os autenticados; criar/editar para secretaria,
+    tesoureiro, pastor e admin; excluir estritamente para secretaria, pastor
+    e admin (tesoureiro NÃO pode excluir) — ver `GrowthGroupPermission`.
+
+    Filtros:
+    - `?search=<texto>` (nome do GC, nome do líder ou endereço — logradouro/bairro/cidade/CEP);
+    - `?weekday=<0..4>` (dia de encontro permitido).
+    """
+
+    serializer_class = GrowthGroupSerializer
+    permission_classes = [GrowthGroupPermission]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return GrowthGroup.objects.none()
+        qs = GrowthGroup.objects.filter(church=church)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search)
+                | Q(leader__name__icontains=search)
+                | Q(street__icontains=search)
+                | Q(neighborhood__icontains=search)
+                | Q(city__icontains=search)
+                | Q(cep__icontains=search)
+            )
+        weekday = self.request.query_params.get('weekday')
+        if weekday not in (None, ''):
+            try:
+                qs = qs.filter(weekday=int(weekday))
+            except (TypeError, ValueError):
+                qs = qs.none()
+        return qs.order_by('weekday', 'name')
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    def perform_update(self, serializer):
+        serializer.save()
+
+    @action(detail=False, methods=['get'])
+    def stats(self, request):
+        """Indicadores dos cards da dashboard executiva de GCs."""
+        qs = self.get_queryset()
+        total_active = qs.filter(is_active=True).count()
+        total_leaders = (
+            qs.filter(is_active=True).values('leader').distinct().count()
+        )
+        most_frequent_day = None
+        by_day = (
+            qs.filter(is_active=True)
+            .values('weekday')
+            .annotate(n=Count('id'))
+            .order_by('-n', 'weekday')
+        )
+        if by_day:
+            most_frequent_day = by_day[0]['weekday']
+
+        with_coords = list(
+            qs.filter(latitude__isnull=False, longitude__isnull=False)
+        )
+        coverage = len(with_coords)
+
+        # Sobreposição: pares de GCs cuja distância < r1 + r2.
+        overlaps = 0
+        overlap_ids = set()
+        for i in range(len(with_coords)):
+            a = with_coords[i]
+            for b in with_coords[i + 1:]:
+                distance = _haversine_m(
+                    a.latitude, a.longitude, b.latitude, b.longitude
+                )
+                if distance < (a.radius_meters + b.radius_meters):
+                    overlaps += 1
+                    overlap_ids.add(a.id)
+                    overlap_ids.add(b.id)
+
+        return Response(
+            {
+                'total_active': total_active,
+                'total_leaders': total_leaders,
+                'most_frequent_day': most_frequent_day,
+                'coverage': coverage,
+                'overlap_count': overlaps,
+                'overlap_ids': sorted(overlap_ids),
+            }
+        )
 
 
 class ChurchMinutesViewSet(viewsets.ModelViewSet):

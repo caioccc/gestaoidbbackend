@@ -150,3 +150,70 @@ class IsSedeManager(permissions.BasePermission):
             user.church.is_sede()
             and user.get_role_for(user.church) == ChurchMembership.Role.PASTOR
         )
+
+
+class GrowthGroupPermission(permissions.BasePermission):
+    """Permissões do módulo de Grupos de Crescimento (GCs).
+
+    Manual de regras (RBAC):
+    - Leitura (list/retrieve): qualquer usuário autenticado com igreja ativa.
+    - Criar/Editar (create/update/partial_update): secretaria, tesoureiro,
+      pastor e admin.
+    - Excluir (destroy): estritamente secretaria, pastor e admin — o perfil
+      tesoureiro NÃO pode excluir.
+
+    A checagem de papel usa a igreja ativa (user.church), espelhando
+    `IsChurchRole`. O ADMIN (staff/superuser) sempre passa.
+    """
+
+    MANAGE_ROLES = ('PASTOR', 'SECRETARIA', 'TESOUREIRO')
+    # O tesoureiro pode criar/editar, mas não excluir.
+    DELETE_ROLES = ('PASTOR', 'SECRETARIA')
+
+    message = 'Ação não permitida para o seu perfil.'
+
+    def _role(self, request) -> str | None:
+        user = request.user
+        if not (user and user.is_authenticated):
+            return None
+        if user.church is None:
+            return None
+        role = user.get_role_for(user.church)
+        # Pastor de Sede operando a congregação como igreja ativa herda o
+        # papel requerido (espelha IsChurchRole).
+        parent = user.church.parent_church
+        if (
+            role in (None, 'TESOUREIRO', 'SECRETARIA')
+            and parent is not None
+            and parent.is_sede()
+            and user.get_role_for(parent) == ChurchMembership.Role.PASTOR
+        ):
+            return 'PASTOR'
+        return role
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if is_admin(user):
+            return True
+        if request.method in permissions.SAFE_METHODS:
+            # Leitura para qualquer autenticado com igreja ativa.
+            return user.church is not None
+        role = self._role(request)
+        if request.method == 'DELETE':
+            return role in self.DELETE_ROLES
+        return role in self.MANAGE_ROLES
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if is_admin(user):
+            return True
+        if request.method in permissions.SAFE_METHODS:
+            if user.church is None:
+                return False
+            return obj.church_id == user.church.id
+        role = self._role(request)
+        if request.method == 'DELETE':
+            return role in self.DELETE_ROLES
+        return role in self.MANAGE_ROLES and obj.church_id == user.church.id

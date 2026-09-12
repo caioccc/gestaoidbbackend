@@ -14,6 +14,7 @@ router.register('loans', viewsets.LoanViewSet, basename='loan')
 router.register('cultos', viewsets.WorshipServiceViewSet, basename='worship')
 router.register('minutes', viewsets.ChurchMinutesViewSet, basename='minutes')
 router.register('church-links', viewsets.ChurchPublicLinkViewSet, basename='church-link')
+router.register('growth-groups', viewsets.GrowthGroupViewSet, basename='growth-group')
 
 urlpatterns = [
     path('login/', viewsets.LoginView.as_view(), name='login'),
