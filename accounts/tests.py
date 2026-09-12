@@ -10,17 +10,21 @@ from finance.models import CalendarEvent
 
 from .models import (
     AccountingCategory,
+    CertificateTemplate,
     Church,
     ChurchMembership,
     ChurchMinutes,
     ChurchPublicLink,
+    EcclesiasticalCertificate,
     GrowthGroup,
     Loan,
     MaterialItem,
     Member,
+    MemberContactLog,
     MemberDocument,
     MemberRelative,
     MemberSubmission,
+    MessageTemplate,
     MinistryArea,
     StorageLocation,
     WorshipService,
@@ -4565,3 +4569,555 @@ class GrowthGroupTests(BaseChurchTestCase):
         self.assertEqual(data['coverage'], 3)
         self.assertGreaterEqual(data['overlap_count'], 1)
         self.assertTrue(data['overlap_ids'])
+
+
+class CommunicationWhatsAppTests(BaseChurchTestCase):
+    """Comunicação semiautomática via WhatsApp: templates, funil (stage) e
+    ações recomendadas da Secretaria."""
+
+    def setUp(self):
+        super().setUp()
+        self.pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        self.secretaria = self._user(
+            'secretaria@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.tesoureiro = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+
+    def _member(self, name='Maria Silva', phone='(83) 99800-1234', **kwargs):
+        defaults = dict(
+            church=self.sede, name=name, phone=phone, status=Member.Status.ACTIVE,
+        )
+        defaults.update(kwargs)
+        return Member.objects.create(**defaults)
+
+    def _template(self, category='WELCOME', **kwargs):
+        defaults = dict(
+            church=self.sede, title='Boas-Vindas', category=category,
+            content='Olá {{PRIMEIRO_NOME}}, seja bem-vindo à {{IGREJA}}!',
+        )
+        defaults.update(kwargs)
+        return MessageTemplate.objects.create(**defaults)
+
+    # --- MessageTemplate CRUD / RBAC ---
+    def test_template_list_and_detail_scoped_to_church(self):
+        mine = self._template(title='Boas-Vindas')
+        other = self._template(church=self.congregation, title='Outro')
+        resp = self._client(self.secretaria).get(
+            reverse('message-template-list')
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([t['id'] for t in resp.data], [mine.id])
+        self.assertNotIn(other.id, [t['id'] for t in resp.data])
+
+    def test_template_requires_secretaria_or_pastor(self):
+        url = reverse('message-template-list')
+        self.assertEqual(
+            self._client(self.tesoureiro).get(url).status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            self._client(self.tesoureiro).post(url, {}, format='json').status_code,
+            status.HTTP_403_FORBIDDEN,
+        )
+        self.assertEqual(
+            APIClient().get(url).status_code, status.HTTP_401_UNAUTHORIZED,
+        )
+
+    def test_template_create_update_delete(self):
+        client = self._client(self.secretaria)
+        resp = client.post(
+            reverse('message-template-list'),
+            {
+                'title': 'Versículo do Dia',
+                'category': 'VERSE',
+                'content': '{{PRIMEIRO_NOME}}, "Tudo posso naquele que me fortalece".',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['church'], self.sede.id)
+        self.assertEqual(resp.data['category_display'], 'Versículo')
+        pk = resp.data['id']
+
+        resp = client.patch(
+            reverse('message-template-detail', args=[pk]),
+            {'is_active': False}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIs(resp.data['is_active'], False)
+
+        resp = client.delete(reverse('message-template-detail', args=[pk]))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    # --- prepare-whatsapp ---
+    def test_prepare_whatsapp_with_template(self):
+        member = self._member(name='Maria Silva')
+        template = self._template(category='WELCOME')
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id, 'category': 'WELCOME'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            resp.data['whatsapp_url'].startswith('https://wa.me/5583998001234?text=')
+        )
+        self.assertIn('Maria', resp.data['formatted_message'])
+        self.assertIn('Igreja Teste', resp.data['formatted_message'])
+        self.assertNotIn('{{', resp.data['formatted_message'])
+
+        log = MemberContactLog.objects.get(member=member)
+        self.assertEqual(log.category, 'WELCOME')
+        self.assertEqual(log.contacted_by, self.secretaria)
+        member.refresh_from_db()
+        self.assertIsNotNone(member.last_contact_at)
+
+    def test_prepare_whatsapp_with_custom_text(self):
+        member = self._member(name='João Pedro', phone='83 99800-9999')
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {
+                'custom_text': 'Oi {{PRIMEIRO_NOME}}, que tal um encontro novo? 😊',
+                'category': 'CARE',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['formatted_message'], 'Oi João, que tal um encontro novo? 😊')
+        self.assertTrue(resp.data['whatsapp_url'].startswith('https://wa.me/5583998009999?text='))
+        # emojis e quebras são preservados na URL codificada
+        from urllib.parse import unquote
+        text = unquote(resp.data['whatsapp_url'].split('?text=', 1)[1])
+        self.assertEqual(text, resp.data['formatted_message'])
+
+    def test_prepare_whatsapp_rejects_invalid_phone(self):
+        member = self._member(phone='123')
+        template = self._template()
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('phone', resp.data)
+
+    def test_prepare_whatsapp_requires_template_or_custom_text(self):
+        member = self._member()
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_prepare_whatsapp_rejects_template_of_other_church(self):
+        member = self._member()
+        template = self._template(church=self.congregation)
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_prepare_whatsapp_requires_secretaria_or_pastor(self):
+        member = self._member()
+        template = self._template()
+        resp = self._client(self.tesoureiro).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_prepare_whatsapp_records_multiple_contacts_and_updates_last_contact(self):
+        from datetime import timedelta  # noqa: PLC0415
+        from django.utils import timezone  # noqa: PLC0415
+
+        member = self._member()
+        member.last_contact_at = timezone.now() - timedelta(days=5)
+        member.save(update_fields=['last_contact_at'])
+        template = self._template()
+        url = reverse('member-self-prepare-whatsapp', args=[member.id])
+        for _ in range(2):
+            resp = self._client(self.secretaria).post(
+                url, {'template_id': template.id}, format='json',
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(MemberContactLog.objects.filter(member=member).count(), 2)
+        member.refresh_from_db()
+        self.assertGreaterEqual(member.last_contact_at, timezone.now() - timedelta(minutes=5))
+
+    # --- stage (funil) ---
+    def test_stage_update_valid(self):
+        member = self._member()
+        for stage in ('VISITOR', 'INTEGRATION', 'ACTIVE', 'ABSENT_CARE', 'TRANSITION'):
+            resp = self._client(self.secretaria).patch(
+                reverse('member-self-stage', args=[member.id]),
+                {'lifecycle_stage': stage}, format='json',
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, msg=stage)
+            self.assertEqual(resp.data['lifecycle_stage'], stage)
+
+    def test_stage_update_invalid(self):
+        member = self._member()
+        resp = self._client(self.secretaria).patch(
+            reverse('member-self-stage', args=[member.id]),
+            {'lifecycle_stage': 'ALIEN'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_stage_requires_secretaria_or_pastor(self):
+        member = self._member()
+        resp = self._client(self.tesoureiro).patch(
+            reverse('member-self-stage', args=[member.id]),
+            {'lifecycle_stage': 'TRANSITION'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    # --- secretary-actions ---
+    def test_secretary_actions_lists_birthdays_today(self):
+        from django.utils import timezone  # noqa: PLC0415
+        today = timezone.localdate()
+        member = self._member(name='Aniversariante', birth_date=today)
+        resp = self._client(self.secretaria).get(reverse('secretary-actions'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        ids = [a['member_id'] for a in resp.data['birthdays_today']]
+        self.assertIn(member.id, ids)
+
+    def test_secretary_actions_absent_pending_contact(self):
+        from datetime import timedelta  # noqa: PLC0415
+        from django.utils import timezone  # noqa: PLC0415
+
+        overdue = self._member(
+            name='Ausente', lifecycle_stage=Member.LifecycleStage.ABSENT_CARE,
+        )
+        recent = self._member(
+            name='Cuidado Recente',
+            lifecycle_stage=Member.LifecycleStage.ABSENT_CARE,
+        )
+        recent.last_contact_at = timezone.now() - timedelta(days=2)
+        recent.save(update_fields=['last_contact_at'])
+        resp = self._client(self.pastor).get(reverse('secretary-actions'))
+        ids = [a['member_id'] for a in resp.data['absent_pending_contact']]
+        self.assertIn(overdue.id, ids)
+        self.assertNotIn(recent.id, ids)
+
+    def test_secretary_actions_new_visitors(self):
+        from datetime import timedelta  # noqa: PLC0415
+        from django.utils import timezone  # noqa: PLC0415
+
+        visitor = self._member(
+            name='Visitante', lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        integrated = self._member(
+            name='Em Integração', lifecycle_stage=Member.LifecycleStage.INTEGRATION,
+        )
+        integrated.last_contact_at = timezone.now()
+        integrated.save(update_fields=['last_contact_at'])
+        resp = self._client(self.secretaria).get(reverse('secretary-actions'))
+        ids = [a['member_id'] for a in resp.data['new_visitors']]
+        self.assertIn(visitor.id, ids)
+        self.assertNotIn(integrated.id, ids)
+
+    def test_secretary_actions_cards_expiring_within_window(self):
+        from datetime import timedelta  # noqa: PLC0415
+        from django.utils import timezone  # noqa: PLC0415
+
+        today = timezone.localdate()
+        self.sede.card_valid_until = today + timedelta(days=20)
+        self.sede.save(update_fields=['card_valid_until'])
+        with_card = self._member(name='Com Carteirinha', card_number='0001')
+        without_card = self._member(name='Sem Carteirinha')
+        resp = self._client(self.secretaria).get(reverse('secretary-actions'))
+        ids = [a['member_id'] for a in resp.data['cards_expiring']]
+        self.assertIn(with_card.id, ids)
+        self.assertNotIn(without_card.id, ids)
+
+    def test_secretary_actions_requires_secretaria_or_pastor(self):
+        resp = self._client(self.tesoureiro).get(reverse('secretary-actions'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        resp = APIClient().get(reverse('secretary-actions'))
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_member_serializer_exposes_stage_and_last_contact(self):
+        member = self._member(lifecycle_stage=Member.LifecycleStage.VISITOR)
+        resp = self._client(self.secretaria).get(
+            reverse('member-self-detail', args=[member.id])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['lifecycle_stage'], 'VISITOR')
+        self.assertEqual(resp.data['lifecycle_stage_display'], 'Visitante / Novo')
+        self.assertIn('last_contact_at', resp.data)
+
+
+class CertificateTests(BaseChurchTestCase):
+    """Certificados eclesiais: CRUD de modelos, emissão e downloads."""
+
+    def setUp(self):
+        super().setUp()
+        self.sec = self._user(
+            'sec-cert@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.client = self._client(self.sec)
+
+    @staticmethod
+    def _tiny_png_bytes():
+        from io import BytesIO
+
+        from PIL import Image
+
+        buf = BytesIO()
+        Image.new('RGB', (10, 10), color=(255, 255, 255)).save(buf, format='PNG')
+        return buf.getvalue()
+
+    @staticmethod
+    def _landscape_pdf_bytes():
+        from io import BytesIO
+
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=842, height=595)
+        out = BytesIO()
+        writer.write(out)
+        return out.getvalue()
+
+    def _template_payload(self, **kwargs):
+        data = {
+            'name': 'Modelo Batismo',
+            'certificate_type': CertificateTemplate.CertificateType.BAPTISM,
+            'layout_mode': CertificateTemplate.LayoutMode.SYSTEM_DEFAULT,
+            'default_verse': 'Ide por todo o mundo e pregai o evangelho...',
+        }
+        data.update(kwargs)
+        return data
+
+    def _issue_payload(self, **kwargs):
+        data = {
+            'certificate_type': CertificateTemplate.CertificateType.BAPTISM,
+            'recipient_name': 'João Pedro da Silva',
+            'event_date': '2026-08-30',
+            'officiant_name': 'Pr. Marcos',
+            'registry_book': '1',
+            'registry_page': '12',
+            'registry_number': '45',
+        }
+        data.update(kwargs)
+        return data
+
+    def _create_template(self, **kwargs):
+        data = self._template_payload(**kwargs)
+        multipart = any(isinstance(v, SimpleUploadedFile) for v in data.values())
+        if multipart:
+            files = {k: v for k, v in data.items() if isinstance(v, SimpleUploadedFile)}
+            form = {k: v for k, v in data.items() if not isinstance(v, SimpleUploadedFile)}
+            resp = self.client.post(
+                reverse('certificate-template-list'), {**form, **files}, format='multipart',
+            )
+        else:
+            resp = self.client.post(
+                reverse('certificate-template-list'), data, format='json',
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return resp.data
+
+    def _issue(self, **kwargs):
+        data = self._issue_payload(**kwargs)
+        files = {}
+        form = {}
+        multipart = any(isinstance(v, SimpleUploadedFile) for v in data.values())
+        if multipart:
+            for key, value in data.items():
+                if isinstance(value, SimpleUploadedFile):
+                    files[key] = value
+                else:
+                    form[key] = value
+            resp = self.client.post(
+                reverse('certificate-list'), {**form, **files}, format='multipart',
+            )
+        else:
+            resp = self.client.post(reverse('certificate-list'), data, format='json')
+        self.assertTrue(resp.status_code in (status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST), resp.data)
+        return resp
+
+    def test_template_crud_and_validation(self):
+        created = self._create_template()
+        self.assertEqual(created['church'], self.sede.id)
+        self.assertEqual(created['certificate_type'], 'BAPTISM')
+        self.assertIsNone(created['background_image_name'])
+        self.assertIsNone(created['base_pdf_name'])
+
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {**self._template_payload(), 'layout_mode': 'CUSTOM_IMAGE'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('background_image', resp.data)
+
+        png = SimpleUploadedFile('moldura.png', self._tiny_png_bytes(), content_type='image/png')
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {
+                **self._template_payload(name='Moldura', certificate_type='CUSTOM'),
+                'layout_mode': 'CUSTOM_IMAGE',
+                'background_image': png,
+            },
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        img_id = resp.data['id']
+        self.assertTrue(resp.data['background_image_name'].endswith('.png'))
+
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {
+                **self._template_payload(name='Base', certificate_type='CUSTOM'),
+                'layout_mode': 'BASE_PDF',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('base_pdf', resp.data)
+
+        base = SimpleUploadedFile('base.pdf', self._landscape_pdf_bytes(), content_type='application/pdf')
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {
+                **self._template_payload(name='Base', certificate_type='CUSTOM'),
+                'layout_mode': 'BASE_PDF',
+                'base_pdf': base,
+            },
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        resp = self.client.patch(
+            reverse('certificate-template-detail', args=[img_id]),
+            {'remove_background_image': 'true'},
+            format='multipart',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['background_image_name'])
+
+        resp = self.client.delete(reverse('certificate-template-detail', args=[img_id]))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+
+    def test_template_roles_and_scoping(self):
+        treasurer = self._user(
+            'tes-cert@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        resp = self._client(treasurer).get(reverse('certificate-template-list'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        other = self._user(
+            'sec-cert-outra@teste.com', church=self.congregation,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self._create_template()
+        resp = self._client(other).get(reverse('certificate-template-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data, [])
+
+    def test_issue_with_frontend_generated_pdf(self):
+        self._create_template()
+        pdf = SimpleUploadedFile(
+            'certificado_batismo_test.pdf',
+            b'%PDF-1.4 fake generated by frontend',
+            content_type='application/pdf',
+        )
+        resp = self._issue(generated_pdf=pdf)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        data = resp.data
+        self.assertEqual(data['recipient_name'], 'João Pedro da Silva')
+        self.assertEqual(data['certificate_type'], 'BAPTISM')
+        self.assertEqual(data['certificate_type_display'], 'Batismo nas Águas')
+        self.assertTrue(data['generated_pdf_name'].endswith('.pdf'))
+        self.assertEqual(data['created_by'], self.sec.id)
+
+        resp = self.client.get(reverse('certificate-download-pdf', args=[data['id']]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+        self.assertEqual(resp['Content-Disposition'].split(';')[0], 'attachment')
+
+    def test_issue_base_pdf_compiles_backend(self):
+        base = SimpleUploadedFile('base.pdf', self._landscape_pdf_bytes(), content_type='application/pdf')
+        template = self._create_template(
+            name='Base Batismo',
+            certificate_type=CertificateTemplate.CertificateType.BAPTISM,
+            layout_mode=CertificateTemplate.LayoutMode.BASE_PDF,
+            base_pdf=base,
+        )
+        resp = self._issue(template=template['id'])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        cert = EcclesiasticalCertificate.objects.get(pk=resp.data['id'])
+        cert.generated_pdf.open('rb')
+        payload = cert.generated_pdf.read()
+        cert.generated_pdf.close()
+        self.assertTrue(payload.startswith(b'%PDF'))
+
+        resp = self.client.get(reverse('certificate-download-pdf', args=[cert.id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+
+    def test_issue_requires_pdf_or_base_template(self):
+        self._create_template()
+        resp = self._issue()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('generated_pdf', resp.data)
+
+    def test_list_filters(self):
+        self._create_template()
+        pdf = SimpleUploadedFile(
+            'certificado.pdf', b'%PDF-1.4', content_type='application/pdf',
+        )
+        self._issue(generated_pdf=pdf)
+        second = self._issue(
+            recipient_name='Ana Clara Souza',
+            certificate_type=CertificateTemplate.CertificateType.CUSTOM,
+            event_date='2025-03-10',
+            generated_pdf=pdf,
+        )
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED, second.data)
+
+        resp = self.client.get(reverse('certificate-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 2)
+
+        resp = self.client.get(reverse('certificate-list'), {'type': 'CUSTOM'})
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['recipient_name'], 'Ana Clara Souza')
+
+        resp = self.client.get(reverse('certificate-list'), {'year': '2025'})
+        self.assertEqual(len(resp.data), 1)
+
+        resp = self.client.get(reverse('certificate-list'), {'search': 'João'})
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['recipient_name'], 'João Pedro da Silva')
+
+    def test_delete_removes_storage_file(self):
+        from core.storage import raw_storage
+
+        self._create_template()
+        pdf = SimpleUploadedFile(
+            'certificado_delete.pdf', b'%PDF-1.4', content_type='application/pdf',
+        )
+        resp = self._issue(generated_pdf=pdf)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        cert = EcclesiasticalCertificate.objects.get(pk=resp.data['id'])
+        fname = cert.generated_pdf.name
+        self.assertTrue(raw_storage.exists(fname))
+
+        resp = self.client.delete(reverse('certificate-detail', args=[cert.id]))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(EcclesiasticalCertificate.objects.count(), 0)
+        self.assertFalse(raw_storage.exists(fname))

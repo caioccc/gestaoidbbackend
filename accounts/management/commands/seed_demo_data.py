@@ -170,6 +170,7 @@ class Command(BaseCommand):
         self._seed_extra_churches()
         ministry_areas = self._seed_ministry_areas(sede)
         users = self._seed_users(sede, congregations)
+        self._seed_message_templates()
         self._seed_members(sede, 110, 1, ministry_areas, rng)
         self._seed_members(congregations[0], 25, 1, ministry_areas, rng)
         self._seed_cultos(sede, rng)
@@ -191,6 +192,12 @@ class Command(BaseCommand):
                 key=key,
                 defaults={'label': labels.get(key, key.replace('_', ' ').title())},
             )
+
+    def _seed_message_templates(self):
+        from accounts.services import get_or_create_default_message_templates
+
+        for church in Church.objects.filter(name__icontains=CHURCH_MARKER):
+            get_or_create_default_message_templates(church)
 
     def _seed_sede(self):
         sede, _ = Church.objects.get_or_create(

@@ -3,7 +3,9 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (
     AccountingCategory,
+    CertificateTemplate,
     Church,
+    EcclesiasticalCertificate,
     Member,
     MinistryArea,
     User,
@@ -107,3 +109,17 @@ class UserAdmin(BaseUserAdmin):
     )
     readonly_fields = ['created_at', 'updated_at', 'last_login']
     filter_horizontal = ['groups', 'user_permissions']
+
+
+@admin.register(CertificateTemplate)
+class CertificateTemplateAdmin(admin.ModelAdmin):
+    list_display = ['name', 'church', 'certificate_type', 'layout_mode', 'is_active', 'created_at']
+    list_filter = ['church', 'certificate_type', 'layout_mode', 'is_active']
+    search_fields = ['name', 'church__name']
+
+
+@admin.register(EcclesiasticalCertificate)
+class EcclesiasticalCertificateAdmin(admin.ModelAdmin):
+    list_display = ['recipient_name', 'church', 'certificate_type', 'event_date', 'created_at']
+    list_filter = ['church', 'certificate_type', 'event_date']
+    search_fields = ['recipient_name', 'member__name', 'church__name']

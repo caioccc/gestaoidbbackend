@@ -15,6 +15,9 @@ router.register('cultos', viewsets.WorshipServiceViewSet, basename='worship')
 router.register('minutes', viewsets.ChurchMinutesViewSet, basename='minutes')
 router.register('church-links', viewsets.ChurchPublicLinkViewSet, basename='church-link')
 router.register('growth-groups', viewsets.GrowthGroupViewSet, basename='growth-group')
+router.register('message-templates', viewsets.MessageTemplateViewSet, basename='message-template')
+router.register('certificate-templates', viewsets.CertificateTemplateViewSet, basename='certificate-template')
+router.register('certificates', viewsets.EcclesiasticalCertificateViewSet, basename='certificate')
 
 urlpatterns = [
     path('login/', viewsets.LoginView.as_view(), name='login'),
@@ -165,6 +168,11 @@ urlpatterns = [
         'alerts/',
         viewsets.AlertsView.as_view(),
         name='alerts',
+    ),
+    path(
+        'secretary-actions/',
+        viewsets.SecretaryActionsView.as_view(),
+        name='secretary-actions',
     ),
     path(
         'public/card/<str:hash>/',

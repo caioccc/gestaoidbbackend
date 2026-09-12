@@ -13,10 +13,12 @@ from rest_framework import serializers
 from . import services
 from .models import (
     AccountingCategory,
+    CertificateTemplate,
     Church,
     ChurchMembership,
     ChurchMinutes,
     ChurchPublicLink,
+    EcclesiasticalCertificate,
     Loan,
     MaterialItem,
     Member,
@@ -24,6 +26,7 @@ from .models import (
     MemberRelative,
     MemberSubmission,
     MemberTransfer,
+    MessageTemplate,
     MinistryArea,
     StorageLocation,
     WorshipService,
@@ -739,6 +742,9 @@ class MemberRelativeSerializer(serializers.ModelSerializer):
 
 class MemberSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    lifecycle_stage_display = serializers.CharField(
+        source='get_lifecycle_stage_display', read_only=True,
+    )
     church_entry_display = serializers.SerializerMethodField()
     marital_status_display = serializers.CharField(
         source='get_marital_status_display', read_only=True,
@@ -768,11 +774,15 @@ class MemberSerializer(serializers.ModelSerializer):
             'ministry_areas', 'ministry_areas_display', 'photo',
             'relatives',
             'status', 'status_display', 'notes',
+            'lifecycle_stage', 'lifecycle_stage_display', 'last_contact_at',
             'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
             'public_hash',
             'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'church', 'created_at', 'updated_at', 'card_number', 'public_hash']
+        read_only_fields = [
+            'id', 'church', 'created_at', 'updated_at', 'card_number',
+            'public_hash', 'last_contact_at',
+        ]
 
     def get_ministry_areas_display(self, obj):
         return MinistryAreaSerializer(obj.ministry_areas.all(), many=True).data
@@ -863,6 +873,33 @@ class MemberSerializer(serializers.ModelSerializer):
         if relatives is not None:
             self._sync_relatives(member, list(relatives))
         return member
+
+
+class MessageTemplateSerializer(serializers.ModelSerializer):
+    category_display = serializers.CharField(
+        source='get_category_display', read_only=True,
+    )
+
+    class Meta:
+        model = MessageTemplate
+        fields = [
+            'id', 'church', 'title', 'category', 'category_display',
+            'content', 'is_active', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'church', 'created_at', 'updated_at']
+
+    def create(self, validated_data):
+        church = self.context.get('church')
+        request = self.context.get('request')
+        if church is None:
+            church = getattr(getattr(request, 'user', None), 'church', None)
+        validated_data['church'] = church
+        if not validated_data.get('title'):
+            validated_data['title'] = dict(MessageTemplate.Category.choices).get(
+                validated_data.get('category', ''), 'Personalizado'
+            )
+        validated_data['created_by'] = getattr(request, 'user', None)
+        return super().create(validated_data)
 
 
 class MemberTransferSerializer(serializers.ModelSerializer):
@@ -1668,3 +1705,144 @@ class PublicChurchLinksSerializer(serializers.Serializer):
         return PublicChurchPublicLinkSerializer(
             obj['links'], many=True, context=self.context,
         ).data
+
+
+class CertificateTemplateSerializer(serializers.ModelSerializer):
+    """Modelo de certificado da igreja, com mídias opcionais no Cloudinary."""
+
+    certificate_type_display = serializers.CharField(
+        source='get_certificate_type_display', read_only=True,
+    )
+    layout_mode_display = serializers.CharField(
+        source='get_layout_mode_display', read_only=True,
+    )
+    background_image_url = serializers.SerializerMethodField()
+    background_image_name = serializers.SerializerMethodField()
+    base_pdf_name = serializers.SerializerMethodField()
+    remove_background_image = serializers.BooleanField(
+        required=False, write_only=True, default=False
+    )
+    remove_base_pdf = serializers.BooleanField(
+        required=False, write_only=True, default=False
+    )
+
+    class Meta:
+        model = CertificateTemplate
+        fields = [
+            'id', 'church', 'name', 'certificate_type', 'certificate_type_display',
+            'layout_mode', 'layout_mode_display', 'background_image',
+            'background_image_url', 'background_image_name',
+            'base_pdf', 'base_pdf_name', 'default_verse', 'is_active', 'created_at',
+            'remove_background_image', 'remove_base_pdf',
+        ]
+        read_only_fields = ['id', 'church', 'created_at']
+
+    def get_background_image_url(self, obj):
+        return services.cloudinary_url(obj.background_image)
+
+    def get_background_image_name(self, obj):
+        return os.path.basename(obj.background_image.name or '') if obj.background_image else None
+
+    def get_base_pdf_name(self, obj):
+        return os.path.basename(obj.base_pdf.name or '') if obj.base_pdf else None
+
+    def validate(self, attrs):
+        for field in ('name',):
+            value = attrs.get(field)
+            if isinstance(value, str):
+                attrs[field] = (value or '').strip()
+        name = attrs.get('name')
+        if name is not None and not name:
+            raise serializers.ValidationError({'name': ['Informe o nome do modelo.']})
+        layout_mode = attrs.get('layout_mode')
+        background_image = attrs.get('background_image')
+        base_pdf = attrs.get('base_pdf')
+        if layout_mode == CertificateTemplate.LayoutMode.CUSTOM_IMAGE and not background_image:
+            raise serializers.ValidationError(
+                {'background_image': ['Envie uma imagem de fundo para o modo de moldura.']}
+            )
+        if layout_mode == CertificateTemplate.LayoutMode.BASE_PDF and not base_pdf:
+            raise serializers.ValidationError(
+                {'base_pdf': ['Envie o documento em PDF para o modo de base.']}
+            )
+        if base_pdf is not None and not getattr(base_pdf, 'name', '').lower().endswith('.pdf'):
+            raise serializers.ValidationError(
+                {'base_pdf': ['O arquivo base deve ser um PDF válido (.pdf).']}
+            )
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop('remove_background_image', None)
+        validated_data.pop('remove_base_pdf', None)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        remove_background_image = validated_data.pop('remove_background_image', False)
+        remove_base_pdf = validated_data.pop('remove_base_pdf', False)
+        instance = super().update(instance, validated_data)
+        if remove_background_image:
+            if instance.background_image and instance.background_image.name:
+                instance.background_image.delete(save=False)
+            instance.background_image = None
+        if remove_base_pdf:
+            if instance.base_pdf and instance.base_pdf.name:
+                instance.base_pdf.delete(save=False)
+            instance.base_pdf = None
+        if remove_background_image or remove_base_pdf:
+            instance.save()
+        return instance
+
+
+class EcclesiasticalCertificateSerializer(serializers.ModelSerializer):
+    """Registro de emissão de certificado eclesial com PDF final no Cloudinary."""
+
+    certificate_type_display = serializers.CharField(
+        source='get_certificate_type_display', read_only=True,
+    )
+    template_name = serializers.CharField(
+        source='template.name', read_only=True, default=None,
+    )
+    member_name = serializers.CharField(
+        source='member.name', read_only=True, default=None,
+    )
+    generated_pdf_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EcclesiasticalCertificate
+        fields = [
+            'id', 'church', 'template', 'template_name', 'certificate_type',
+            'certificate_type_display', 'recipient_name', 'member', 'member_name',
+            'event_date', 'officiant_name', 'father_name', 'mother_name',
+            'scripture_verse', 'registry_book', 'registry_page', 'registry_number',
+            'generated_pdf', 'generated_pdf_name', 'created_by', 'created_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'generated_pdf', 'created_by', 'created_at',
+        ]
+
+    def get_generated_pdf_name(self, obj):
+        return os.path.basename(obj.generated_pdf.name or '') if obj.generated_pdf else None
+
+    def validate(self, attrs):
+        for field in ('recipient_name', 'officiant_name', 'father_name', 'mother_name'):
+            value = attrs.get(field)
+            if isinstance(value, str):
+                attrs[field] = (value or '').strip()
+        for field in ('scripture_verse', 'registry_book', 'registry_page', 'registry_number'):
+            value = attrs.get(field)
+            if isinstance(value, str):
+                attrs[field] = (value or '').strip()
+        recipient = attrs.get('recipient_name')
+        if recipient is not None and not recipient:
+            raise serializers.ValidationError(
+                {'recipient_name': ['Informe o nome do destinatário.']}
+            )
+        if attrs.get('event_date') is None:
+            raise serializers.ValidationError(
+                {'event_date': ['Informe a data do evento.']}
+            )
+        if attrs.get('officiant_name') in (None, ''):
+            raise serializers.ValidationError(
+                {'officiant_name': ['Informe o ministro que celebrará o ato.']}
+            )
+        return attrs

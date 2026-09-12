@@ -379,6 +379,13 @@ class Member(models.Model):
         ACTIVE = 'ACTIVE', 'Ativo'
         INACTIVE = 'INACTIVE', 'Inativo'
 
+    class LifecycleStage(models.TextChoices):
+        VISITOR = 'VISITOR', 'Visitante / Novo'
+        INTEGRATION = 'INTEGRATION', 'Em Integração'
+        ACTIVE = 'ACTIVE', 'Membro Ativo'
+        ABSENT_CARE = 'ABSENT_CARE', 'Ausência / Cuidado Pastoral'
+        TRANSITION = 'TRANSITION', 'Em Transição / Afastado'
+
     class ChurchEntry(models.TextChoices):
         ACLAMACAO = 'ACLAMACAO', 'Aclamação'
         BATISMO = 'BATISMO', 'Batismo'
@@ -472,6 +479,15 @@ class Member(models.Model):
     status = models.CharField(
         'Status', max_length=20, choices=Status.choices, default=Status.ACTIVE,
     )
+    lifecycle_stage = models.CharField(
+        'Estágio do Membro',
+        max_length=20,
+        choices=LifecycleStage.choices,
+        default=LifecycleStage.ACTIVE,
+    )
+    last_contact_at = models.DateTimeField(
+        'Último contato (WhatsApp)', null=True, blank=True,
+    )
     notes = models.TextField('Observações', blank=True)
     public_hash = models.CharField(
         'Hash público do cartão', max_length=44, unique=True,
@@ -520,6 +536,237 @@ class Member(models.Model):
     def regenerate_public_hash(self):
         self.public_hash = secrets.token_urlsafe(32)
         self.save(update_fields=['public_hash', 'updated_at'])
+
+
+class CertificateTemplate(models.Model):
+    """Modelos e molduras de certificados eclesiais da igreja.
+
+    A igreja pode usar o layout padrão do sistema ou cadastrar seus próprios
+    modelos via upload de imagem de fundo (media_storage) ou PDF base
+    (raw_storage).
+    """
+
+    class CertificateType(models.TextChoices):
+        BAPTISM = 'BAPTISM', 'Batismo nas Águas'
+        CHILD_PRESENTATION = 'CHILD_PRESENTATION', 'Apresentação de Crianças'
+        MEMBERSHIP_COURSE = 'MEMBERSHIP_COURSE', 'Curso de Membresia'
+        CUSTOM = 'CUSTOM', 'Personalizado'
+
+    class LayoutMode(models.TextChoices):
+        SYSTEM_DEFAULT = 'SYSTEM_DEFAULT', 'Padrão do Sistema (Layout Clássico)'
+        CUSTOM_IMAGE = 'CUSTOM_IMAGE', 'Imagem de Fundo / Moldura (PNG/JPG)'
+        BASE_PDF = 'BASE_PDF', 'Documento Base em PDF'
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='certificate_templates',
+        verbose_name='Igreja',
+    )
+    name = models.CharField('Nome do modelo', max_length=120)
+    certificate_type = models.CharField(
+        'Tipo de certificado',
+        max_length=30,
+        choices=CertificateType.choices,
+        default=CertificateType.CUSTOM,
+    )
+    layout_mode = models.CharField(
+        'Modo de layout',
+        max_length=20,
+        choices=LayoutMode.choices,
+        default=LayoutMode.SYSTEM_DEFAULT,
+    )
+    background_image = models.ImageField(
+        'Imagem de fundo / moldura',
+        upload_to=church_upload_to('certificate_templates'),
+        storage=media_storage,
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+    base_pdf = models.FileField(
+        'Documento base em PDF',
+        upload_to=church_upload_to('certificate_templates'),
+        storage=raw_storage,
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+    default_verse = models.TextField('Versículo padrão', blank=True, default='')
+    is_active = models.BooleanField('Ativo', default=True)
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Modelo de Certificado'
+        verbose_name_plural = 'Modelos de Certificados'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.name
+
+
+class EcclesiasticalCertificate(models.Model):
+    """Registro de emissão de um certificado eclesial (PDF final no Cloudinary)."""
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='certificates',
+        verbose_name='Igreja',
+    )
+    template = models.ForeignKey(
+        CertificateTemplate,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='issued_certificates',
+        verbose_name='Modelo utilizado',
+    )
+    certificate_type = models.CharField(
+        'Tipo de certificado',
+        max_length=30,
+        choices=CertificateTemplate.CertificateType.choices,
+    )
+    recipient_name = models.CharField('Destinatário', max_length=200)
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='certificates',
+        verbose_name='Membro (opcional)',
+    )
+    event_date = models.DateField('Data do evento')
+    officiant_name = models.CharField('Ministro celebrante', max_length=150)
+    father_name = models.CharField('Nome do Pai', max_length=150, blank=True, default='')
+    mother_name = models.CharField('Nome da Mãe', max_length=150, blank=True, default='')
+    scripture_verse = models.TextField('Versículo bíblico', blank=True, default='')
+    registry_book = models.CharField(
+        'Livro de Registro', max_length=50, blank=True, default=''
+    )
+    registry_page = models.CharField(
+        'Folha / Página', max_length=50, blank=True, default=''
+    )
+    registry_number = models.CharField(
+        'Número do Termo', max_length=50, blank=True, default=''
+    )
+    generated_pdf = models.FileField(
+        'PDF emitido',
+        upload_to=church_upload_to('certificates'),
+        storage=raw_storage,
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Emitido por',
+    )
+    created_at = models.DateTimeField('Emitido em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Certificado Eclesiástico'
+        verbose_name_plural = 'Certificados Eclesiásticos'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.get_certificate_type_display()} — {self.recipient_name}'
+
+
+class MessageTemplate(models.Model):
+    """Modelo de mensagem reutilizável para envio semiautomático via WhatsApp.
+
+    Os templates aceitam os tokens `{{NOME}}`, `{{PRIMEIRO_NOME}}`, `{{IGREJA}}`
+    e `{{CIDADE}}`, interpolados no momento do envio.
+    """
+
+    class Category(models.TextChoices):
+        BIRTHDAY = 'BIRTHDAY', 'Aniversário'
+        WELCOME = 'WELCOME', 'Boas-Vindas'
+        CARE = 'CARE', 'Cuidado / Ausência'
+        VERSE = 'VERSE', 'Versículo'
+        CARD_EXPIRING = 'CARD_EXPIRING', 'Carteirinha a Vencer'
+        CUSTOM = 'CUSTOM', 'Personalizado'
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='message_templates',
+        verbose_name='Igreja',
+    )
+    title = models.CharField('Título', max_length=120)
+    category = models.CharField(
+        'Categoria', max_length=20, choices=Category.choices, default=Category.CUSTOM,
+    )
+    content = models.TextField(
+        'Conteúdo da mensagem',
+        help_text='Tokens disponíveis: {{NOME}}, {{PRIMEIRO_NOME}}, {{IGREJA}}, {{CIDADE}}.',
+    )
+    is_active = models.BooleanField('Ativo', default=True)
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Registrado por',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Modelo de Mensagem'
+        verbose_name_plural = 'Modelos de Mensagem'
+        ordering = ['category', 'title']
+
+    def __str__(self):
+        return f'{self.title} - {self.church.name}'
+
+
+class MemberContactLog(models.Model):
+    """Registro de contato semiautomático enviado a um membro via WhatsApp."""
+
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name='contact_log',
+        verbose_name='Membro',
+    )
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='member_contact_log',
+        verbose_name='Igreja',
+    )
+    contacted_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+' ,
+        verbose_name='Contatado por',
+    )
+    category = models.CharField(
+        'Categoria', max_length=20, choices=MessageTemplate.Category.choices,
+        default=MessageTemplate.Category.CUSTOM,
+    )
+    message_content = models.TextField('Conteúdo enviado', blank=True, default='')
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Contato via WhatsApp'
+        verbose_name_plural = 'Contatos via WhatsApp'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['church', 'created_at']),
+        ]
+
+    def __str__(self):
+        return f'{self.member.name} - {self.created_at:%d/%m/%Y %H:%M}'
 
 
 class GrowthGroup(models.Model):

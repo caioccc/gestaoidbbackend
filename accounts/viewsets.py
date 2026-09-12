@@ -24,17 +24,21 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from . import services
 from .models import (
     AccountingCategory,
+    CertificateTemplate,
     Church,
     ChurchMembership,
     ChurchMinutes,
     ChurchPublicLink,
+    EcclesiasticalCertificate,
     Loan,
     MaterialItem,
     Member,
+    MemberContactLog,
     MemberDocument,
     MemberRelative,
     MemberSubmission,
     MemberTransfer,
+    MessageTemplate,
     MinistryArea,
     StorageLocation,
     WorshipService,
@@ -62,12 +66,15 @@ from .serializers import (
     ChurchPublicLinkSerializer,
     ChurchSerializer,
     ChurchUpdateSerializer,
+    CertificateTemplateSerializer,
+    EcclesiasticalCertificateSerializer,
     LoanSerializer,
     MaterialItemSerializer,
     MemberDocumentSerializer,
     MemberSerializer,
     MemberSubmissionSerializer,
     MemberTransferSerializer,
+    MessageTemplateSerializer,
     MinistryAreaSerializer,
     PendingChurchSerializer,
     PendingCongregationSerializer,
@@ -754,6 +761,92 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
             'public_url': f'{settings.FRONTEND_URL}/cartao/{member.public_hash}',
         })
 
+    @action(
+        detail=True, methods=['post'], url_path='prepare-whatsapp',
+        permission_classes=[IsChurchRole('PASTOR', 'SECRETARIA')],
+    )
+    def prepare_whatsapp(self, request, pk=None):
+        """Prepara uma mensagem semiautomática de WhatsApp para o membro.
+
+        Recebe `template_id` (modelo ativo da igreja) **ou** `custom_text`
+        (mensagem personalizada), interpola os tokens, valida o telefone,
+        monta a URL `wa.me`, registra o contato em `MemberContactLog` e
+        atualiza `last_contact_at`. A secretaria abre a URL em nova aba.
+        """
+        member = self.get_object()
+        church = request.user.church
+        payload = request.data or {}
+
+        template_id = payload.get('template_id')
+        custom_text = (payload.get('custom_text') or '').strip()
+        category = (payload.get('category') or '').upper()
+
+        if category and category not in MessageTemplate.Category.values:
+            raise ValidationError({'category': 'Categoria inválida.'})
+
+        if template_id is not None:
+            template = get_object_or_404(
+                MessageTemplate.objects.filter(church=church), pk=template_id
+            )
+            message = services.render_message_template(
+                template.content, member, church
+            )
+            category = category or template.category
+        elif custom_text:
+            message = services.render_message_template(custom_text, member, church)
+            category = category or MessageTemplate.Category.CUSTOM
+        else:
+            raise ValidationError(
+                {'template_id': 'Informe um modelo ou o texto personalizado.'}
+            )
+        if not category:
+            category = MessageTemplate.Category.CUSTOM
+
+        digits = services.normalize_whatsapp_phone(member.phone)
+        if not digits:
+            raise ValidationError(
+                {'phone': 'O membro não possui telefone válido para WhatsApp.'}
+            )
+
+        whatsapp_url = services.build_whatsapp_url(member.phone, message)
+
+        MemberContactLog.objects.create(
+            member=member,
+            church=church,
+            contacted_by=request.user,
+            category=category,
+            message_content=message,
+        )
+        member.last_contact_at = timezone.now()
+        member.save(update_fields=['last_contact_at', 'updated_at'])
+
+        return Response({
+            'member_id': member.id,
+            'whatsapp_url': whatsapp_url,
+            'formatted_message': message,
+        })
+
+    @action(
+        detail=True, methods=['patch'], url_path='stage',
+        permission_classes=[IsChurchRole('PASTOR', 'SECRETARIA')],
+    )
+    def stage(self, request, pk=None):
+        """Move o membro entre os estágios do funil pastoral."""
+        member = self.get_object()
+        stage_value = (
+            (request.data or {}).get('lifecycle_stage')
+            or (request.data or {}).get('stage')
+        )
+        if not stage_value or stage_value not in Member.LifecycleStage.values:
+            raise ValidationError({'lifecycle_stage': 'Estágio inválido.'})
+        member.lifecycle_stage = stage_value
+        member.save(update_fields=['lifecycle_stage', 'updated_at'])
+        return Response({
+            'id': member.id,
+            'lifecycle_stage': member.lifecycle_stage,
+            'lifecycle_stage_display': member.get_lifecycle_stage_display(),
+        })
+
 
 class MemberImportInspectView(APIView):
     """Inspeciona a planilha do rol e sugere o mapeamento de colunas."""
@@ -807,6 +900,27 @@ class MemberImportView(APIView):
         if result['errors'] and not dry_run:
             raise ValidationError({'errors': result['errors']})
         return Response(result)
+
+
+class MessageTemplateViewSet(viewsets.ModelViewSet):
+    """CRUD dos modelos de mensagem da igreja ativa (Secretaria/Pastor)."""
+
+    serializer_class = MessageTemplateSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return MessageTemplate.objects.none()
+        return MessageTemplate.objects.filter(church=church).order_by(
+            'category', 'title'
+        )
 
 
 class MinistryAreaViewSet(viewsets.ModelViewSet):
@@ -1902,6 +2016,34 @@ class BirthdayMembersView(APIView):
         ])
 
 
+class SecretaryActionsView(APIView):
+    """Ações recomendadas para o painel da Secretaria (envio via WhatsApp).
+
+    Restrito a PASTOR/SECRETARIA. Retorna listas de membros acionáveis:
+    aniversariantes do dia, membros sob cuidado pastoral sem contato há >15
+    dias, visitantes/em integração sem contato há >7 dias e membros com a
+    carteirinha a vencer (janela de 30 dias, mesma dos alertas).
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            actions = {
+                'birthdays_today': [],
+                'absent_pending_contact': [],
+                'new_visitors': [],
+                'cards_expiring': [],
+            }
+        else:
+            actions = services.compute_secretary_actions(church)
+        return Response({
+            'generated_at': timezone.now().isoformat(),
+            **actions,
+        })
+
+
 class AlertsView(APIView):
     """Alertas computados da igreja ativa (polling).
 
@@ -2259,3 +2401,136 @@ class AdminChurchClearDataView(APIView):
                 'deleted': counts,
             }
         )
+
+
+class CertificateTemplateViewSet(viewsets.ModelViewSet):
+    """CRUD de modelos de certificados da igreja ativa (PASTOR / SECRETARIA).
+
+    A igreja pode cadastrar molduras em imagem (media_storage) ou documentos
+    base em PDF (raw_storage), além do layout padrão do sistema.
+    """
+
+    serializer_class = CertificateTemplateSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return CertificateTemplate.objects.none()
+        return CertificateTemplate.objects.filter(church=church).order_by(
+            '-created_at'
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+    def perform_destroy(self, instance):
+        for field in ('background_image', 'base_pdf'):
+            file = getattr(instance, field, None)
+            if file and file.name:
+                file.delete(save=False)
+        super().perform_destroy(instance)
+
+
+class EcclesiasticalCertificateViewSet(viewsets.ModelViewSet):
+    """Registro e emissão de certificados eclesiais (PASTOR / SECRETARIA).
+
+    Recebe o PDF gerado no frontend (modos standard/moldura) via multipart ou
+    compila o documento base (modo BASE_PDF) no backend com reportlab+pypdf.
+    """
+
+    serializer_class = EcclesiasticalCertificateSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return EcclesiasticalCertificate.objects.none()
+        qs = EcclesiasticalCertificate.objects.filter(church=church)
+        params = self.request.query_params
+        cert_type = params.get('type')
+        if cert_type in dict(CertificateTemplate.CertificateType.choices):
+            qs = qs.filter(certificate_type=cert_type)
+        year = (params.get('year') or '').strip()
+        if year.isdigit():
+            qs = qs.filter(event_date__year=year)
+        search = (params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(recipient_name__icontains=search)
+                | Q(member__name__icontains=search)
+            )
+        return qs.select_related('template', 'member').order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        from django.core.files.base import ContentFile
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        church = request.user.church
+        template = serializer.validated_data.get('template')
+        attachment = request.FILES.get('generated_pdf')
+
+        if attachment:
+            certificate = serializer.save(
+                church=church,
+                created_by=request.user,
+                generated_pdf=attachment,
+            )
+            return Response(
+                self.get_serializer(certificate).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        if (
+            template is not None
+            and template.church_id == church.id
+            and template.layout_mode == CertificateTemplate.LayoutMode.BASE_PDF
+        ):
+            certificate = serializer.save(church=church, created_by=request.user)
+            try:
+                payload = services.build_base_pdf_certificate(certificate)
+            except (ValueError, OSError) as exc:
+                certificate.delete()
+                raise ValidationError({'generated_pdf': [str(exc)]}) from exc
+            filename = (
+                f'certificado_{certificate.pk}_{slugify(certificate.recipient_name)[:40]}.pdf'
+            )
+            certificate.generated_pdf.save(filename, ContentFile(payload))
+            certificate.save(update_fields=['generated_pdf'])
+            return Response(
+                self.get_serializer(certificate).data,
+                status=status.HTTP_201_CREATED,
+            )
+
+        raise ValidationError(
+            {
+                'generated_pdf': [
+                    'Envie o PDF gerado ou utilize um modelo com documento base em PDF.'
+                ]
+            }
+        )
+
+    @action(detail=True, methods=['get'], url_path='pdf')
+    def download_pdf(self, request, pk=None):
+        """Reimpressão/download do PDF emitido."""
+        certificate = self.get_object()
+        if not certificate.generated_pdf:
+            return Response(
+                {'detail': 'Este certificado não possui PDF emitido.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return FileResponse(
+            certificate.generated_pdf.open('rb'),
+            as_attachment=True,
+            filename=os.path.basename(
+                certificate.generated_pdf.name or 'certificado.pdf'
+            ),
+        )
+
+    def perform_destroy(self, instance):
+        if instance.generated_pdf and instance.generated_pdf.name:
+            instance.generated_pdf.delete(save=False)
+        super().perform_destroy(instance)

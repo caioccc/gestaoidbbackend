@@ -801,6 +801,191 @@ def compute_church_alerts(church, today=None, include_loans=False):
 
 
 # ---------------------------------------------------------------------------
+# Comunicação semiautomática via WhatsApp (funil pastoral)
+# ---------------------------------------------------------------------------
+
+DEFAULT_MESSAGE_TEMPLATES = [
+    {
+        'title': 'Aniversário',
+        'category': 'BIRTHDAY',
+        'content': (
+            '🎉 Feliz aniversário, {{PRIMEIRO_NOME}}! Que Deus abençoe o seu novo ano '
+            'de vida com muita paz, saúde e alegria.\n\nUm abraço carinhoso de toda a '
+            'família {{IGREJA}}. 🙏'
+        ),
+    },
+    {
+        'title': 'Boas-Vindas',
+        'category': 'WELCOME',
+        'content': (
+            '🙏 Que alegria ter você conosco na {{IGREJA}}, {{NOME}}! Ficamos muito '
+            'felizes com a sua chegada. Se precisar de alguma ajuda ou quiser conversar, '
+            'estamos por aqui. 😊'
+        ),
+    },
+    {
+        'title': 'Cuidado / Ausência',
+        'category': 'CARE',
+        'content': (
+            '💙 Oi, {{PRIMEIRO_NOME}}! Sentimos a sua falta por aqui e queremos saber '
+            'como você está. Se precisar conversar, orar ou de qualquer ajuda, estamos '
+            'bem pertinho. Um abraço da {{IGREJA}}.'
+        ),
+    },
+]
+
+
+def normalize_whatsapp_phone(phone) -> str | None:
+    """Normaliza telefone para o formato do wa.me: só dígitos, com DDI 55.
+
+    Aceita máscaras como `(83) 99800-1234` e devolve `5583998001234` (12–15
+    dígitos). Retorna `None` quando o telefone é inválido/vazio.
+    """
+    digits = re.sub(r'\D', '', phone or '')
+    if len(digits) in (10, 11):
+        digits = f'55{digits}'
+    if len(digits) < 12 or len(digits) > 15:
+        return None
+    return digits
+
+
+def render_message_template(content, member, church) -> str:
+    """Interpola os tokens `{{NOME}}`, `{{PRIMEIRO_NOME}}`, `{{IGREJA}}` e `{{CIDADE}}`."""
+    name = (member.name or '').strip()
+    first_name = name.split(' ', 1)[0]
+    replacements = {
+        '{{NOME}}': name,
+        '{{PRIMEIRO_NOME}}': first_name,
+        '{{IGREJA}}': church.name if church else '',
+        '{{CIDADE}}': getattr(church, 'city', '') or '',
+    }
+    result = content or ''
+    for token, value in replacements.items():
+        result = result.replace(token, value)
+    return result
+
+
+def build_whatsapp_url(phone, message) -> str:
+    """Monta a URL `https://wa.me/<telefone>?text=...` com o texto codificado.
+
+    A codificação via `quote(message)` preserva acentuação, emojis e quebras de
+    linha (`%0A`) aceitos pelo WhatsApp.
+    """
+    from urllib.parse import quote  # noqa: PLC0415
+
+    digits = normalize_whatsapp_phone(phone)
+    if not digits:
+        raise ValueError('Telefone de WhatsApp inválido.')
+    if not message:
+        return f'https://wa.me/{digits}'
+    return f'https://wa.me/{digits}?text={quote(message)}'
+
+
+def get_or_create_default_message_templates(church):
+    """Cria os modelos de mensagem padrão (PT) para uma igreja, se não existirem.
+
+    Idempotente: usa `get_or_create` por `(church, category)` e preserva
+    quaisquer templates que a Secretaria já tenha criado/customizado.
+    """
+    from .models import MessageTemplate  # noqa: PLC0415
+
+    created = []
+    for data in DEFAULT_MESSAGE_TEMPLATES:
+        defaults = {k: v for k, v in data.items() if k != 'category'}
+        template, was_created = MessageTemplate.objects.get_or_create(
+            church=church,
+            category=data['category'],
+            defaults=defaults,
+        )
+        if was_created:
+            created.append(template)
+    return created
+
+
+def compute_secretary_actions(church, today=None):
+    """Ações recomendadas para o painel da Secretaria.
+
+    Devolve listas de membros acionáveis (com telefone), para o envio
+    semiautomático via WhatsApp:
+      - birthdays_today: aniversariantes do dia;
+      - absent_pending_contact: estágio ABSENT_CARE sem contato há >15 dias;
+      - new_visitors: estágios VISITOR/INTEGRATION sem contato há >7 dias;
+      - cards_expiring: igreja com carteirinha vencendo em <=30 dias (mesma
+        janela dos alertas) — lista os membros ativos com matrícula.
+    `today` pode ser passado (date) para testes determinísticos.
+    """
+    import datetime  # noqa: PLC0415
+    from django.utils import timezone  # noqa: PLC0415
+
+    from .models import Member  # noqa: PLC0415
+
+    if today is None:
+        today = timezone.localdate()
+
+    def item(member, category_hint):
+        return {
+            'member_id': member.id,
+            'name': member.name,
+            'photo': cloudinary_url(getattr(member, 'photo', None)),
+            'phone': member.phone,
+            'lifecycle_stage': member.lifecycle_stage,
+            'category_hint': category_hint,
+        }
+
+    members = (
+        Member.objects.filter(church=church, status=Member.Status.ACTIVE)
+        .exclude(phone__exact='')
+        .order_by('name')
+    )
+    today_md = _month_day(today)
+
+    birthdays_today = [
+        item(m, 'BIRTHDAY')
+        for m in members
+        if m.birth_date is not None and _month_day(m.birth_date) == today_md
+    ]
+
+    absent_pending_contact = [
+        item(m, 'CARE')
+        for m in members.filter(lifecycle_stage=Member.LifecycleStage.ABSENT_CARE)
+        if (
+            m.last_contact_at is None
+            or m.last_contact_at.date() < today - datetime.timedelta(days=15)
+        )
+    ]
+
+    new_visitors = []
+    for m in members.filter(
+        lifecycle_stage__in=[
+            Member.LifecycleStage.VISITOR,
+            Member.LifecycleStage.INTEGRATION,
+        ],
+    ):
+        if (
+            m.last_contact_at is None
+            or m.last_contact_at.date() < today - datetime.timedelta(days=7)
+        ):
+            new_visitors.append(item(m, 'WELCOME'))
+
+    cards_expiring = []
+    expiry = getattr(church, 'card_valid_until', None)
+    if expiry is not None and expiry <= today + datetime.timedelta(
+        days=ALERT_CARD_VALIDITY_WINDOW_DAYS
+    ):
+        cards_expiring = [
+            item(m, 'CARD_EXPIRING')
+            for m in members.exclude(card_number__isnull=True).exclude(card_number='')
+        ]
+
+    return {
+        'birthdays_today': birthdays_today,
+        'absent_pending_contact': absent_pending_contact,
+        'new_visitors': new_visitors,
+        'cards_expiring': cards_expiring,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Declaração / comprovante de membresia (PDF)
 # ---------------------------------------------------------------------------
 
@@ -1024,3 +1209,163 @@ def cancel_member_transfer(source_church, transfer, by_user) -> None:
     transfer.canceled_at = timezone.now()
     transfer.canceled_by = by_user
     transfer.save(update_fields=['status', 'canceled_at', 'canceled_by'])
+
+
+def build_base_pdf_certificate(certificate) -> bytes:
+    """Compila o PDF final de um certificado no modo BASE_PDF.
+
+    Lê o documento base enviado pela igreja (Cloudinary Raw) e sobrepõe os
+    dados do registro com reportlab, mesclando cada página gerada à base via
+    pypdf. Retorna o conteúdo do PDF em bytes (pronto para salvar no storage).
+    """
+    from io import BytesIO
+
+    from pypdf import PdfReader, PdfWriter
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.pdfgen import canvas
+
+    from .models import CertificateTemplate
+
+    template = certificate.template
+    if template is None or template.layout_mode != CertificateTemplate.LayoutMode.BASE_PDF:
+        raise ValueError('Certificado sem template BASE_PDF.')
+    if not template.base_pdf or not template.base_pdf.name:
+        raise ValueError('O template não possui documento base em PDF.')
+
+    def _wrap_text(text, max_width, size):
+        words = (text or '').split()
+        lines = []
+        current = ''
+        for word in words:
+            candidate = f'{current} {word}'.strip()
+            if stringWidth(candidate, 'Helvetica', size) <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines
+
+    source = template.base_pdf
+    source.seek(0)
+    reader = PdfReader(source)
+    if not reader.pages:
+        raise ValueError('O documento base não possui páginas.')
+
+    church = certificate.church
+    type_display = certificate.get_certificate_type_display()
+    event_date = certificate.event_date.strftime('%d/%m/%Y')
+    created_date = certificate.created_at.date().strftime('%d/%m/%Y')
+    place = ', '.join(
+        p for p in (church.city, church.state) if p
+    )
+    registry_bits = [
+        (certificate.registry_number, 'Termo'),
+        (certificate.registry_page, 'Folha'),
+        (certificate.registry_book, 'Livro'),
+    ]
+    registry_parts = []
+    for value, label in registry_bits:
+        if value:
+            registry_parts.append(f'{label} {value}')
+    registry_line = ' | '.join(registry_parts)
+
+    def _wrap_groups(lines, max_width):
+        groups = []
+        for line in lines:
+            for piece in _wrap_text(line, max_width, 11):
+                groups.append((piece, 11))
+        return groups
+
+    lines_below = [
+        (f'{type_display}', 'Helvetica-Bold', 20, 0.62, 0.80, 0.13),
+        ('', '', 10, 0, 0, 0),
+        (f'{church.name}', 'Helvetica', 14, 0.12, 0.31, 0.48),
+        (f'Rua: {place}' if place else '', 'Helvetica', 11, 0.2, 0.2, 0.2),
+        ('', '', 10, 0, 0, 0),
+        ('CONCEDE O PRESENTE CERTIFICADO A', 'Helvetica', 11, 0.2, 0.2, 0.2),
+        (certificate.recipient_name, 'Helvetica-Bold', 26, 0.12, 0.31, 0.48),
+        ('de', 'Helvetica', 11, 0.2, 0.2, 0.2),
+        ('', '', 10, 0, 0, 0),
+    ]
+    context_lines = []
+    if certificate.member and certificate.member.card_number:
+        context_lines.append(f'Matrícula: {certificate.member.card_number}')
+    if certificate.father_name or certificate.mother_name:
+        parents = ' e '.join(
+            p for p in (certificate.father_name, certificate.mother_name) if p
+        )
+        context_lines.append(f'Filho(a) de: {parents}')
+    if certificate.officiant_name:
+        context_lines.append(f'Oficiada pelo Ministro: {certificate.officiant_name}')
+    context_lines.append(f'Data: {event_date}')
+    if registry_line:
+        context_lines.append(f'Registro: {registry_line}')
+    if certificate.scripture_verse:
+        context_lines.append(certificate.scripture_verse)
+
+    writer = PdfWriter()
+    for page in reader.pages:
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        overlay_stream = BytesIO()
+        c = canvas.Canvas(overlay_stream, pagesize=(width, height))
+        c.translate(0, 0)
+
+        c.setFillColorRGB(1, 1, 1, alpha=0.42)
+        block_pad_x = width * 0.06
+        block_pad_y = height * 0.18
+        c.roundRect(
+            block_pad_x, block_pad_y,
+            width - 2 * block_pad_x, height - 2 * block_pad_y,
+            width * 0.01, stroke=0, fill=1,
+        )
+
+        c.setFillColorRGB(0.12, 0.31, 0.48)
+        c.setStrokeColorRGB(0.69, 0.55, 0.25)
+        c.setLineWidth(0.8)
+        c.roundRect(
+            block_pad_x, block_pad_y,
+            width - 2 * block_pad_x, height - 2 * block_pad_y,
+            width * 0.01, stroke=1, fill=0,
+        )
+
+        block_height = height - 2 * block_pad_y
+        content_height = block_pad_y + block_height - height * 0.06
+        for text, font, size, r, g, b in lines_below:
+            if not text:
+                content_height -= size + 4
+                continue
+            c.setFont(font, size)
+            c.setFillColorRGB(r, g, b)
+            c.drawCentredString(width / 2, content_height - size, text)
+            content_height -= size + 8
+
+        if context_lines:
+            content_height -= 8
+            for text, size in _wrap_groups(context_lines, width - 2 * block_pad_x):
+                c.setFont('Helvetica', size)
+                c.setFillColorRGB(0.2, 0.2, 0.2)
+                c.drawCentredString(width / 2, content_height - size, text)
+                content_height -= size + 6
+
+        c.setFont('Helvetica', 9)
+        c.setFillColorRGB(0.4, 0.4, 0.4)
+        c.drawCentredString(
+            width / 2,
+            5,
+            f'Certificado emitido via Gestão IDB em {created_date}',
+        )
+
+        c.showPage()
+        c.save()
+        overlay_stream.seek(0)
+        overlay_page = PdfReader(overlay_stream).pages[0]
+        page.merge_page(overlay_page)
+        writer.add_page(page)
+
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
