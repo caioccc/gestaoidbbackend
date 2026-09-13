@@ -3837,6 +3837,77 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_public_profile_with_whatsapp_and_ministries(self):
+        area = MinistryArea.objects.create(church=self.sede, name='Louvor')
+        self.member.ministry_areas.add(area)
+        self.member.whatsapp_public = True
+        self.member.profession = 'Secretário'
+        self.member.save(update_fields=['whatsapp_public', 'profession'])
+        resp = APIClient().get(reverse('public-member-profile', args=[self.card_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['name'], 'Maria da Silva')
+        self.assertEqual(resp.data['whatsapp'], '+5583999991111')
+        self.assertEqual(resp.data['card_theme'], self.sede.card_theme)
+        self.assertEqual(resp.data['ministry_areas'], ['Louvor'])
+        self.assertEqual(resp.data['role_title'], 'Secretário')
+        self.assertEqual(resp.data['status'], 'ACTIVE')
+        self.assertEqual(resp.data['status_label'], 'Ativo')
+        self.assertEqual(resp.data['church']['name'], self.sede.name)
+        self.assertEqual(resp.data['church']['city'], 'Campina Grande')
+        self.assertEqual(resp.data['church']['state'], 'PB')
+        self.assertNotIn('cpf', resp.data)
+        self.assertNotIn('phone', resp.data)
+
+    def test_public_profile_whatsapp_hidden_by_default(self):
+        resp = APIClient().get(reverse('public-member-profile', args=[self.card_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data['whatsapp'])
+
+    def test_public_profile_unknown_hash_404(self):
+        resp = APIClient().get(reverse('public-member-profile', args=['hash-invalido']))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_profile_church_not_public_404(self):
+        other = Member.objects.create(
+            church=self.pending_congregation,
+            name='Fora Daqui',
+            status=Member.Status.ACTIVE,
+        )
+        other.ensure_public_hash()
+        other.save(update_fields=['public_hash'])
+        resp = APIClient().get(
+            reverse('public-member-profile', args=[other.public_hash])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_profile_card_theme_roundtrip(self):
+        patch = self._client(self.pastor).patch(
+            reverse('church-manage-profile', args=[self.sede.pk]),
+            {
+                'name': self.sede.name,
+                'city': self.sede.city,
+                'state': self.sede.state,
+                'card_theme': 'BLACK_PREMIUM',
+            },
+            format='json',
+        )
+        self.assertEqual(patch.status_code, status.HTTP_200_OK)
+        resp = APIClient().get(reverse('public-member-profile', args=[self.card_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['card_theme'], 'BLACK_PREMIUM')
+
+    def test_public_profile_whatsapp_public_roundtrip(self):
+        client = self._client(self.pastor)
+        member_url = reverse('church-members-detail', args=[self.sede.pk, self.member.pk])
+        resp = client.patch(member_url, {'whatsapp_public': True}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        profile = APIClient().get(reverse('public-member-profile', args=[self.card_hash]))
+        self.assertEqual(profile.data['whatsapp'], '+5583999991111')
+        resp2 = client.patch(member_url, {'whatsapp_public': False}, format='json')
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        profile2 = APIClient().get(reverse('public-member-profile', args=[self.card_hash]))
+        self.assertIsNone(profile2.data['whatsapp'])
+
 
 class ChurchPublicLinkTests(BaseChurchTestCase):
     """Agregador de links público por igreja (painel + página pública)."""
@@ -3902,7 +3973,11 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
 
         listed = client.get(reverse('church-link-list'))
         self.assertEqual(listed.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(listed.data), 1)
+        # 2 padrões (Agenda de Cultos / Ficha de Membro) + o link criado
+        self.assertEqual(len(listed.data), 3)
+        titles = {l['title'] for l in listed.data}
+        self.assertIn('Agenda de Cultos', titles)
+        self.assertIn('Ficha de Membro / Cadastro', titles)
 
     def test_secretaria_can_manage(self):
         client = self._client(self.secretaria)
@@ -4039,7 +4114,10 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
             church=other, title='Fora', link_type='CUSTOM', url='https://a.io',
         )
         listed = self._client(self.pastor).get(reverse('church-link-list'))
-        self.assertEqual(listed.data, [])
+        # apenas os padrões da igreja ativa; o link alheio não aparece
+        self.assertEqual(len(listed.data), 2)
+        ids = [l['id'] for l in listed.data]
+        self.assertNotIn(link.pk, ids)
 
         resp = self._client(self.pastor).get(
             reverse('church-link-detail', args=[link.pk])
@@ -4569,6 +4647,173 @@ class GrowthGroupTests(BaseChurchTestCase):
         self.assertEqual(data['coverage'], 3)
         self.assertGreaterEqual(data['overlap_count'], 1)
         self.assertTrue(data['overlap_ids'])
+
+
+class PublicGrowthGroupsTests(BaseChurchTestCase):
+    """Mapa público de GCs: payload por slug, links úteis e 404s."""
+
+    def setUp(self):
+        super().setUp()
+        self.leader = Member.objects.create(
+            church=self.sede, name='Líder de GC',
+            phone='(83) 99800-1234', status=Member.Status.ACTIVE,
+        )
+        self.host = Member.objects.create(
+            church=self.sede, name='Anfitriã', status=Member.Status.ACTIVE,
+        )
+
+    def _group(self, **kwargs):
+        defaults = dict(
+            church=self.sede,
+            name='GC Esperança',
+            leader=self.leader,
+            host=self.host,
+            weekday=GrowthGroup.DEFAULT_WEEKDAY,
+            time='19:30:00',
+            street='Rua A',
+            number='100',
+            neighborhood='Centro',
+            city='Campina Grande',
+            state='PB',
+            cep='58400-000',
+            radius_meters=1000,
+        )
+        defaults.update(kwargs)
+        return GrowthGroup.objects.create(**defaults)
+
+    def _public_url(self, church=None):
+        return reverse(
+            'public-church-growth-groups', args=[(church or self.sede).slug]
+        )
+
+    def test_public_growth_groups_by_church_slug(self):
+        g1 = self._group(
+            name='GC Fé', weekday=GrowthGroup.Weekday.MONDAY,
+            latitude=-7.2230, longitude=-35.9050,
+        )
+        g2 = self._group(
+            name='GC Esperança', weekday=GrowthGroup.Weekday.TUESDAY,
+            category='ADULTS', latitude=-7.2235, longitude=-35.9050,
+        )
+        self._group(name='GC Inativo', is_active=False)
+
+        resp = self.client.get(self._public_url())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        data = resp.data
+        self.assertEqual(data['church']['name'], self.sede.name)
+        self.assertEqual(data['church']['city'], 'Campina Grande')
+        self.assertEqual(data['church']['neighborhood'], '')
+        self.assertEqual(data['church']['state'], 'PB')
+        self.assertIn('1c7ed6', data['church']['theme_color'])
+        self.assertIsNone(data['church']['logo'])
+
+        groups = data['growth_groups']
+        self.assertEqual(len(groups), 2)
+        # ordenado por weekday/name
+        self.assertEqual([g['id'] for g in groups], [g1.id, g2.id])
+
+        first = groups[0]
+        for field in (
+            'name', 'category', 'category_display', 'weekday', 'weekday_display',
+            'time', 'leader_name', 'leader_phone', 'neighborhood', 'city', 'state',
+            'full_address', 'latitude', 'longitude', 'radius_meters', 'is_full',
+            'whatsapp_url', 'maps_url',
+        ):
+            self.assertIn(field, first)
+        self.assertEqual(first['leader_name'], 'Líder de GC')
+        self.assertEqual(first['host_name'], 'Anfitriã')
+        self.assertEqual(first['category_display'], 'Misto / Geral')
+        self.assertEqual(first['weekday_display'], 'Segunda-feira')
+        self.assertEqual(first['time'], '19:30:00')
+        self.assertEqual(first['city'], 'Campina Grande')
+        self.assertEqual(first['state'], 'PB')
+        self.assertIn('Rua A, 100', first['full_address'])
+        self.assertEqual(first['latitude'], -7.2230)
+        self.assertEqual(first['longitude'], -35.9050)
+        self.assertEqual(first['radius_meters'], 1000)
+        self.assertFalse(first['is_full'])
+        self.assertTrue(first['maps_url'].startswith(
+            'https://www.google.com/maps/dir/?api=1&destination=-7.223,-35.905'
+        ))
+
+    def test_public_growth_groups_whatsapp_url(self):
+        # Líder com telefone de 10 dígitos (83) 9800-1234 → 83 9800-1234.
+        leader_10 = Member.objects.create(
+            church=self.sede, name='Líder 10 Dígitos',
+            phone='(83) 9800-1234', status=Member.Status.ACTIVE,
+        )
+        group = self._group(leader=leader_10)
+        self._group(
+            name='GC Sem Telefone',
+            leader=Member.objects.create(
+                church=self.sede, name='Líder Sem Fone',
+                status=Member.Status.ACTIVE,
+            ),
+            weekday=GrowthGroup.Weekday.FRIDAY,
+        )
+
+        resp = self.client.get(self._public_url())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        by_id = {g['id']: g for g in resp.data['growth_groups']}
+        self.assertTrue(
+            by_id[group.id]['whatsapp_url'].startswith(
+                'https://wa.me/558398001234?text='
+            )
+        )
+        # 10 dígitos → 55 prefixado; total 12 dígitos (região 12-15).
+        digits = by_id[group.id]['whatsapp_url'].split('/')[-1].split('?')[0]
+        self.assertEqual(digits, '558398001234')
+        sem = by_id[[g['id'] for g in resp.data['growth_groups']
+                     if g['name'] == 'GC Sem Telefone'][0]]
+        self.assertIsNone(sem['whatsapp_url'])
+
+    def test_public_growth_groups_disabled_404(self):
+        self.sede.public_links_enabled = False
+        self.sede.save(update_fields=['public_links_enabled'])
+        resp = self.client.get(self._public_url())
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_growth_groups_unknown_404(self):
+        resp = self.client.get(
+            reverse('public-church-growth-groups', args=['nao-existe'])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_growth_group_category_and_full_writable(self):
+        secretaria = self._user(
+            'secretaria@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        client = self._client(secretaria)
+        resp = client.post(
+            reverse('growth-group-list'),
+            {
+                'name': 'GC Mulheres', 'leader': self.leader.id,
+                'weekday': 1, 'time': '19:30',
+                'street': 'Rua A', 'number': '100',
+                'neighborhood': 'Centro', 'city': 'Campina Grande',
+                'state': 'PB', 'cep': '58400-000',
+                'category': 'WOMEN', 'is_full': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['category'], 'WOMEN')
+        self.assertEqual(resp.data['category_display'], 'Mulheres')
+        self.assertTrue(resp.data['is_full'])
+
+        pk = resp.data['id']
+        resp = client.patch(
+            reverse('growth-group-detail', args=[pk]),
+            {'category': 'YOUTH', 'is_full': False}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['category'], 'YOUTH')
+        self.assertEqual(resp.data['category_display'], 'Jovens')
+        self.assertFalse(resp.data['is_full'])
+        stored = GrowthGroup.objects.get(pk=pk)
+        self.assertEqual(stored.category, 'YOUTH')
+        self.assertFalse(stored.is_full)
 
 
 class CommunicationWhatsAppTests(BaseChurchTestCase):
@@ -5121,3 +5366,111 @@ class CertificateTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertEqual(EcclesiasticalCertificate.objects.count(), 0)
         self.assertFalse(raw_storage.exists(fname))
+
+    @staticmethod
+    def _fields_layout_payload():
+        return {
+            'recipient_name': {
+                'enabled': True, 'x': 50.0, 'y': 42.5, 'font_size': 26,
+                'font_weight': 'bold', 'align': 'center', 'color': '#1a1a1a',
+            },
+            'event_date': {
+                'enabled': True, 'x': 50.0, 'y': 55.0, 'font_size': 22,
+                'font_weight': 'normal', 'align': 'center', 'color': '#333333',
+            },
+            'church_name': {
+                'enabled': True, 'x': 50.0, 'y': 18.0, 'font_size': 30,
+                'font_weight': 'bold', 'align': 'center', 'color': '#1a1a1a',
+            },
+            'parents_names': {
+                'enabled': True, 'x': 50.0, 'y': 62.0, 'font_size': 18,
+                'font_weight': 'normal', 'align': 'center', 'color': '#333333',
+            },
+            'scripture_verse': {
+                'enabled': True, 'x': 50.0, 'y': 72.0, 'font_size': 17,
+                'font_weight': 'italic', 'align': 'center', 'color': '#444444',
+            },
+            'custom_text': {
+                'enabled': False, 'x': 50.0, 'y': 78.0, 'font_size': 16,
+                'font_weight': 'normal', 'align': 'center', 'color': '#555555',
+            },
+            'registry_info': {
+                'enabled': True, 'x': 50.0, 'y': 85.0, 'font_size': 14,
+                'font_weight': 'normal', 'align': 'left', 'color': '#666666',
+            },
+            'officiant_name': {
+                'enabled': True, 'x': 50.0, 'y': 90.0, 'font_size': 18,
+                'font_weight': 'bold', 'align': 'center', 'color': '#1a1a1a',
+            },
+            'certificate_number': {
+                'enabled': True, 'x': 50.0, 'y': 95.0, 'font_size': 14,
+                'font_weight': 'normal', 'align': 'right', 'color': '#666666',
+            },
+        }
+
+    def test_fields_layout_custom_image_roundtrip(self):
+        png = SimpleUploadedFile('moldura.png', self._tiny_png_bytes(), content_type='image/png')
+        created = self._create_template(
+            name='Moldura Layout',
+            certificate_type=CertificateTemplate.CertificateType.BAPTISM,
+            layout_mode=CertificateTemplate.LayoutMode.CUSTOM_IMAGE,
+            background_image=png,
+        )
+        self.assertEqual(created['fields_layout'], {})
+
+        layout = self._fields_layout_payload()
+        template_id = created['id']
+        resp = self.client.patch(
+            reverse('certificate-template-detail', args=[template_id]),
+            {'fields_layout': layout},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['fields_layout'], layout)
+
+        resp = self.client.get(reverse('certificate-template-detail', args=[template_id]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['fields_layout'], layout)
+
+        updated = dict(layout)
+        updated['custom_text']['enabled'] = True
+        updated['event_date']['font_size'] = 24
+        resp = self.client.patch(
+            reverse('certificate-template-detail', args=[template_id]),
+            {'fields_layout': updated},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['fields_layout'], updated)
+
+    def test_fields_layout_accepts_any_json_object(self):
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {**self._template_payload(name='Layout Vazio'), 'fields_layout': {}},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['fields_layout'], {})
+
+        nested = {
+            'recipient_name': {
+                'enabled': True,
+                'meta': {'font_size': 26, 'group': ['a', 'b', {'k': 1}]},
+            },
+        }
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {**self._template_payload(name='Layout Aninhado'), 'fields_layout': nested},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['fields_layout'], nested)
+
+    def test_fields_layout_rejects_non_dict(self):
+        resp = self.client.post(
+            reverse('certificate-template-list'),
+            {**self._template_payload(name='Layout Invalido'), 'fields_layout': ['a', 'b']},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('fields_layout', resp.data)

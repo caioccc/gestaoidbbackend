@@ -229,7 +229,7 @@ class ChurchProfileSerializer(serializers.ModelSerializer):
             'cep', 'street', 'number', 'neighborhood', 'city', 'state',
             'latitude', 'longitude', 'pastoral_prebenda_percent',
             'card_primary_color', 'card_secondary_color', 'card_valid_until',
-            'card_front_phrase', 'card_back_phrase',
+            'card_front_phrase', 'card_back_phrase', 'card_theme',
             'responsible_email',
         ]
         read_only_fields = ['id', 'church_type', 'parent_church', 'is_approved']
@@ -765,7 +765,7 @@ class MemberSerializer(serializers.ModelSerializer):
     class Meta:
         model = Member
         fields = [
-            'id', 'church', 'name', 'phone', 'email', 'birth_date',
+            'id', 'church', 'name', 'phone', 'whatsapp_public', 'email', 'birth_date',
             'baptism_date', 'cpf', 'rg', 'born_in_city', 'born_in_state',
             'profession', 'education_level', 'education_level_display',
             'marital_status', 'marital_status_display', 'marriage_date',
@@ -1007,6 +1007,9 @@ class GrowthGroupSerializer(serializers.ModelSerializer):
     - Latitude e longitude devem vir juntas.
     """
 
+    category_display = serializers.CharField(
+        source='get_category_display', read_only=True,
+    )
     leader_name = serializers.CharField(source='leader.name', read_only=True)
     host_name = serializers.CharField(source='host.name', read_only=True)
     weekday_display = serializers.CharField(source='get_weekday_display', read_only=True)
@@ -1018,7 +1021,7 @@ class GrowthGroupSerializer(serializers.ModelSerializer):
             'id', 'church', 'name', 'leader', 'leader_name', 'host', 'host_name',
             'weekday', 'weekday_display', 'time',
             'cep', 'street', 'number', 'complement', 'neighborhood', 'city', 'state',
-            'address', 'radius_meters',
+            'address', 'radius_meters', 'category', 'category_display', 'is_full',
             'latitude', 'longitude', 'is_active',
             'created_by', 'created_at', 'updated_at',
         ]
@@ -1090,6 +1093,62 @@ class GrowthGroupSerializer(serializers.ModelSerializer):
         if church is not None:
             validated_data['church'] = church
         return super().create(validated_data)
+
+
+class GrowthGroupPublicSerializer(serializers.ModelSerializer):
+    """Grupo de Crescimento exibido no card público do mapa de GCs.
+
+    Somente leitura: expõe dados de contato do líder e endereço para o
+    frontend público, sem dados internos (criador, timestamps, ativo).
+    """
+
+    category_display = serializers.CharField(
+        source='get_category_display', read_only=True,
+    )
+    weekday_display = serializers.CharField(
+        source='get_weekday_display', read_only=True,
+    )
+    leader_name = serializers.CharField(source='leader.name', read_only=True, default='')
+    host_name = serializers.CharField(source='host.name', read_only=True, default='')
+    leader_phone = serializers.CharField(
+        source='leader.phone', read_only=True, default='',
+    )
+    full_address = serializers.CharField(read_only=True)
+    whatsapp_url = serializers.SerializerMethodField()
+    maps_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GrowthGroup
+        fields = [
+            'id', 'name', 'category', 'category_display', 'weekday',
+            'weekday_display', 'time',
+            'leader_name', 'host_name', 'leader_phone',
+            'neighborhood', 'city', 'state', 'full_address',
+            'latitude', 'longitude', 'radius_meters', 'is_full',
+            'whatsapp_url', 'maps_url',
+        ]
+        read_only_fields = fields
+
+    def get_whatsapp_url(self, obj):
+        phone = obj.leader.phone if obj.leader else ''
+        digits = re.sub(r'\D', '', phone or '')
+        if len(digits) in (10, 11):
+            digits = f'55{digits}'
+        if len(digits) < 12 or len(digits) > 15:
+            return None
+        message = (
+            f'Olá! Encontrei o GC {obj.name} no mapa da igreja '
+            'e gostaria de participar.'
+        )
+        return f'https://wa.me/{digits}?text={quote(message)}'
+
+    def get_maps_url(self, obj):
+        if obj.latitude is None or obj.longitude is None:
+            return None
+        return (
+            f'https://www.google.com/maps/dir/?api=1'
+            f'&destination={obj.latitude},{obj.longitude}'
+        )
 
 
 class ChurchMinutesSerializer(serializers.ModelSerializer):
@@ -1180,6 +1239,73 @@ class PublicMemberCardSerializer(serializers.Serializer):
             except Exception:
                 return None
         return None
+
+
+class PublicMemberProfileSerializer(serializers.Serializer):
+    """Perfil público do membro (https://.../perfil/{hash}).
+
+    Sem endereço/CPF/telefone interno. O WhatsApp só aparece quando o
+    próprio membro opta por exibi-lo (``whatsapp_public``).
+    """
+
+    name = serializers.CharField()
+    photo = serializers.SerializerMethodField()
+    birth_date = serializers.DateField(format='%d/%m/%Y', required=False, allow_null=True)
+    status = serializers.CharField()
+    status_label = serializers.SerializerMethodField()
+    member_since = serializers.SerializerMethodField()
+    ministry_areas = serializers.SerializerMethodField()
+    role_title = serializers.SerializerMethodField()
+    whatsapp = serializers.SerializerMethodField()
+    church = serializers.SerializerMethodField()
+    card_theme = serializers.CharField(source='church.card_theme')
+    valid_until = serializers.DateField(
+        format='%d/%m/%Y', source='church.card_valid_until',
+        required=False, allow_null=True,
+    )
+
+    def get_photo(self, obj):
+        if obj.photo and getattr(obj.photo, 'url', None):
+            try:
+                return obj.photo.url
+            except Exception:
+                return None
+        return None
+
+    def get_status_label(self, obj):
+        return obj.get_status_display()
+
+    def get_member_since(self, obj):
+        return None
+
+    def get_ministry_areas(self, obj):
+        return [area.name for area in obj.ministry_areas.order_by('id')]
+
+    def get_role_title(self, obj):
+        return obj.profession or None
+
+    def get_whatsapp(self, obj):
+        if not obj.whatsapp_public or not obj.phone:
+            return None
+        digits = re.sub(r'\D', '', obj.phone)
+        if len(digits) in (10, 11):
+            return f'+55{digits}'
+        return None
+
+    def get_church(self, obj):
+        church = obj.church
+        logo = None
+        if church.logo and getattr(church.logo, 'url', None):
+            try:
+                logo = church.logo.url
+            except Exception:
+                logo = None
+        return {
+            'name': church.name,
+            'city': church.city,
+            'state': church.state,
+            'logo': logo,
+        }
 
 
 class PublicMemberFormSerializer(serializers.Serializer):
@@ -1639,15 +1765,25 @@ class PublicChurchPublicLinkSerializer(serializers.ModelSerializer):
         source='get_link_type_display', read_only=True,
     )
     url = serializers.SerializerMethodField()
+    address = serializers.SerializerMethodField()
 
     class Meta:
         model = ChurchPublicLink
         fields = [
-            'id', 'title', 'url', 'link_type', 'link_type_display',
+            'id', 'title', 'url', 'address', 'link_type', 'link_type_display',
             'icon_key', 'highlight', 'click_count',
             'pix_key', 'pix_type', 'pix_amount_mode', 'pix_fixed_amount',
             'pix_grid_amounts', 'pix_open_amount',
         ]
+
+    def get_address(self, obj):
+        if obj.link_type != ChurchPublicLink.LinkType.MAPS:
+            return ''
+        parts = [
+            obj.address_street, obj.address_number, obj.address_neighborhood,
+            obj.address_city, obj.address_state,
+        ]
+        return ', '.join(p for p in parts if p)
 
     def get_url(self, obj):
         if obj.link_type == ChurchPublicLink.LinkType.CALENDAR:
@@ -1730,7 +1866,7 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
         model = CertificateTemplate
         fields = [
             'id', 'church', 'name', 'certificate_type', 'certificate_type_display',
-            'layout_mode', 'layout_mode_display', 'background_image',
+            'layout_mode', 'layout_mode_display', 'fields_layout', 'background_image',
             'background_image_url', 'background_image_name',
             'base_pdf', 'base_pdf_name', 'default_verse', 'is_active', 'created_at',
             'remove_background_image', 'remove_base_pdf',
@@ -1745,6 +1881,13 @@ class CertificateTemplateSerializer(serializers.ModelSerializer):
 
     def get_base_pdf_name(self, obj):
         return os.path.basename(obj.base_pdf.name or '') if obj.base_pdf else None
+
+    def validate_fields_layout(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError(
+                'O layout dos campos deve ser um objeto JSON.'
+            )
+        return value
 
     def validate(self, attrs):
         for field in ('name',):

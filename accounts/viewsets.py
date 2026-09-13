@@ -81,12 +81,14 @@ from .serializers import (
     PublicChurchLinksSerializer,
     PublicMemberCardSerializer,
     PublicMemberFormSerializer,
+    PublicMemberProfileSerializer,
     PublicSubmissionSerializer,
     RegisterSerializer,
     StorageLocationSerializer,
     UserSerializer,
     WorshipServiceSerializer,
     GrowthGroupSerializer,
+    GrowthGroupPublicSerializer,
 )
 
 ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
@@ -1203,11 +1205,49 @@ class ChurchPublicLinkViewSet(viewsets.ModelViewSet):
     permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
     pagination_class = None
 
+    DEFAULT_LINKS = (
+        (ChurchPublicLink.LinkType.CALENDAR, 'Agenda de Cultos', 'calendar'),
+        (ChurchPublicLink.LinkType.MEMBERSHIP, 'Ficha de Membro / Cadastro', 'user-plus'),
+    )
+
     def get_queryset(self):
         church = self.request.user.church
         if church is None:
             return ChurchPublicLink.objects.none()
         return ChurchPublicLink.objects.filter(church=church).order_by('order', 'id')
+
+    def list(self, request, *args, **kwargs):
+        self._ensure_defaults(request.user.church)
+        return super().list(request, *args, **kwargs)
+
+    def _ensure_defaults(self, church):
+        """Garante os links padrão (Agenda de Cultos / Ficha de Membro) como
+        itens do painel, para que possam ser reposicionados pelo usuário."""
+        if church is None:
+            return
+        stored = set(
+            church.public_links.filter(
+                link_type__in=[lt for lt, _, _ in self.DEFAULT_LINKS]
+            ).values_list('link_type', flat=True)
+        )
+        missing = [d for d in self.DEFAULT_LINKS if d[0] not in stored]
+        if not missing:
+            return
+        with transaction.atomic():
+            count = church.public_links.count()
+            if count:
+                ChurchPublicLink.objects.filter(church=church).update(
+                    order=F('order') + len(missing)
+                )
+            for i, (link_type, title, icon) in enumerate(missing):
+                ChurchPublicLink.objects.create(
+                    church=church,
+                    title=title,
+                    link_type=link_type,
+                    icon_key=icon,
+                    order=i,
+                    highlight=False,
+                )
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1738,6 +1778,27 @@ class PublicMemberCardView(APIView):
         return Response(PublicMemberCardSerializer(member).data)
 
 
+class PublicMemberProfileView(APIView):
+    """Perfil público do membro (https://.../perfil/{hash})."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, hash):
+        member = (
+            Member.objects.select_related('church')
+            .filter(
+                public_hash=hash,
+                status=Member.Status.ACTIVE,
+                church__status='ACTIVE',
+            )
+            .first()
+        )
+        if member is None:
+            raise NotFound('Perfil não encontrado.')
+        return Response(PublicMemberProfileSerializer(member).data)
+
+
 class PublicMemberFormView(APIView):
     """Formulário público de membro (https://.../formulario/{hash}).
 
@@ -1845,6 +1906,43 @@ class PublicChurchLinkClickView(APIView):
         if not updated:
             raise NotFound('Link não encontrado.')
         return Response({'status': 'ok'})
+
+
+class GrowthGroupPublicView(APIView):
+    """Mapa público de Grupos de Crescimento da igreja.
+
+    Lista os GCs ativos da igreja (com link público habilitado) para o
+    frontend do mapa. Segue o mesmo fluxo de `PublicChurchLinksView`: aceita
+    o slug amigável e retorna 404 quando o recurso não existe ou a página
+    pública está desabilitada.
+    """
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, slug):
+        church = (
+            Church.objects.select_related('parent_church')
+            .filter(slug=slug, public_links_enabled=True)
+            .first()
+        )
+        if church is None:
+            raise NotFound('Página não encontrada.')
+        groups = church.growth_groups.filter(is_active=True).order_by('weekday', 'name')
+        return Response(
+            {
+                'church': {
+                    'name': church.name,
+                    'city': church.city,
+                    'neighborhood': church.neighborhood,
+                    'state': church.state,
+                    'theme_color': church.theme_color,
+                    'logo': services.cloudinary_url(church.logo),
+                },
+                'growth_groups': GrowthGroupPublicSerializer(groups, many=True).data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class MemberSubmissionsView(APIView):

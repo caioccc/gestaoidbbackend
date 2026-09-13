@@ -100,6 +100,12 @@ class Church(models.Model):
         null=True,
         blank=True,
     )
+    card_theme = models.CharField(
+        'Tema da Carteirinha',
+        max_length=20,
+        choices=[('CLASSIC', 'Clássico'), ('BLACK_PREMIUM', 'Black Premium')],
+        default='CLASSIC',
+    )
     pastor_name = models.CharField("Pastor Responsável", max_length=150, blank=True)
     treasurer_name = models.CharField("Tesoureiro Responsável", max_length=150, blank=True)
     phone = models.CharField("Telefone / WhatsApp", max_length=20, blank=True)
@@ -418,6 +424,9 @@ class Member(models.Model):
     )
     name = models.CharField('Nome', max_length=150)
     phone = models.CharField('Telefone / WhatsApp', max_length=20, blank=True)
+    whatsapp_public = models.BooleanField(
+        'Exibir WhatsApp no perfil público', default=False,
+    )
     email = models.EmailField('E-mail', blank=True)
     birth_date = models.DateField('Data de Nascimento', null=True, blank=True)
     baptism_date = models.DateField('Data de Batismo', null=True, blank=True)
@@ -576,6 +585,7 @@ class CertificateTemplate(models.Model):
         choices=LayoutMode.choices,
         default=LayoutMode.SYSTEM_DEFAULT,
     )
+    fields_layout = models.JSONField(default=dict, blank=True)
     background_image = models.ImageField(
         'Imagem de fundo / moldura',
         upload_to=church_upload_to('certificate_templates'),
@@ -825,6 +835,24 @@ class GrowthGroup(models.Model):
     latitude = models.FloatField('Latitude', null=True, blank=True)
     longitude = models.FloatField('Longitude', null=True, blank=True)
     is_active = models.BooleanField('Ativo', default=True)
+    category = models.CharField(
+        'Categoria', max_length=20,
+        choices=[
+            ('ADULTS', 'Adultos / Famílias'),
+            ('YOUTH', 'Jovens'),
+            ('TEENS', 'Adolescentes'),
+            ('WOMEN', 'Mulheres'),
+            ('MEN', 'Homens'),
+            ('MIXED', 'Misto / Geral'),
+        ],
+        default='MIXED',
+    )
+    is_full = models.BooleanField(
+        'Está cheio (sem vagas)',
+        default=False,
+        help_text='Quando ligado, o card público mostra "Grupo cheio" e o botão '
+                  'WhatsApp vira "Falar com o Líder" (não "Quero Participar").',
+    )
     created_by = models.ForeignKey(
         'User',
         on_delete=models.SET_NULL,

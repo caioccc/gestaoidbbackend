@@ -185,6 +185,11 @@ urlpatterns = [
         name='public-member-form',
     ),
     path(
+        'public/profile/<str:hash>/',
+        viewsets.PublicMemberProfileView.as_view(),
+        name='public-member-profile',
+    ),
+    path(
         'members/form/public-link/',
         viewsets.ChurchMemberFormLinkView.as_view(),
         name='member-form-public-link',
@@ -213,6 +218,11 @@ urlpatterns = [
         'public/churches/<str:slug>/links/',
         viewsets.PublicChurchLinksView.as_view(),
         name='public-church-links',
+    ),
+    path(
+        'public/churches/<str:slug>/growth-groups/',
+        viewsets.GrowthGroupPublicView.as_view(),
+        name='public-church-growth-groups',
     ),
     path(
         'public/links/<int:pk>/click/',
