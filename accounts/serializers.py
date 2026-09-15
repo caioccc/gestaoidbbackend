@@ -7,6 +7,7 @@ from urllib.parse import quote
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import serializers
 
@@ -31,6 +32,12 @@ from .models import (
     StorageLocation,
     WorshipService,
     GrowthGroup,
+    PastoralVisit,
+    PrayerRequest,
+    SundaySchoolClass,
+    SundaySchoolEnrollment,
+    SundaySchoolSession,
+    SundaySchoolAttendance,
 )
 
 User = get_user_model()
@@ -1525,6 +1532,7 @@ DEFAULT_LINK_ICONS = {
     ChurchPublicLink.LinkType.INSTAGRAM: 'brand-instagram',
     ChurchPublicLink.LinkType.CALENDAR: 'calendar',
     ChurchPublicLink.LinkType.MEMBERSHIP: 'user-plus',
+    ChurchPublicLink.LinkType.PRAYER: 'pray',
 }
 
 
@@ -1691,6 +1699,7 @@ class ChurchPublicLinkSerializer(serializers.ModelSerializer):
         elif link_type in (
             ChurchPublicLink.LinkType.CALENDAR,
             ChurchPublicLink.LinkType.MEMBERSHIP,
+            ChurchPublicLink.LinkType.PRAYER,
         ):
             # Sistema: a URL é resolvida a partir dos hashes públicos da igreja.
             attrs['url'] = ''
@@ -1817,7 +1826,15 @@ class PublicChurchLinksSerializer(serializers.Serializer):
 
     def get_system_links(self, obj):
         church = obj['church']
-        stored = {link.link_type for link in obj['links']}
+        system_types = (
+            ChurchPublicLink.LinkType.CALENDAR,
+            ChurchPublicLink.LinkType.MEMBERSHIP,
+            ChurchPublicLink.LinkType.PRAYER,
+        )
+        stored = set(
+            church.public_links.filter(link_type__in=system_types)
+            .values_list('link_type', flat=True)
+        )
         system = []
         if church.calendar_public_hash and ChurchPublicLink.LinkType.CALENDAR not in stored:
             system.append({
@@ -1833,6 +1850,14 @@ class PublicChurchLinksSerializer(serializers.Serializer):
                 'title': 'Ficha de Membro / Cadastro',
                 'url': f'{settings.FRONTEND_URL}/formulario/{church.member_form_hash}',
                 'icon_key': 'user-plus',
+                'highlight': False,
+            })
+        if ChurchPublicLink.LinkType.PRAYER not in stored:
+            system.append({
+                'link_type': ChurchPublicLink.LinkType.PRAYER,
+                'title': 'Pedido de Oração',
+                'url': '',
+                'icon_key': 'pray',
                 'highlight': False,
             })
         return system
@@ -1989,3 +2014,349 @@ class EcclesiasticalCertificateSerializer(serializers.ModelSerializer):
                 {'officiant_name': ['Informe o ministro que celebrará o ato.']}
             )
         return attrs
+
+
+class PrayerRequestSerializer(serializers.ModelSerializer):
+    """Pedido de Oração — admin triage (listagem, edição de status/notas/atribuição)."""
+
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    preferred_period_display = serializers.CharField(source='get_preferred_period_display', read_only=True)
+    assigned_to_name = serializers.SerializerMethodField()
+    whatsapp_url = serializers.SerializerMethodField()
+    elapsed_days = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PrayerRequest
+        fields = [
+            'id', 'church', 'requester_name', 'requester_phone', 'is_anonymous',
+            'category', 'category_display', 'description', 'wants_visit',
+            'cep', 'street', 'number', 'neighborhood', 'city', 'state',
+            'preferred_period', 'preferred_period_display',
+            'status', 'status_display', 'assigned_to', 'assigned_to_name',
+            'pastoral_notes', 'whatsapp_url', 'elapsed_days', 'created_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'category_display', 'status_display',
+            'preferred_period_display', 'assigned_to_name', 'whatsapp_url',
+            'elapsed_days', 'created_at',
+        ]
+
+    def get_assigned_to_name(self, obj):
+        return obj.assigned_to.name if obj.assigned_to_id else ''
+
+    def get_whatsapp_url(self, obj):
+        phone = (obj.requester_phone or '').strip()
+        if not phone:
+            return None
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) in (10, 11):
+            digits = f'55{digits}'
+        if len(digits) < 12 or len(digits) > 15:
+            return None
+        message = 'Olá! Aqui é da equipe pastoral. Como podemos orar por você?'
+        return f'https://wa.me/{digits}?text={quote(message)}'
+
+    def get_elapsed_days(self, obj):
+        if not obj.created_at:
+            return 0
+        delta = timezone.now() - obj.created_at
+        return delta.days
+
+    def validate(self, attrs):
+        user = getattr(self.context.get('request'), 'user', None)
+        if user and hasattr(user, 'church') and user.church_id is not None:
+            attrs['church'] = user.church
+        return attrs
+
+
+class PublicPrayerRequestSerializer(serializers.ModelSerializer):
+    """Submissão pública do agregador de links (/p/<slug>): sem autenticação."""
+
+    class Meta:
+        model = PrayerRequest
+        fields = [
+            'id', 'church', 'requester_name', 'requester_phone', 'is_anonymous',
+            'category', 'description', 'wants_visit', 'cep', 'street', 'number',
+            'neighborhood', 'city', 'state', 'preferred_period', 'status', 'created_at',
+        ]
+        read_only_fields = ['id', 'church', 'status', 'created_at']
+        extra_kwargs = {
+            'description': {'max_length': 2000, 'error_messages': {'required': 'Descreva o motivo do pedido de oração.'}},
+        }
+
+    def validate_requester_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Informe seu nome.')
+        if len(value) < 2:
+            raise serializers.ValidationError('Informe um nome válido.')
+        return value
+
+    def validate_description(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Descreva o motivo do pedido de oração.')
+        return value
+
+    def validate_category(self, value):
+        if value not in PrayerRequest.Category.values:
+            raise serializers.ValidationError('Categoria inválida.')
+        return value
+
+    def validate_preferred_period(self, value):
+        if value not in PrayerRequest.PreferredPeriod.values:
+            raise serializers.ValidationError('Período inválido.')
+        return value
+
+
+class PastoralVisitSerializer(serializers.ModelSerializer):
+    """Visita pastoral (planejamento/execução no mapa de visitação).
+
+    Pode estar vinculada a um membro cadastrado ou a um ponto avulso. As
+    coordenadas são salvas apenas na visita; o membro não é alterado.
+    """
+
+    visit_type_display = serializers.CharField(source='get_visit_type_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    member_name = serializers.SerializerMethodField()
+    member_phone = serializers.SerializerMethodField()
+    member_whatsapp_url = serializers.SerializerMethodField()
+    maps_url = serializers.SerializerMethodField()
+    full_address = serializers.SerializerMethodField()
+    prayer_request = serializers.PrimaryKeyRelatedField(
+        queryset=PrayerRequest.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    prayer_request_requester_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PastoralVisit
+        fields = [
+            'id', 'church', 'member', 'member_name', 'member_phone',
+            'member_whatsapp_url', 'target_name', 'target_phone', 'visit_type',
+            'visit_type_display', 'status', 'status_display', 'competence_year',
+            'competence_month', 'scheduled_date', 'completed_at', 'visited_by',
+            'notes', 'needs_followup', 'cep', 'street', 'number', 'neighborhood',
+            'city', 'state', 'full_address', 'latitude', 'longitude', 'maps_url',
+            'prayer_request', 'prayer_request_requester_name',
+            'created_by', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'member_name', 'member_phone', 'member_whatsapp_url',
+            'status_display', 'visit_type_display', 'completed_at', 'maps_url',
+            'full_address', 'prayer_request_requester_name',
+            'created_by', 'created_at', 'updated_at',
+        ]
+
+    def get_prayer_request_requester_name(self, obj):
+        if not obj.prayer_request_id:
+            return ''
+        pr = obj.prayer_request
+        return 'Anônimo (Sigilo)' if pr.is_anonymous else pr.requester_name
+
+    def get_member_name(self, obj):
+        if obj.member_id:
+            return obj.member.name
+        return obj.target_name
+
+    def get_member_phone(self, obj):
+        if obj.member_id:
+            return obj.member.phone
+        return obj.target_phone
+
+    def get_member_whatsapp_url(self, obj):
+        phone = obj.member.phone if obj.member_id else obj.target_phone
+        digits = re.sub(r'\D', '', phone or '')
+        if len(digits) in (10, 11):
+            digits = f'55{digits}'
+        if len(digits) < 12 or len(digits) > 15:
+            return None
+        message = 'Olá! Passaremos para uma visita pastoral. Um abraço.'
+        return f'https://wa.me/{digits}?text={quote(message)}'
+
+    def get_maps_url(self, obj):
+        if obj.latitude is None or obj.longitude is None:
+            return None
+        return (
+            f'https://www.google.com/maps/search/?api=1'
+            f'&query={obj.latitude},{obj.longitude}'
+        )
+
+    def get_full_address(self, obj):
+        parts = [
+            obj.street,
+            obj.number,
+            obj.neighborhood,
+            obj.city,
+            obj.state,
+        ]
+        return ', '.join(p.strip() for p in parts if (p or '').strip())
+
+    def validate(self, attrs):
+        member = attrs.get('member')
+        target_name = (attrs.get('target_name') or '').strip()
+        if member is None and not target_name:
+            raise serializers.ValidationError(
+                {'target_name': ['Informe o membro cadastrado ou o nome do ponto avulso.']}
+            )
+        if target_name:
+            attrs['target_name'] = target_name
+        prayer_request = attrs.get('prayer_request')
+        if prayer_request is not None:
+            request = self.context.get('request')
+            user = getattr(request, 'user', None)
+            if user and hasattr(user, 'church') and user.church_id is not None:
+                if prayer_request.church_id != user.church_id:
+                    raise serializers.ValidationError(
+                        {'prayer_request': ['Este pedido não pertence à sua igreja.']}
+                    )
+        return attrs
+
+
+class SundaySchoolClassSerializer(serializers.ModelSerializer):
+    """Classe de EBD da igreja ativa (Secretaria/Pastor)."""
+
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    enrollment_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SundaySchoolClass
+        fields = [
+            'id', 'church', 'name', 'category', 'category_display',
+            'teacher_name', 'co_teacher_name', 'room_location', 'is_active',
+            'enrollment_count', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'category_display', 'enrollment_count', 'created_at', 'updated_at',
+        ]
+
+    def get_enrollment_count(self, obj):
+        return obj.enrollments.filter(is_active=True).count()
+
+    def validate(self, attrs):
+        user = getattr(self.context.get('request'), 'user', None)
+        if user and hasattr(user, 'church') and user.church_id is not None:
+            attrs['church'] = user.church
+        if 'name' in attrs:
+            name = (attrs.get('name') or '').strip()
+            if not name:
+                raise serializers.ValidationError({'name': ['Informe o nome da classe.']})
+            attrs['name'] = name
+            if user and user.church_id and SundaySchoolClass.objects.filter(
+                church_id=user.church_id, name__iexact=name,
+            ).exclude(pk=getattr(self.instance, 'pk', None)).exists():
+                raise serializers.ValidationError({'name': ['Já existe uma classe com este nome.']})
+        if 'teacher_name' in attrs:
+            teacher = (attrs.get('teacher_name') or '').strip()
+            if not teacher:
+                raise serializers.ValidationError({'teacher_name': ['Informe o(a) professor(a).']})
+            attrs['teacher_name'] = teacher
+        return attrs
+
+
+class SundaySchoolEnrollmentSerializer(serializers.ModelSerializer):
+    """Aluno matriculado em uma classe de EBD."""
+
+    member_name = serializers.SerializerMethodField()
+    whatsapp_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SundaySchoolEnrollment
+        fields = [
+            'id', 'sunday_school_class', 'member', 'member_name',
+            'student_name', 'phone', 'whatsapp_url', 'is_active', 'joined_at',
+        ]
+        read_only_fields = ['id', 'member_name', 'whatsapp_url', 'joined_at']
+
+    def get_member_name(self, obj):
+        return obj.member.name if obj.member_id else ''
+
+    def get_whatsapp_url(self, obj):
+        phone = (obj.phone or '').strip()
+        if not phone:
+            return None
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) in (10, 11):
+            digits = f'55{digits}'
+        if len(digits) < 12 or len(digits) > 15:
+            return None
+        return f'https://wa.me/{digits}'
+
+    def validate(self, attrs):
+        user = getattr(self.context.get('request'), 'user', None)
+        member = attrs.get('member')
+        if member is not None and user and user.church_id is not None:
+            if member.church_id != user.church_id:
+                raise serializers.ValidationError(
+                    {'member': ['Este membro não pertence à sua igreja.']}
+                )
+        student_name = (attrs.get('student_name') or '').strip()
+        if not student_name:
+            raise serializers.ValidationError({'student_name': ['Informe o nome do aluno.']})
+        attrs['student_name'] = student_name
+        attrs.setdefault('is_active', True)
+        return attrs
+
+
+class SundaySchoolAttendanceSerializer(serializers.ModelSerializer):
+    """Presença individual na folha de chamada (com link de WhatsApp)."""
+
+    student_name = serializers.CharField(source='enrollment.student_name', read_only=True)
+    whatsapp_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SundaySchoolAttendance
+        fields = [
+            'id', 'session', 'enrollment', 'student_name', 'is_present',
+            'brought_bible', 'brought_magazine', 'whatsapp_url',
+        ]
+        read_only_fields = ['id', 'session', 'student_name', 'whatsapp_url']
+
+    def get_whatsapp_url(self, obj):
+        church = obj.session.sunday_school_class.church
+        if not obj.is_present:
+            url = services.build_sunday_school_whatsapp_url(
+                MessageTemplate.Category.EBD_ABSENCE_RESCUE,
+                obj.enrollment,
+                church,
+                topic=obj.session.topic,
+            )
+            if url:
+                return url
+        phone = (obj.enrollment.phone or '').strip()
+        if not phone:
+            return None
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) in (10, 11):
+            digits = f'55{digits}'
+        return f'https://wa.me/{digits}'
+
+
+class SundaySchoolSessionSerializer(serializers.ModelSerializer):
+    """Aula de EBD (resumo) com presenças aninhadas e totais."""
+
+    class_name = serializers.CharField(source='sunday_school_class.name', read_only=True)
+    registered_by_name = serializers.SerializerMethodField()
+    present_count = serializers.SerializerMethodField()
+    attendances = SundaySchoolAttendanceSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SundaySchoolSession
+        fields = [
+            'id', 'sunday_school_class', 'class_name', 'date', 'topic',
+            'bibles_count', 'magazines_count', 'visitors_count',
+            'offering_amount', 'notes', 'registered_by', 'registered_by_name',
+            'present_count', 'attendances', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'class_name', 'registered_by', 'registered_by_name',
+            'present_count', 'attendances', 'created_at', 'updated_at',
+        ]
+
+    def get_registered_by_name(self, obj):
+        return obj.registered_by.name if obj.registered_by_id else ''
+
+    def get_present_count(self, obj):
+        return obj.attendances.filter(is_present=True).count()

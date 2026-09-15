@@ -18,6 +18,10 @@ router.register('growth-groups', viewsets.GrowthGroupViewSet, basename='growth-g
 router.register('message-templates', viewsets.MessageTemplateViewSet, basename='message-template')
 router.register('certificate-templates', viewsets.CertificateTemplateViewSet, basename='certificate-template')
 router.register('certificates', viewsets.EcclesiasticalCertificateViewSet, basename='certificate')
+router.register('pastoral-visits', viewsets.PastoralVisitViewSet, basename='pastoral-visit')
+router.register('prayer-requests', viewsets.PrayerRequestViewSet, basename='prayer-request')
+router.register('sunday-school/classes', viewsets.SundaySchoolClassViewSet, basename='sunday-school-class')
+router.register('sunday-school/sessions', viewsets.SundaySchoolSessionViewSet, basename='sunday-school-session')
 
 urlpatterns = [
     path('login/', viewsets.LoginView.as_view(), name='login'),
@@ -220,9 +224,24 @@ urlpatterns = [
         name='public-church-links',
     ),
     path(
+        'public/churches/<str:slug>/prayer-requests/',
+        viewsets.PublicPrayerRequestView.as_view(),
+        name='public-church-prayer-requests',
+    ),
+    path(
         'public/churches/<str:slug>/growth-groups/',
         viewsets.GrowthGroupPublicView.as_view(),
         name='public-church-growth-groups',
+    ),
+    path(
+        'sunday-school/monthly-report/',
+        viewsets.SundaySchoolMonthlyReportView.as_view(),
+        name='sunday-school-monthly-report',
+    ),
+    path(
+        'sunday-school/monthly-report/pdf/',
+        viewsets.SundaySchoolMonthlyReportPdfView.as_view(),
+        name='sunday-school-monthly-report-pdf',
     ),
     path(
         'public/links/<int:pk>/click/',

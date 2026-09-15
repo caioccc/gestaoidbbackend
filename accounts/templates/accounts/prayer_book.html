@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <title>Caderno de Oração</title>
+    <style>
+        @page { size: A4; margin: 1.4cm; }
+        body { font-family: Helvetica, Arial, sans-serif; font-size: 10px; color: #111; line-height: 1.5; }
+        .header { text-align: center; border-bottom: 3px double #1f4e79; padding-bottom: 8px; margin-bottom: 12px; }
+        .header .church-name { font-size: 16px; font-weight: bold; color: #1f4e79; text-transform: uppercase; }
+        h1 { text-align: center; font-size: 13px; letter-spacing: 1px; margin: 0 0 4px 0; text-transform: uppercase; color: #1f4e79; }
+        .meta { text-align: center; font-size: 10px; color: #555; margin: 0 0 12px 0; }
+        .card { border: 1px solid #c9d4e0; border-left: 4px solid #1f4e79; border-radius: 4px; padding: 8px 10px; margin-bottom: 10px; page-break-inside: avoid; }
+        .card .top { width: 100%; }
+        .card .num { display: inline-block; background: #1f4e79; color: #fff; border-radius: 50%; width: 20px; height: 20px; line-height: 20px; text-align: center; font-size: 9px; font-weight: bold; }
+        .card .requester { font-size: 12px; font-weight: bold; color: #1f4e79; }
+        .card .category { float: right; background: #eef3f8; color: #1f4e79; font-size: 8.5px; text-transform: uppercase; padding: 2px 6px; border-radius: 8px; }
+        .card .description { margin-top: 5px; }
+        .card .fields { margin-top: 5px; font-size: 9px; color: #555; }
+        .card .fields span { margin-right: 10px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="church-name">{{ church.name }}</div>
+    </div>
+
+    <h1>Caderno de Oração</h1>
+    <p class="meta">Intercessão &amp; Visitação &mdash; motivos ativos &mdash; gerado em {{ generated_date }}</p>
+
+    {% for request in requests %}
+    <div class="card">
+        <div class="top">
+            <span class="num">{{ forloop.counter }}</span>
+            <span class="reqname">{{ request.requester_display }}</span>
+            <span class="category">{{ request.get_category_display }}</span>
+        </div>
+        <div class="description">{{ request.description }}</div>
+        <div class="fields">
+            {% if request.wants_visit %}<span>&#10009; Deseja visita pastoral{% if request.neighborhood %} ({{ request.neighborhood }}){% endif %}</span>{% endif %}
+            {% if request.wants_visit and request.preferred_period != 'ANY' %}<span>Período: {{ request.get_preferred_period_display }}</span>{% endif %}
+            <span>Recebido em {{ request.created_at|date:'d/m/Y \à\s H\hi' }}</span>
+        </div>
+    </div>
+    {% empty %}
+    <p style="text-align:center;color:#888;margin-top:40px;">Nenhum pedido ativo para este caderno no momento.</p>
+    {% endfor %}
+
+    <div class="footer" style="margin-top:14px;text-align:center;font-size:9px;color:#999;">
+        Documento gerado pelo Sistema Eclésia IDB
+    </div>
+</body>
+</html>

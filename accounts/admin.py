@@ -8,8 +8,19 @@ from .models import (
     EcclesiasticalCertificate,
     Member,
     MinistryArea,
+    SundaySchoolAttendance,
+    SundaySchoolClass,
+    SundaySchoolEnrollment,
+    SundaySchoolSession,
     User,
 )
+
+
+@admin.register(SundaySchoolClass)
+class SundaySchoolClassAdmin(admin.ModelAdmin):
+    list_display = ['name', 'church', 'category', 'teacher_name', 'is_active']
+    list_filter = ['church', 'category', 'is_active']
+    search_fields = ['name', 'teacher_name', 'church__name']
 
 
 @admin.register(Church)

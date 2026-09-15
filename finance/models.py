@@ -5,7 +5,7 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from cloudinary.models import CloudinaryField
 
-from core.storage import media_storage, church_upload_to
+from core.storage import media_storage, raw_storage, church_upload_to
 
 
 class DepartmentCategory(models.TextChoices):
@@ -417,3 +417,125 @@ class MonthlyValidation(models.Model):
         if hasattr(self.treasury_signature_url, 'read'):
             self.signature_hash = self._compute_signature_hash() or ''
         super().save(*args, **kwargs)
+
+
+class FinancialReceipt(models.Model):
+    """Recibo Financeiro Eclesial (saída/pagamento ou entrada/doação).
+
+    Numeração sequencial por igreja e ano (ex.: 001/2026), sem saltos ou
+    duplicidades — garantida pelo número único em (`church`, `year`, `number`).
+
+    O PDF oficial (A4, 2 vias) é gerado no backend e salvo no Cloudinary
+    (raw_storage). Quando o mês da emissão está fechado no Caixa IDB
+    (MonthlyClosing.is_closed), o recibo fica somente leitura (download/
+    reimpressão), exceto para admin/staff.
+    """
+
+    class Type(models.TextChoices):
+        SAIDA = 'SAIDA', 'Saída / Pagamento'
+        ENTRADA = 'ENTRADA', 'Entrada / Doação'
+
+    church = models.ForeignKey(
+        'accounts.Church',
+        on_delete=models.CASCADE,
+        related_name='financial_receipts',
+        verbose_name='Igreja',
+    )
+    year = models.PositiveIntegerField('Ano')
+    number = models.PositiveIntegerField('Número')
+    receipt_type = models.CharField(
+        'Tipo', max_length=10, choices=Type.choices,
+    )
+    date = models.DateField('Data de emissão')
+    amount = models.DecimalField('Valor', max_digits=12, decimal_places=2)
+    description = models.CharField('Descrição', max_length=200)
+    category = models.CharField(
+        'Categoria (lançamento automático)',
+        max_length=30,
+        choices=DepartmentCategory.choices,
+        blank=True,
+        help_text='Categoria usada quando o recibo também lança o movimento no caixa.',
+    )
+
+    # Dados do favorecido (pagamento) / doador (doação).
+    favored_name = models.CharField('Nome completo', max_length=150)
+    favored_document = models.CharField('CPF / CNPJ', max_length=20, blank=True)
+    favored_rg = models.CharField('RG', max_length=20, blank=True)
+    favored_city = models.CharField('Cidade', max_length=100, blank=True)
+    favored_state = models.CharField('UF', max_length=2, blank=True)
+    pix = models.CharField('Chave PIX', max_length=140, blank=True)
+
+    # Vinculações opcionais (autofill a partir de membro / lançamento do caixa).
+    member = models.ForeignKey(
+        'accounts.Member',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='financial_receipts',
+        verbose_name='Membro vinculado',
+    )
+    entry = models.ForeignKey(
+        FinancialEntry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receipts',
+        verbose_name='Entrada vinculada',
+    )
+    exit = models.ForeignKey(
+        FinancialExit,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='receipts',
+        verbose_name='Saída vinculada',
+    )
+    auto_launched = models.BooleanField(
+        'Lançado automaticamente no caixa',
+        default=False,
+        help_text='True quando o recibo também gerou o lançamento (entrada/saída).',
+    )
+    pdf = models.FileField(
+        'PDF (2 vias)',
+        storage=raw_storage,
+        upload_to=church_upload_to('receipts'),
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Emitido por',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Recibo Financeiro'
+        verbose_name_plural = 'Recibos Financeiros'
+        ordering = ['-year', '-number']
+        unique_together = ('church', 'year', 'number')
+
+    def __str__(self):
+        return (
+            f'Nº {self.full_number} - {self.get_receipt_type_display()}'
+            f' - R$ {self.amount}'
+        )
+
+    @property
+    def full_number(self) -> str:
+        """Número formatado do recibo (ex.: '001/2026')."""
+        return f'{self.number:03d}/{self.year}'
+
+    def is_locked(self) -> bool:
+        """Mês de emissão fechado no Caixa IDB → recibo somente leitura."""
+        closing = MonthlyClosing.objects.filter(
+            church=self.church,
+            year=self.date.year,
+            month=self.date.month,
+        ).first()
+        return bool(closing and closing.is_closed)

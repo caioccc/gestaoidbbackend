@@ -1,0 +1,60 @@
+<div class="via">
+    <table class="inst-header" width="100%">
+        <tr>
+            <td class="inst-left">
+                <div class="inst-name">
+                    {% if church.name %}{{ church.name.upper }}{% endif %}
+                </div>
+                <div class="inst-address">
+                    {{ church_address }}
+                </div>
+            </td>
+            <td class="inst-role">
+                <div class="inst-role-line">Pastor(a): {{ pastor_name }}</div>
+                <div class="inst-role-line">Tesoureiro(a): {{ treasurer_name }}</div>
+            </td>
+        </tr>
+    </table>
+
+    <table class="title-bar" width="100%">
+        <tr>
+            <td class="title-text">
+                {{ title_text }}
+            </td>
+            <td class="title-number">
+                Nº {{ receipt_number }}
+            </td>
+        </tr>
+    </table>
+
+    <table class="amount-block" width="100%">
+        <tr>
+            <td class="amount-label">VALOR</td>
+            <td class="amount-value">{{ amount }}</td>
+        </tr>
+    </table>
+
+    <p class="amount-extenso">{{ amount_extenso }}</p>
+
+    <div class="formal-text">
+        {{ body_line_1 }}<br>
+        {{ body_line_2 }}
+    </div>
+
+    <p class="city-date">{{ city_date }}</p>
+
+    <table class="signature-block" width="100%">
+        <tr>
+            <td class="sig-cell">
+                <div class="sig-line">&nbsp;</div>
+                <div class="sig-label">{{ signature_label_left }}</div>
+            </td>
+            <td class="sig-cell sig-cell-right">
+                <div class="sig-line">&nbsp;</div>
+                <div class="sig-label">{{ signature_label_right }}</div>
+            </td>
+        </tr>
+    </table>
+
+    <p class="via-label">{{ via_label }}</p>
+</div>

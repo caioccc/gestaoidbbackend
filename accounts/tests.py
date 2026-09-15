@@ -6,6 +6,8 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
+import decimal
+
 from finance.models import CalendarEvent
 
 from .models import (
@@ -28,6 +30,12 @@ from .models import (
     MinistryArea,
     StorageLocation,
     WorshipService,
+    PastoralVisit,
+    PrayerRequest,
+    SundaySchoolAttendance,
+    SundaySchoolClass,
+    SundaySchoolEnrollment,
+    SundaySchoolSession,
 )
 
 User = get_user_model()
@@ -3016,14 +3024,19 @@ class InventoryTests(BaseChurchTestCase):
 
     # --- empréstimos ---
     def test_create_loan_for_non_member(self):
+        from datetime import timedelta  # noqa: PLC0415
+
+        from django.utils import timezone  # noqa: PLC0415
+
+        today = timezone.localdate()
         item = MaterialItem.objects.create(church=self.sede, name='Violão')
         resp = self.client.post(
             reverse('loan-list'),
             {
                 'item': item.id,
                 'borrower_name': 'João Músico',
-                'borrowed_at': '2026-09-09',
-                'expected_return': '2026-09-13',
+                'borrowed_at': today.isoformat(),
+                'expected_return': (today + timedelta(days=30)).isoformat(),
             },
             format='json',
         )
@@ -3973,11 +3986,12 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
 
         listed = client.get(reverse('church-link-list'))
         self.assertEqual(listed.status_code, status.HTTP_200_OK)
-        # 2 padrões (Agenda de Cultos / Ficha de Membro) + o link criado
-        self.assertEqual(len(listed.data), 3)
+        # 3 padrões (Agenda de Cultos / Ficha de Membro / Pedido de Oração) + o link criado
+        self.assertEqual(len(listed.data), 4)
         titles = {l['title'] for l in listed.data}
         self.assertIn('Agenda de Cultos', titles)
         self.assertIn('Ficha de Membro / Cadastro', titles)
+        self.assertIn('Pedido de Oração', titles)
 
     def test_secretaria_can_manage(self):
         client = self._client(self.secretaria)
@@ -4115,7 +4129,7 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
         )
         listed = self._client(self.pastor).get(reverse('church-link-list'))
         # apenas os padrões da igreja ativa; o link alheio não aparece
-        self.assertEqual(len(listed.data), 2)
+        self.assertEqual(len(listed.data), 3)
         ids = [l['id'] for l in listed.data]
         self.assertNotIn(link.pk, ids)
 
@@ -5474,3 +5488,537 @@ class CertificateTests(BaseChurchTestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
         self.assertIn('fields_layout', resp.data)
+
+
+class IntercessionRoleTests(BaseChurchTestCase):
+    """Perfil INTERCESSAO: RBAC de consulta de membros e suas permissões."""
+
+    def test_intercessao_role_label(self):
+        self.assertEqual(
+            dict(ChurchMembership.Role.choices)[ChurchMembership.Role.INTERCESSAO],
+            'Intercessão & Visitação',
+        )
+
+    def test_intercessao_can_list_members_readonly(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        Member.objects.create(
+            church=self.sede, name='Membro Teste', phone='83999991111',
+        )
+        client = self._client(intercessor)
+        resp = client.get(reverse('member-self-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data[0]['name'], 'Membro Teste')
+
+    def test_intercessao_cannot_create_member(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        client = self._client(intercessor)
+        resp = client.post(
+            reverse('member-self-list'),
+            {'name': 'Tentativa', 'phone': '83988887777'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_intercessao_blocked_from_user_management(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        client = self._client(intercessor)
+        resp = client.get(
+            reverse('church-users', args=[self.sede.pk]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_pastor_can_assign_intercessao_role(self):
+        pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        cliente = self._user('cliente@teste.com', name='Cliente')
+        client = self._client(pastor)
+        resp = client.post(
+            reverse('church-users', args=[self.sede.pk]),
+            {
+                'email': cliente.email,
+                'password': 'S3nh@segura',
+                'password2': 'S3nh@segura',
+                'name': 'Cliente',
+                'role': ChurchMembership.Role.INTERCESSAO,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['role'], ChurchMembership.Role.INTERCESSAO)
+
+
+class PrayerRequestTests(BaseChurchTestCase):
+    """Módulo de Pedidos de Oração: captação pública e triagem administrativa."""
+
+    def _prayer(self, **kw):
+        defaults = {
+            'church': self.sede,
+            'requester_name': 'Ana Souza',
+            'requester_phone': '83999990000',
+            'category': PrayerRequest.Category.HEALTH,
+            'description': 'Oração pela minha saúde.',
+            'wants_visit': True,
+            'neighborhood': 'Catolé',
+            'preferred_period': PrayerRequest.PreferredPeriod.AFTERNOON,
+        }
+        defaults.update(kw)
+        return PrayerRequest.objects.create(**defaults)
+
+    def test_public_submit_creates_pending(self):
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=[self.sede.slug]),
+            {
+                'requester_name': 'Maria Silva',
+                'requester_phone': '(83) 99999-0000',
+                'category': 'FAMILY',
+                'description': 'Oração pela minha família.',
+                'wants_visit': True,
+                'neighborhood': 'Bodocongó',
+                'preferred_period': 'MORNING',
+                'is_anonymous': True,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        pr = PrayerRequest.objects.get(pk=resp.data['id'])
+        self.assertEqual(pr.church, self.sede)
+        self.assertEqual(pr.status, PrayerRequest.Status.PENDING)
+        self.assertTrue(pr.is_anonymous)
+
+    def test_public_submit_unknown_slug_404(self):
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=['slug-inexistente']),
+            {'requester_name': 'A', 'description': 'B'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_submit_requires_description(self):
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=[self.sede.slug]),
+            {'requester_name': 'Maria', 'category': 'FAMILY', 'description': ''},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('description', resp.data)
+
+    def test_rbac_intercessao_can_list(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer()
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
+        self.assertEqual(resp.data[0]['requester_name'], 'Ana Souza')
+
+    def test_rbac_treasurer_blocked(self):
+        tesoureiro = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        self._prayer()
+        client = self._client(tesoureiro)
+        resp = client.get(reverse('prayer-request-list'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_status_filter_and_patch(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer()
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-list'), {'status': 'PENDING'})
+        self.assertEqual(len(resp.data), 1)
+        pr = PrayerRequest.objects.first()
+        resp = client.patch(
+            reverse('prayer-request-detail', args=[pr.pk]),
+            {'status': 'PRAYING', 'pastoral_notes': 'Orando pela família.'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        pr.refresh_from_db()
+        self.assertEqual(pr.status, PrayerRequest.Status.PRAYING)
+        self.assertEqual(pr.pastoral_notes, 'Orando pela família.')
+
+    def test_prepare_whatsapp(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        pr = self._prayer()
+        client = self._client(intercessor)
+        resp = client.post(
+            reverse('prayer-request-prepare-whatsapp', args=[pr.pk]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIn('wa.me/55', resp.data['url'])
+
+    def test_prepare_whatsapp_without_phone_400(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        pr = self._prayer(requester_phone='')
+        client = self._client(intercessor)
+        resp = client.post(
+            reverse('prayer-request-prepare-whatsapp', args=[pr.pk]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_print_sheet_pdf(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer()
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-print-sheet'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+        self.assertIn('caderno-oracao', resp['Content-Disposition'])
+
+    def test_print_sheet_excludes_archived(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer(status=PrayerRequest.Status.ARCHIVED)
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-print-sheet'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_visit_from_prayer_sets_visit_scheduled(self):
+        pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        pr = self._prayer()
+        client = self._client(pastor)
+        resp = client.post(
+            reverse('pastoral-visit-list'),
+            {
+                'prayer_request': pr.pk,
+                'target_name': pr.requester_name,
+                'target_phone': pr.requester_phone,
+                'visit_type': 'ROUTINE',
+                'competence_year': 2026,
+                'competence_month': 9,
+                'scheduled_date': '2026-09-20',
+                'neighborhood': pr.neighborhood,
+                'city': 'Campina Grande',
+                'state': 'PB',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['prayer_request'], pr.pk)
+        pr.refresh_from_db()
+        self.assertEqual(pr.status, PrayerRequest.Status.VISIT_SCHEDULED)
+
+    def test_visit_from_foreign_prayer_rejected(self):
+        pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        foreign = self._prayer(church=self.congregation)
+        client = self._client(pastor)
+        resp = client.post(
+            reverse('pastoral-visit-list'),
+            {
+                'prayer_request': foreign.pk,
+                'target_name': 'Teste',
+                'visit_type': 'ROUTINE',
+                'competence_year': 2026,
+                'competence_month': 9,
+                'scheduled_date': '2026-09-20',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+
+class SundaySchoolTests(BaseChurchTestCase):
+    """Módulo de Escola Bíblica Dominical: classes, chamada e relatório mensal."""
+
+    def _secretaria(self, church=None):
+        return self._user(
+            'secretaria.ebd@teste.com',
+            name='Secretária EBD',
+            church=church or self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+
+    def _class(self, name='Adultos', **kw):
+        defaults = {
+            'church': self.sede,
+            'name': name,
+            'category': SundaySchoolClass.Category.ADULTS,
+            'teacher_name': 'Prof. João',
+        }
+        defaults.update(kw)
+        return SundaySchoolClass.objects.create(**defaults)
+
+    def _student(self, sunday_class, **kw):
+        defaults = {
+            'sunday_school_class': sunday_class,
+            'student_name': 'Maria Silva',
+            'phone': '(83) 99999-0000',
+        }
+        defaults.update(kw)
+        return SundaySchoolEnrollment.objects.create(**defaults)
+
+    def test_rbac_only_secretaria_or_pastor(self):
+        sunday_class = self._class()
+        self._student(sunday_class)
+        treasurer = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        client = self._client(treasurer)
+        resp = client.get(reverse('sunday-school-class-list'))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_class_crud(self):
+        client = self._client(self._secretaria())
+        resp = client.post(
+            reverse('sunday-school-class-list'),
+            {
+                'name': 'Jovens',
+                'category': 'YOUTH',
+                'teacher_name': 'Prof. Ana',
+                'co_teacher_name': 'Prof. Clara',
+                'room_location': 'Sala 2',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        sunday_class = SundaySchoolClass.objects.get(pk=resp.data['id'])
+        self.assertEqual(sunday_class.name, 'Jovens')
+        self.assertEqual(sunday_class.church, self.sede)
+
+        resp = client.patch(
+            reverse('sunday-school-class-detail', args=[sunday_class.pk]),
+            {'teacher_name': 'Prof. Beatriz'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['teacher_name'], 'Prof. Beatriz')
+
+    def test_enroll_and_delete_student(self):
+        sunday_class = self._class()
+        client = self._client(self._secretaria())
+        resp = client.post(
+            reverse('sunday-school-class-students', args=[sunday_class.pk]),
+            {'student_name': 'Pedro Santos', 'phone': '(83) 98888-7777'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        enrollment = SundaySchoolEnrollment.objects.get(pk=resp.data['id'])
+        self.assertEqual(enrollment.sunday_school_class, sunday_class)
+        self.assertEqual(resp.data['whatsapp_url'], 'https://wa.me/5583988887777')
+
+        resp = client.get(reverse('sunday-school-class-students', args=[sunday_class.pk]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
+
+        resp = client.delete(
+            reverse('sunday-school-class-students', args=[sunday_class.pk]),
+            {'enrollment_id': enrollment.pk},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SundaySchoolEnrollment.objects.filter(pk=enrollment.pk).exists())
+
+    def test_session_get_prepares_sheet(self):
+        sunday_class = self._class()
+        self._student(sunday_class)
+        client = self._client(self._secretaria())
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-06'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        session = SundaySchoolSession.objects.get(
+            sunday_school_class=sunday_class, date='2026-09-06'
+        )
+        self.assertEqual(len(resp.data['attendances']), 1)
+        self.assertFalse(resp.data['attendances'][0]['is_present'])
+
+        # Pedir a mesma folha novamente não duplica a aula.
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-06'},
+        )
+        self.assertEqual(
+            SundaySchoolSession.objects.filter(
+                sunday_school_class=sunday_class, date='2026-09-06'
+            ).count(),
+            1,
+        )
+
+    def test_session_post_saves_attendance_and_totals(self):
+        sunday_class = self._class()
+        enrollment = self._student(sunday_class, student_name='Maria Silva')
+        client = self._client(self._secretaria())
+        resp = client.post(
+            reverse('sunday-school-session-list'),
+            {
+                'sunday_school_class': sunday_class.pk,
+                'date': '2026-09-13',
+                'topic': 'O Fruto do Espírito',
+                'bibles_count': 5,
+                'magazines_count': 4,
+                'visitors_count': 2,
+                'offering_amount': '150.00',
+                'notes': 'Aula produtiva.',
+                'attendance': [
+                    {
+                        'enrollment_id': enrollment.pk,
+                        'is_present': True,
+                        'brought_bible': True,
+                        'brought_magazine': True,
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        session = SundaySchoolSession.objects.get(
+            sunday_school_class=sunday_class, date='2026-09-13'
+        )
+        self.assertEqual(session.offering_amount, decimal.Decimal('150.00'))
+        attendance = SundaySchoolAttendance.objects.get(
+            session=session, enrollment=enrollment
+        )
+        self.assertTrue(attendance.is_present)
+        self.assertTrue(attendance.brought_bible)
+        self.assertEqual(resp.data['present_count'], 1)
+
+    def test_session_post_rejects_foreign_enrollment(self):
+        sunday_class = self._class()
+        foreign_class = self._class(name='Infantil', category='CHILDREN')
+        enrollment = self._student(foreign_class)
+        client = self._client(self._secretaria())
+        resp = client.post(
+            reverse('sunday-school-session-list'),
+            {
+                'sunday_school_class': sunday_class.pk,
+                'date': '2026-09-13',
+                'attendance': [{'enrollment_id': enrollment.pk, 'is_present': True}],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_monthly_report_computes_presence_and_risk(self):
+        sunday_class = self._class()
+        present = self._student(sunday_class, student_name='Maria Silva')
+        absent = self._student(sunday_class, student_name='João Vale', phone='')
+        client = self._client(self._secretaria())
+
+        session = SundaySchoolSession.objects.create(
+            sunday_school_class=sunday_class,
+            date='2026-09-06',
+            offering_amount=decimal.Decimal('50.00'),
+        )
+        SundaySchoolAttendance.objects.create(
+            session=session, enrollment=present, is_present=True,
+        )
+
+        resp = client.get(
+            reverse('sunday-school-monthly-report'),
+            {'year': 2026, 'month': 9},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(len(resp.data['classes']), 1)
+        class_report = resp.data['classes'][0]
+        self.assertEqual(class_report['offering_total'], '50.00')
+        by_name = {s['student_name']: s for s in class_report['students']}
+        self.assertEqual(by_name['Maria Silva']['present_count'], 1)
+        self.assertEqual(by_name['Maria Silva']['presence_percent'], 100.0)
+        self.assertFalse(by_name['Maria Silva']['risk_evasion'])
+        self.assertFalse(by_name['João Vale']['risk_evasion'])
+
+        # 3 domingos com aula seguidos ausente => risco de evasão.
+        for day in ['2026-09-13', '2026-09-20']:
+            s = SundaySchoolSession.objects.create(
+                sunday_school_class=sunday_class,
+                date=day,
+            )
+            for enrollment in (present, absent):
+                SundaySchoolAttendance.objects.create(
+                    session=s, enrollment=enrollment,
+                    is_present=(enrollment is present and True),
+                )
+        resp = client.get(
+            reverse('sunday-school-monthly-report'),
+            {'year': 2026, 'month': 9},
+        )
+        class_report = resp.data['classes'][0]
+        by_name = {s['student_name']: s for s in class_report['students']}
+        self.assertTrue(by_name['João Vale']['risk_evasion'])
+        self.assertEqual(by_name['João Vale']['consecutive_absences'], 3)
+        self.assertIsNone(by_name['João Vale']['whatsapp_url'])
+
+    def test_class_announcement_whatsapp(self):
+        sunday_class = self._class()
+        self._student(sunday_class)
+        client = self._client(self._secretaria())
+        resp = client.post(
+            reverse('sunday-school-class-prepare-whatsapp', args=[sunday_class.pk]),
+            {'kind': 'EBD_CLASS_ANNOUNCEMENT', 'topic': 'Unidade'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(len(resp.data['rows']), 1)
+        self.assertIn('wa.me/55', resp.data['rows'][0]['url'])
+        self.assertIn('Unidade', resp.data['rows'][0]['url'])
+
+    def test_monthly_report_pdf(self):
+        sunday_class = self._class()
+        self._student(sunday_class)
+        client = self._client(self._secretaria())
+        resp = client.get(
+            reverse('sunday-school-monthly-report-pdf'),
+            {'year': 2026, 'month': 9},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp['Content-Type'], 'application/pdf')
+        self.assertIn('relatorio-ebd', resp['Content-Disposition'])
+
+    def test_absence_whatsapp_on_attendance(self):
+        sunday_class = self._class()
+        self._student(sunday_class)
+        client = self._client(self._secretaria())
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-06'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        attendance = resp.data['attendances'][0]
+        self.assertIsNotNone(attendance['whatsapp_url'])
+        self.assertIn('wa.me/55', attendance['whatsapp_url'])

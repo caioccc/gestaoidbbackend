@@ -8,6 +8,7 @@ router = DefaultRouter()
 router.register(r'entries', viewsets.FinancialEntryViewSet, basename='entry')
 router.register(r'exits', viewsets.FinancialExitViewSet, basename='exit')
 router.register(r'tithers', viewsets.TitherViewSet, basename='tither')
+router.register(r'receipts', viewsets.FinancialReceiptViewSet, basename='receipt')
 router.register(r'calendar/events', viewsets.CalendarEventViewSet, basename='calendar-event')
 
 admin_router = DefaultRouter()
@@ -15,6 +16,11 @@ admin_router.register(
     r'admin/churches/(?P<church_pk>[0-9]+)/entries',
     viewsets.AdminChurchEntriesViewSet,
     basename='admin-church-entries',
+)
+admin_router.register(
+    r'admin/churches/(?P<church_pk>[0-9]+)/receipts',
+    viewsets.AdminChurchReceiptViewSet,
+    basename='admin-church-receipts',
 )
 admin_router.register(
     r'admin/churches/(?P<church_pk>[0-9]+)/exits',

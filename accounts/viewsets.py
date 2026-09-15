@@ -10,11 +10,13 @@ from django.db.models import Count, F, Q
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from django.utils.text import slugify
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import SAFE_METHODS
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
@@ -43,6 +45,12 @@ from .models import (
     StorageLocation,
     WorshipService,
     GrowthGroup,
+    PastoralVisit,
+    PrayerRequest,
+    SundaySchoolAttendance,
+    SundaySchoolClass,
+    SundaySchoolEnrollment,
+    SundaySchoolSession,
     User as UserModel,
 )
 from .permissions import (
@@ -76,6 +84,7 @@ from .serializers import (
     MemberTransferSerializer,
     MessageTemplateSerializer,
     MinistryAreaSerializer,
+    PastoralVisitSerializer,
     PendingChurchSerializer,
     PendingCongregationSerializer,
     PublicChurchLinksSerializer,
@@ -89,6 +98,11 @@ from .serializers import (
     WorshipServiceSerializer,
     GrowthGroupSerializer,
     GrowthGroupPublicSerializer,
+    PrayerRequestSerializer,
+    PublicPrayerRequestSerializer,
+    SundaySchoolClassSerializer,
+    SundaySchoolEnrollmentSerializer,
+    SundaySchoolSessionSerializer,
 )
 
 ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
@@ -718,8 +732,21 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
     """
 
     serializer_class = MemberSerializer
-    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO', 'INTERCESSAO')]
     pagination_class = None
+
+    def get_permissions(self):
+        """INTERCESSAO tem consulta somente-leitura (contato pastoral).
+
+        Ações com `permission_classes` explícitas no decorator mantêm suas
+        regras originais (ex.: `prepare-whatsapp` e `stage` são
+        PASTOR/SECRETARIA).
+        """
+        if self.action in ('prepare_whatsapp', 'stage'):
+            return super().get_permissions()
+        if self.request and self.request.method in SAFE_METHODS:
+            return [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO', 'INTERCESSAO')()]
+        return [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')()]
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1208,6 +1235,7 @@ class ChurchPublicLinkViewSet(viewsets.ModelViewSet):
     DEFAULT_LINKS = (
         (ChurchPublicLink.LinkType.CALENDAR, 'Agenda de Cultos', 'calendar'),
         (ChurchPublicLink.LinkType.MEMBERSHIP, 'Ficha de Membro / Cadastro', 'user-plus'),
+        (ChurchPublicLink.LinkType.PRAYER, 'Pedido de Oração', 'pray'),
     )
 
     def get_queryset(self):
@@ -2632,3 +2660,551 @@ class EcclesiasticalCertificateViewSet(viewsets.ModelViewSet):
         if instance.generated_pdf and instance.generated_pdf.name:
             instance.generated_pdf.delete(save=False)
         super().perform_destroy(instance)
+
+
+class PastoralVisitViewSet(viewsets.ModelViewSet):
+    """Planejamento e execução de visitas pastorais (mapa de visitação).
+
+    Acesso a PASTOR, SECRETARIA e INTERCESSAO (ADMIN sempre passa via
+    `IsChurchRole`). Filtros por competência (`year`/`month`), `status` e
+    `type` atuam sobre a igreja ativa. O resumo mensal (`summary`) alimenta
+    os indicadores da tela.
+    """
+
+    serializer_class = PastoralVisitSerializer
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'INTERCESSAO')]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return PastoralVisit.objects.none()
+        qs = PastoralVisit.objects.filter(church=church).select_related('member')
+        params = self.request.query_params
+        if params.get('year'):
+            try:
+                qs = qs.filter(competence_year=int(params['year']))
+            except ValueError:
+                raise ValidationError({'year': 'Ano inválido.'})
+        if params.get('month'):
+            try:
+                qs = qs.filter(competence_month=int(params['month']))
+            except ValueError:
+                raise ValidationError({'month': 'Mês inválido.'})
+        if params.get('status'):
+            qs = qs.filter(status=params['status'].upper())
+        if params.get('type'):
+            qs = qs.filter(visit_type=params['type'].upper())
+        return qs
+
+    def perform_create(self, serializer):
+        visit = serializer.save(
+            church=self.request.user.church,
+            created_by=self.request.user,
+        )
+        if visit.prayer_request_id:
+            prayer = PrayerRequest.objects.filter(pk=visit.prayer_request_id).first()
+            if prayer and prayer.church_id == visit.church_id:
+                if prayer.status == PrayerRequest.Status.PENDING:
+                    prayer.status = PrayerRequest.Status.VISIT_SCHEDULED
+                    prayer.save(update_fields=['status'])
+
+    def perform_destroy(self, instance):
+        if instance.status == PastoralVisit.Status.COMPLETED:
+            raise ValidationError(
+                {'detail': 'Visitas realizadas não podem ser excluídas.'}
+            )
+        super().perform_destroy(instance)
+
+    def _snapshot_from_member(self, data):
+        """Quando a visita é de um membro cadastrado, leva o endereço do
+        membro como ponto de partida caso a tela não envie os campos."""
+        member_id = data.get('member')
+        if not member_id:
+            return
+        member = Member.objects.filter(pk=member_id).first()
+        if member is None:
+            return
+        for source, target in (
+            ('street', 'street'),
+            ('number', 'number'),
+            ('neighborhood', 'neighborhood'),
+            ('city', 'city'),
+            ('state', 'state'),
+            ('cep', 'cep'),
+            ('phone', 'target_phone'),
+        ):
+            if not (data.get(target) or '').strip() and getattr(member, source, ''):
+                data[target] = getattr(member, source)
+
+    @action(detail=False, methods=['post'], url_path='snapshot-member')
+    def snapshot_member(self, request):
+        """Devolve endereço/telefone do membro para o agendamento da visita."""
+        payload = request.data or {}
+        member_id = payload.get('member')
+        if not member_id:
+            raise ValidationError({'member': ['Informe o membro.']})
+        member = get_object_or_404(
+            Member.objects.filter(church=request.user.church), pk=member_id
+        )
+        return Response({
+            'id': member.id,
+            'name': member.name,
+            'phone': member.phone,
+            'street': member.street,
+            'number': member.number,
+            'neighborhood': member.neighborhood,
+            'city': member.city,
+            'state': member.state,
+            'cep': member.cep,
+        })
+
+    @action(detail=True, methods=['post'], url_path='complete')
+    def complete(self, request, pk=None):
+        """Registra a realização da visita com relatório pastoral."""
+        visit = self.get_object()
+        if visit.status == PastoralVisit.Status.COMPLETED:
+            raise ValidationError({'detail': 'Visita já realizada.'})
+        data = request.data or {}
+        completed_at = None
+        raw_completed_at = data.get('completed_at')
+        if raw_completed_at:
+            parsed = parse_datetime(str(raw_completed_at))
+            if parsed is None:
+                raise ValidationError({'completed_at': ['Data/hora inválida.']})
+            completed_at = parsed
+            if timezone.is_naive(completed_at):
+                completed_at = timezone.make_aware(completed_at)
+        visit.status = PastoralVisit.Status.COMPLETED
+        visit.completed_at = completed_at or timezone.now()
+        if data.get('visited_by'):
+            visit.visited_by = str(data['visited_by']).strip()
+        if data.get('notes'):
+            visit.notes = str(data['notes']).strip()
+        visit.needs_followup = bool(data.get('needs_followup'))
+        visit.save(update_fields=[
+            'status', 'completed_at', 'visited_by', 'notes', 'needs_followup', 'updated_at',
+        ])
+        return Response(PastoralVisitSerializer(visit).data)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """Cancela uma visita ainda planejada."""
+        visit = self.get_object()
+        if visit.status != PastoralVisit.Status.PLANNED:
+            raise ValidationError({'detail': 'Apenas visitas planejadas podem ser canceladas.'})
+        visit.status = PastoralVisit.Status.CANCELLED
+        visit.save(update_fields=['status', 'updated_at'])
+        return Response(PastoralVisitSerializer(visit).data)
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """Totais do mês de competência informado (padrão: mês atual)."""
+        today = timezone.now().date()
+        year = int(request.query_params.get('year') or today.year)
+        month = int(request.query_params.get('month') or today.month)
+        church = request.user.church
+        if church is None:
+            return Response(self._empty_summary(year, month))
+        qs = PastoralVisit.objects.filter(
+            church=church, competence_year=year, competence_month=month
+        )
+        completed = qs.filter(status=PastoralVisit.Status.COMPLETED)
+        top_neighborhoods = (
+            completed.filter(neighborhood__isnull=False)
+            .exclude(neighborhood='')
+            .values('neighborhood')
+            .annotate(count=Count('id'))
+            .order_by('-count')[:5]
+        )
+        return Response({
+            'year': year,
+            'month': month,
+            'total': qs.count(),
+            'planned': qs.filter(status=PastoralVisit.Status.PLANNED).count(),
+            'completed': completed.count(),
+            'cancelled': qs.filter(status=PastoralVisit.Status.CANCELLED).count(),
+            'needs_followup': completed.filter(needs_followup=True).count(),
+            'top_neighborhoods': [
+                {'neighborhood': row['neighborhood'], 'count': row['count']}
+                for row in top_neighborhoods
+            ],
+        })
+
+    @staticmethod
+    def _empty_summary(year, month):
+        return {
+            'year': year,
+            'month': month,
+            'total': 0,
+            'planned': 0,
+            'completed': 0,
+            'cancelled': 0,
+            'needs_followup': 0,
+            'top_neighborhoods': [],
+        }
+
+
+class PrayerRequestViewSet(viewsets.ModelViewSet):
+    """Triagem administrativa dos Pedidos de Oração (Intercessão/Pastoral).
+
+    Permite listar, editar status/responsável/notas e gerar o Caderno de
+    Oração em PDF. A captação pública (sem login) acontece na rota
+    `public/churches/<slug>/prayer-requests/`.
+    """
+
+    serializer_class = PrayerRequestSerializer
+    permission_classes = [IsChurchRole('INTERCESSAO', 'PASTOR', 'SECRETARIA')]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return PrayerRequest.objects.none()
+        qs = PrayerRequest.objects.filter(church=church).select_related('assigned_to')
+        params = self.request.query_params
+        if params.get('status'):
+            status_value = params['status'].upper()
+            if status_value in PrayerRequest.Status.values:
+                qs = qs.filter(status=status_value)
+        if params.get('category'):
+            category = params['category'].upper()
+            if category in PrayerRequest.Category.values:
+                qs = qs.filter(category=category)
+        if params.get('wants_visit') in ('1', 'true', 'True'):
+            qs = qs.filter(wants_visit=True)
+        search = params.get('q', '').strip()
+        if search:
+            qs = qs.filter(
+                Q(requester_name__icontains=search)
+                | Q(requester_phone__icontains=search)
+                | Q(description__icontains=search)
+                | Q(neighborhood__icontains=search)
+            )
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get('paginate') != '1':
+            return super().list(request, *args, **kwargs)
+        self.pagination_class = MemberListPagination
+        return super().list(request, *args, **kwargs)
+
+    @action(detail=True, methods=['post'], url_path='prepare-whatsapp')
+    def prepare_whatsapp(self, request, pk=None):
+        """Gera link wa.me com saudação pastoral para contato imediato."""
+        from urllib.parse import quote
+
+        request_obj = self.get_object()
+        phone = (request_obj.requester_phone or '').strip()
+        if not phone:
+            raise ValidationError({'detail': 'Solicitação sem telefone cadastrado.'})
+        data = PrayerRequestSerializer(request_obj).data
+        url = data.get('whatsapp_url')
+        if not url:
+            raise ValidationError({'detail': 'Número de WhatsApp inválido.'})
+        return Response({'id': request_obj.id, 'url': url, 'phone': phone})
+
+    @action(detail=False, methods=['get'], url_path='print-sheet')
+    def print_sheet(self, request):
+        """Caderno de Oração em PDF (motivos ativos da igreja)."""
+        active = (
+            PrayerRequest.objects.filter(
+                church=request.user.church,
+            )
+            .exclude(status=PrayerRequest.Status.ARCHIVED)
+            .order_by('created_at')
+        )
+        pdf = services.build_prayer_book_pdf(request.user.church, active)
+        filename = f'caderno-oracao-{timezone.localdate().isoformat()}.pdf'
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+
+class PublicPrayerRequestView(APIView):
+    """Captação pública de pedidos de oração via agregador de links (/p/<slug>)."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, slug):
+        church = (
+            Church.objects.filter(slug=slug, public_links_enabled=True).first()
+            or Church.objects.filter(links_hash=slug, public_links_enabled=True).first()
+        )
+        if church is None:
+            raise NotFound('Página não encontrada.')
+        serializer = PublicPrayerRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        prayer_request = serializer.save(
+            church=church,
+            status=PrayerRequest.Status.PENDING,
+        )
+        return Response(
+            PublicPrayerRequestSerializer(prayer_request).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class SundaySchoolClassViewSet(viewsets.ModelViewSet):
+    """CRUD das classes de EBD da igreja ativa (Secretaria/Pastor)."""
+
+    serializer_class = SundaySchoolClassSerializer
+    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR')]
+    pagination_class = None
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['church'] = self.request.user.church
+        return context
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return SundaySchoolClass.objects.none()
+        return SundaySchoolClass.objects.filter(church=church).order_by('name')
+
+    def perform_create(self, serializer):
+        serializer.save(church=self.request.user.church)
+
+    @action(detail=True, methods=['get', 'post', 'patch', 'delete'], url_path='students')
+    def students(self, request, pk=None):
+        """Alunos da classe: lista (GET), matricula (POST), edita (PATCH) e remove (DELETE).
+
+        Para o PATCH, informe `enrollment_id` no corpo junto com os campos
+        a atualizar (ex.: `{"enrollment_id": 7, "student_name": "..."}`).
+
+        Para o DELETE, informe `enrollment_id` no corpo (`{"enrollment_id": 7}`)
+        ou na query string `?enrollment_id=7`.
+        """
+        sunday_class = self.get_object()
+        if request.method == 'GET':
+            qs = sunday_class.enrollments.select_related('member', 'sunday_school_class')
+            search = (request.query_params.get('q') or '').strip()
+            if search:
+                qs = qs.filter(
+                    Q(student_name__icontains=search) | Q(phone__icontains=search)
+                )
+            return Response(
+                SundaySchoolEnrollmentSerializer(
+                    qs, many=True, context={'request': request}
+                ).data
+            )
+        if request.method == 'POST':
+            data = {
+                **(request.data or {}),
+                'sunday_school_class': sunday_class.id,
+            }
+            serializer = SundaySchoolEnrollmentSerializer(
+                data=data, context={'request': request}
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save(sunday_school_class=sunday_class)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+        if request.method == 'PATCH':
+            payload = request.data or {}
+            enrollment_id = payload.get('enrollment_id')
+            enrollment = get_object_or_404(sunday_class.enrollments, pk=enrollment_id)
+            serializer = SundaySchoolEnrollmentSerializer(
+                enrollment, data=payload, partial=True, context={'request': request}
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data)
+
+        payload = request.data or {}
+        enrollment_id = payload.get('enrollment_id') or request.query_params.get('enrollment_id')
+        enrollment = get_object_or_404(sunday_class.enrollments, pk=enrollment_id)
+        enrollment.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'], url_path='prepare-whatsapp')
+    def prepare_whatsapp(self, request, pk=None):
+        """Gera os links `wa.me` do aviso de aula para todos os alunos da turma.
+
+        Aceita `kind` (categoria do template EBD) e `topic` (tema da próxima
+        aula). Cada aluno com telefone válido recebe um link pronto para envio.
+        """
+        kind = (request.data or {}).get('kind') or MessageTemplate.Category.EBD_CLASS_ANNOUNCEMENT
+        if kind not in MessageTemplate.Category.values:
+            raise ValidationError({'kind': 'Categoria de mensagem inválida.'})
+        topic = (request.data or {}).get('topic') or ''
+        sunday_class = self.get_object()
+        rows = []
+        for enrollment in sunday_class.enrollments.filter(is_active=True).select_related(
+            'sunday_school_class'
+        ):
+            url = services.build_sunday_school_whatsapp_url(
+                kind, enrollment, sunday_class.church, topic=topic,
+            )
+            if url:
+                rows.append({
+                    'enrollment_id': enrollment.id,
+                    'student_name': enrollment.student_name,
+                    'phone': enrollment.phone or '',
+                    'url': url,
+                })
+        return Response({
+            'class_id': sunday_class.id,
+            'class_name': sunday_class.name,
+            'rows': rows,
+        })
+
+
+class SundaySchoolSessionViewSet(viewsets.ModelViewSet):
+    """Aulas EBD: lista por classe/data, prepara a folha de chamada e salva."""
+
+    serializer_class = SundaySchoolSessionSerializer
+    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR')]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return SundaySchoolSession.objects.none()
+        qs = SundaySchoolSession.objects.filter(
+            sunday_school_class__church=church,
+        ).select_related('sunday_school_class', 'registered_by')
+        class_id = self.request.query_params.get('class_id')
+        if class_id:
+            qs = qs.filter(sunday_school_class_id=class_id)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        """Com `class_id` + `date` devolve a folha completa; senão, o histórico."""
+        params = request.query_params
+        class_id = params.get('class_id')
+        date_value = params.get('date')
+        if class_id and date_value:
+            session_date = parse_date(date_value)
+            if session_date is None:
+                raise ValidationError({'date': 'Data inválida. Use YYYY-MM-DD.'})
+            sunday_class = get_object_or_404(
+                SundaySchoolClass.objects.filter(church=request.user.church),
+                pk=class_id,
+            )
+            session, _ = self._prepare_or_get(sunday_class, session_date)
+            serializer = SundaySchoolSessionSerializer(
+                session, context={'request': request}
+            )
+            return Response(serializer.data)
+        return super().list(request, *args, **kwargs)
+
+    def _prepare_or_get(self, sunday_class, session_date):
+        """Busca a aula; se ainda não existir, prepara a folha de chamada."""
+        session = SundaySchoolSession.objects.filter(
+            sunday_school_class=sunday_class,
+            date=session_date,
+        ).first()
+        if session is not None:
+            return session, False
+        with transaction.atomic():
+            session = SundaySchoolSession.objects.create(
+                sunday_school_class=sunday_class,
+                date=session_date,
+                registered_by=self.request.user,
+            )
+            rows = [
+                SundaySchoolAttendance(session=session, enrollment=enrollment)
+                for enrollment in sunday_class.enrollments.filter(is_active=True)
+            ]
+            if rows:
+                SundaySchoolAttendance.objects.bulk_create(rows)
+        return session, True
+
+    def create(self, request, *args, **kwargs):
+        """Consolida a aula: salva resumo + presenças em transação atômica."""
+        payload = request.data or {}
+        church = request.user.church
+        class_id = payload.get('sunday_school_class')
+        date_value = payload.get('date')
+        if not class_id or not date_value:
+            raise ValidationError({'detail': 'Informe sunday_school_class e date.'})
+        if church is None:
+            raise NotFound('Igreja não definida.')
+        sunday_class = get_object_or_404(
+            SundaySchoolClass.objects.filter(church=church), pk=class_id,
+        )
+        session_date = parse_date(str(date_value))
+        if session_date is None:
+            raise ValidationError({'date': 'Data inválida. Use YYYY-MM-DD.'})
+
+        from decimal import Decimal  # noqa: PLC0415
+
+        with transaction.atomic():
+            session, _ = SundaySchoolSession.objects.update_or_create(
+                sunday_school_class=sunday_class,
+                date=session_date,
+                defaults={
+                    'topic': (payload.get('topic') or '').strip(),
+                    'bibles_count': int(payload.get('bibles_count') or 0),
+                    'magazines_count': int(payload.get('magazines_count') or 0),
+                    'visitors_count': int(payload.get('visitors_count') or 0),
+                    'offering_amount': Decimal(str(payload.get('offering_amount') or '0.00')),
+                    'notes': (payload.get('notes') or '').strip(),
+                    'registered_by': request.user,
+                },
+            )
+            active_enrollments = sunday_class.enrollments.filter(is_active=True)
+            for row in payload.get('attendance') or []:
+                enrollment_id = row.get('enrollment_id')
+                enrollment = active_enrollments.filter(pk=enrollment_id).first()
+                if enrollment is None:
+                    raise ValidationError({
+                        'attendance': f'Matrícula inválida ou inativa: {enrollment_id}',
+                    })
+                SundaySchoolAttendance.objects.update_or_create(
+                    session=session,
+                    enrollment=enrollment,
+                    defaults={
+                        'is_present': bool(row.get('is_present', False)),
+                        'brought_bible': bool(row.get('brought_bible', False)),
+                        'brought_magazine': bool(row.get('brought_magazine', False)),
+                    },
+                )
+
+        serializer = SundaySchoolSessionSerializer(
+            session, context={'request': request}
+        )
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class SundaySchoolMonthlyReportView(APIView):
+    """Relatório mensal de EBD (matriz aluno × domingos + totais por classe)."""
+
+    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Igreja não definida.')
+        params = request.query_params
+        year = int(params.get('year') or timezone.localdate().year)
+        month = int(params.get('month') or timezone.localdate().month)
+        if month < 1 or month > 12:
+            raise ValidationError({'month': 'Mês inválido.'})
+        class_id = params.get('class_id')
+        report = services.build_sunday_school_monthly_report(
+            church, year, month, int(class_id) if class_id else None,
+        )
+        return Response(report)
+
+
+class SundaySchoolMonthlyReportPdfView(SundaySchoolMonthlyReportView):
+    """Exporta o Relatório Mensal de EBD em PDF (xhtml2pdf)."""
+
+    def get(self, request):
+        church = request.user.church
+        params = request.query_params
+        year = int(params.get('year') or timezone.localdate().year)
+        month = int(params.get('month') or timezone.localdate().month)
+        class_id = params.get('class_id')
+        report = services.build_sunday_school_monthly_report(
+            church, year, month, int(class_id) if class_id else None,
+        )
+        pdf = services.build_sunday_school_report_pdf(church, report)
+        filename = f'relatorio-ebd-{year}-{month:02d}.pdf'
+        response = HttpResponse(pdf, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response

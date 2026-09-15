@@ -5,6 +5,7 @@ from .models import (
     DepartmentCategory,
     FinancialEntry,
     FinancialExit,
+    FinancialReceipt,
     MonthlyClosing,
     Tither,
     TitheRecord,
@@ -48,6 +49,75 @@ class FinancialExitSerializer(serializers.ModelSerializer):
         if value <= 0:
             raise serializers.ValidationError('O valor deve ser maior que 0.')
         return value
+
+
+class FinancialReceiptSerializer(serializers.ModelSerializer):
+    type_display = serializers.CharField(
+        source='get_receipt_type_display', read_only=True,
+    )
+    full_number = serializers.CharField(read_only=True)
+    amount_extenso = serializers.SerializerMethodField()
+    pdf_url = serializers.SerializerMethodField()
+    member_name = serializers.CharField(
+        source='member.name', read_only=True, default=None,
+    )
+    linked_description = serializers.SerializerMethodField()
+    locked = serializers.SerializerMethodField()
+    auto_launch = serializers.BooleanField(write_only=True, default=False)
+
+    class Meta:
+        model = FinancialReceipt
+        fields = [
+            'id', 'church', 'year', 'number', 'full_number',
+            'receipt_type', 'type_display', 'date', 'amount',
+            'amount_extenso', 'description', 'category',
+            'favored_name', 'favored_document', 'favored_rg',
+            'favored_city', 'favored_state', 'pix',
+            'member', 'member_name', 'entry', 'exit', 'linked_description',
+            'auto_launch', 'auto_launched', 'locked', 'pdf_url',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'church', 'year', 'number', 'auto_launched',
+            'created_at', 'updated_at',
+        ]
+
+    def get_amount_extenso(self, obj) -> str:
+        from .amount_extenso import valor_por_extenso
+        return valor_por_extenso(obj.amount)
+
+    def get_pdf_url(self, obj):
+        if not obj.pdf:
+            return None
+        try:
+            return getattr(obj.pdf, 'url', None)
+        except Exception:
+            return None
+
+    def get_linked_description(self, obj) -> str:
+        """Descrição do lançamento vinculado (entrada/saída do caixa)."""
+        if obj.exit_id:
+            return obj.exit.description if obj.exit_id else ''
+        if obj.entry_id:
+            return obj.entry.service_description if obj.entry_id else ''
+        return ''
+
+    def get_locked(self, obj) -> bool:
+        return obj.is_locked()
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('O valor deve ser maior que 0.')
+        return value
+
+    def validate(self, attrs):
+        favored_name = (attrs.get('favored_name') or '').strip()
+        if not favored_name:
+            raise serializers.ValidationError(
+                {'favored_name': 'Informe o nome do favorecido/doador.'}
+            )
+        attrs['favored_name'] = favored_name
+        return attrs
 
 
 class TitherSerializer(serializers.ModelSerializer):

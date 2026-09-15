@@ -1,15 +1,18 @@
 ﻿"""Views do mÃ³dulo financeiro (EclÃ©sia IDB)."""
 import base64
+import os
 from datetime import datetime
 from decimal import Decimal
 from io import BytesIO
 from typing import Optional
 from django.core.files.uploadedfile import SimpleUploadedFile
 
-from django.db.models import Sum
+from django.db import IntegrityError, transaction
+from django.db.models import Q, Sum
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -21,8 +24,10 @@ from accounts.permissions import CanAccessTargetChurch, is_admin
 
 from .models import (
     CalendarEvent,
+    DepartmentCategory,
     FinancialEntry,
     FinancialExit,
+    FinancialReceipt,
     MonthlyValidation,
     Tither,
     TitheRecord,
@@ -32,6 +37,7 @@ from .serializers import (
     CategorySerializer,
     FinancialEntrySerializer,
     FinancialExitSerializer,
+    FinancialReceiptSerializer,
     PublicCalendarEventSerializer,
     TitherSerializer,
 )
@@ -1636,3 +1642,282 @@ class AdminChurchCaixaDownloadView(APIView):
             return err
         data = services.generate_filled_caixa(church, year, month)
         return _xls_file_response(data, f'caixa-idb-{year}-{month:02d}.xls')
+
+
+# --------------------------------------------------------------------------- #
+# Recibos Financeiros (saída/pagamento e entrada/doação) — PDF A4 em 2 vias.
+# --------------------------------------------------------------------------- #
+def _brl(value: Decimal) -> str:
+    """Formata um Decimal como moeda brasileira: R$ 1.850,00."""
+    formatted = f'{value:,.2f}'
+    return f'R$ {formatted.replace(",", "@").replace(".", ",").replace("@", ".")}'
+
+
+def next_receipt_number(church, year: int) -> int:
+    """Próximo número sequencial do ano (recalculado do máximo existente).
+
+    Como a numeração é recalculada a partir do máximo já gravado e há a
+    constraint única (church, year, number), saltos e duplicidades são
+    evitados mesmo sob concorrência (transação atômica no create).
+    """
+    last = (
+        FinancialReceipt.objects.filter(church=church, year=year)
+        .order_by('-number')
+        .first()
+    )
+    return (last.number + 1) if last else 1
+
+
+def build_receipt_pdf(receipt) -> bytes:
+    """Renderiza o recibo em PDF A4 (2 vias) via xhtml2pdf."""
+    from django.template.loader import render_to_string
+    from xhtml2pdf import pisa
+
+    from .amount_extenso import data_por_extenso, valor_por_extenso
+
+    church = receipt.church
+    amount_brl = _brl(receipt.amount)
+    amount_extenso = valor_por_extenso(receipt.amount)
+
+    # Cabeçalho institucional (endereço da igreja).
+    endereco = []
+    if church.street:
+        street = church.street
+        if church.number:
+            street += f', {church.number}'
+        endereco.append(street)
+    if church.neighborhood:
+        endereco.append(church.neighborhood)
+    localidade = ''
+    if church.city:
+        localidade = f'{church.city} - {church.state}'
+        if church.cep:
+            localidade += f' - CEP {church.cep}'
+    church_address = ', '.join(e for e in [', '.join(endereco), localidade] if e)
+
+    # Cláusulas de identificação do favorecido/doador.
+    document_clause = ''
+    if receipt.favored_document:
+        document_clause = f', {receipt.favored_document}'
+    if receipt.favored_rg:
+        document_clause += f', RG {receipt.favored_rg}'
+    location_clause = ''
+    if receipt.favored_city:
+        location = receipt.favored_city
+        if receipt.favored_state:
+            location += f'/{receipt.favored_state}'
+        location_clause = f', residente em {location}'
+
+    if receipt.receipt_type == FinancialReceipt.Type.SAIDA:
+        title_text = 'RECIBO DE PAGAMENTO / SAÍDA'
+        body_line_1 = (
+            f'Recebi de {receipt.favored_name}{document_clause}{location_clause}, '
+            f'a importância de {amount_brl} ({amount_extenso}).'
+        )
+        signature_label_left = 'FAVORECIDO(A) / PRESTADOR(A)'
+    else:
+        title_text = 'RECIBO DE DOAÇÃO / ENTRADA'
+        church_name = church.name or 'a igreja'
+        body_line_1 = (
+            f'{church_name} recebeu de {receipt.favored_name}'
+            f'{document_clause}{location_clause}, '
+            f'a importância de {amount_brl} ({amount_extenso}).'
+        )
+        signature_label_left = 'DOADOR(A) / COLABORADOR(A)'
+
+    body_line_2 = 'Referente a: {}.'.format(receipt.description or '-')
+
+    date_extenso = data_por_extenso(receipt.date)
+    city_date = f'{church.city}, {date_extenso}' if church.city else date_extenso
+
+    context = {
+        'church': church,
+        'receipt': receipt,
+        'receipt_number': receipt.full_number,
+        'title_text': title_text,
+        'amount': amount_brl,
+        'amount_extenso': amount_extenso,
+        'body_line_1': body_line_1,
+        'body_line_2': body_line_2,
+        'city_date': city_date,
+        'church_address': church_address.upper(),
+        'pastor_name': church.pastor_name or '-',
+        'treasurer_name': church.treasurer_name or '-',
+        'signature_label_left': signature_label_left,
+        'signature_label_right': 'TESOUREIRO(A) / PASTOR(A)',
+    }
+
+    html = render_to_string('finance/receipt_pdf.html', context)
+    result = BytesIO()
+    pisa_status = pisa.CreatePDF(html, dest=result, encoding='utf-8')
+    if pisa_status.err:
+        raise RuntimeError('Erro ao gerar o PDF do recibo financeiro.')
+    return result.getvalue()
+
+
+class BaseFinancialReceiptViewSet(viewsets.ModelViewSet):
+    """CRUD de recibos financeiros com numeração anual sequencial por igreja.
+
+    Apenas TESOUREIRO/PASTOR/ADMIN operam recibos (SECRETARIA não enxerga).
+    Meses fechados no Caixa IDB tornam o recibo somente leitura (exceto
+    admin/staff) — reimpressão/download permanece disponível.
+    """
+
+    serializer_class = FinancialReceiptSerializer
+    permission_classes = [IsAuthenticated]
+
+    def _church(self):
+        raise NotImplementedError
+
+    def get_queryset(self):
+        user = self.request.user
+        if not _can_manage_finance(user):
+            raise PermissionDenied('Acesso restrito à Tesouraria/Pastorado.')
+        qs = FinancialReceipt.objects.filter(church=self._church())
+        params = self.request.query_params
+        year = params.get('year')
+        if year and str(year).isdigit():
+            qs = qs.filter(year=int(str(year)))
+        rtype = params.get('receipt_type')
+        if rtype in FinancialReceipt.Type.values:
+            qs = qs.filter(receipt_type=rtype)
+        search = (params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(favored_name__icontains=search)
+                | Q(favored_document__icontains=search)
+                | Q(description__icontains=search)
+            )
+        return qs.select_related('member', 'entry', 'exit').order_by('-year', '-number')
+
+    def _check_locked(self, receipt):
+        if is_admin(self.request.user):
+            return
+        if receipt.is_locked():
+            raise PermissionDenied(
+                'O mês deste recibo está fechado no Caixa IDB. '
+                'Apenas download/reimpressão são permitidos.'
+            )
+
+    def _validate_links(self, church, attrs):
+        member = attrs.get('member')
+        if member is not None and member.church_id != church.id:
+            raise ValidationError({'member': 'O membro deve pertencer a esta igreja.'})
+        entry = attrs.get('entry')
+        if entry is not None and entry.church_id != church.id:
+            raise ValidationError({'entry': 'A entrada deve pertencer a esta igreja.'})
+        exit_record = attrs.get('exit')
+        if exit_record is not None and exit_record.church_id != church.id:
+            raise ValidationError({'exit': 'A saída deve pertencer a esta igreja.'})
+
+    @staticmethod
+    def _refresh_pdf(receipt):
+        from django.core.files.base import ContentFile
+        payload = build_receipt_pdf(receipt)
+        filename = f'recibo-{receipt.full_number}.pdf'
+        if receipt.pdf and receipt.pdf.name:
+            receipt.pdf.delete(save=False)
+        receipt.pdf.save(filename, ContentFile(payload))
+        receipt.save(update_fields=['pdf'])
+
+    @staticmethod
+    def _auto_launch(receipt):
+        """Lança automaticamente o movimento no caixa do mês (entrada/saída)."""
+        category = receipt.category or DepartmentCategory.ESPECIAL
+        if receipt.receipt_type == FinancialReceipt.Type.SAIDA and not receipt.exit_id:
+            exit_record = FinancialExit.objects.create(
+                church=receipt.church,
+                date=receipt.date,
+                description=receipt.description[:200],
+                category=category,
+                amount=receipt.amount,
+            )
+            receipt.exit = exit_record
+            receipt.save(update_fields=['exit'])
+        elif receipt.receipt_type == FinancialReceipt.Type.ENTRADA and not receipt.entry_id:
+            entry_record = FinancialEntry.objects.create(
+                church=receipt.church,
+                date=receipt.date,
+                service_description=receipt.description[:150],
+                category=category,
+                amount=receipt.amount,
+            )
+            receipt.entry = entry_record
+            receipt.save(update_fields=['entry'])
+
+    def perform_create(self, serializer):
+        church = self._church()
+        user = self.request.user
+        try:
+            with transaction.atomic():
+                self._validate_links(church, serializer.validated_data)
+                auto_launch = bool(
+                    serializer.validated_data.pop('auto_launch', False)
+                )
+                receipt_date = serializer.validated_data['date']
+                year = receipt_date.year
+                number = next_receipt_number(church, year)
+                receipt = serializer.save(
+                    church=church,
+                    year=year,
+                    number=number,
+                    created_by=user,
+                    auto_launched=auto_launch,
+                )
+                self._refresh_pdf(receipt)
+                if auto_launch:
+                    self._auto_launch(receipt)
+        except IntegrityError:
+            raise ValidationError(
+                {'detail': 'Não foi possível gerar o número do recibo. '
+                           'Tente novamente.'}
+            ) from IntegrityError
+
+    def perform_update(self, serializer):
+        receipt = self.get_object()
+        self._check_locked(receipt)
+        church = self._church()
+        self._validate_links(church, serializer.validated_data)
+        serializer.validated_data.pop('auto_launch', None)
+        serializer.save()
+        self._refresh_pdf(receipt)
+
+    def perform_destroy(self, instance):
+        self._check_locked(instance)
+        if instance.pdf and instance.pdf.name:
+            instance.pdf.delete(save=False)
+        instance.delete()
+
+    @action(detail=True, methods=['get'], url_path='pdf')
+    def download_pdf(self, request, pk=None):
+        """Download/reimpressão do PDF emitido (2 vias)."""
+        receipt = self.get_object()
+        if not receipt.pdf or not receipt.pdf.name:
+            return Response(
+                {'detail': 'Este recibo não possui PDF emitido.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        filename = os.path.basename(
+            receipt.pdf.name
+        ) or f'recibo-{receipt.full_number}.pdf'
+        return FileResponse(
+            receipt.pdf.open('rb'),
+            as_attachment=True,
+            filename=filename,
+        )
+
+
+class FinancialReceiptViewSet(BaseFinancialReceiptViewSet):
+    """Recibos da igreja ativa do usuário (Tesouraria/Pastor)."""
+
+    def _church(self):
+        return self.request.user.church
+
+
+class AdminChurchReceiptViewSet(BaseFinancialReceiptViewSet):
+    """Recibos de uma igreja específica (apenas staff)."""
+
+    permission_classes = [CanAccessTargetChurch]
+
+    def _church(self):
+        return _get_admin_church(self.kwargs['church_pk'])

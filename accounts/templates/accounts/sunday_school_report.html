@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8">
+    <title>Relatório Mensal de EBD</title>
+    <style>
+        @page { size: A4 landscape; margin: 1.2cm; }
+        body { font-family: Helvetica, Arial, sans-serif; font-size: 8px; color: #111; line-height: 1.4; }
+        .header { text-align: center; border-bottom: 3px double #7a1f1f; padding-bottom: 6px; margin-bottom: 10px; }
+        .header .church-name { font-size: 15px; font-weight: bold; color: #7a1f1f; text-transform: uppercase; }
+        h1 { text-align: center; font-size: 12px; letter-spacing: 1px; margin: 0 0 3px 0; text-transform: uppercase; color: #7a1f1f; }
+        .meta { text-align: center; font-size: 9px; color: #555; margin: 0 0 10px 0; }
+        .class-title { font-size: 11px; font-weight: bold; color: #7a1f1f; margin: 12px 0 4px 0; border-bottom: 1px solid #c9c9c9; padding-bottom: 2px; }
+        .class-info { font-size: 8px; color: #555; margin-bottom: 5px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+        th, td { border: 1px solid #bbb; padding: 3px 4px; text-align: center; font-size: 8px; }
+        th { background: #f0e6e6; color: #7a1f1f; }
+        td.student { text-align: left; }
+        .present { background: #e6f4ea; color: #1e7e34; font-weight: bold; }
+        .absent { background: #fdecea; color: #b02a2a; }
+        .noclass { color: #ccc; }
+        .risk { background: #fff4e5 !important; }
+        .totals td { background: #faf7f7; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="church-name">{{ church.name }}</div>
+    </div>
+
+    <h1>Relatório Mensal de Escola Bíblica Dominical</h1>
+    <p class="meta">{{ report.month_name|capfirst }} de {{ report.year }} — Assiduidade &amp; Consolidação de Aulas — gerado em {{ generated_date }}</p>
+
+    {% for class in report.classes %}
+    <div class="class-title">{{ class.class_name }} <span style="font-weight:normal;font-size:8px;color:#555;">— {{ class.category_display }}{% if class.room_location %} • {{ class.room_location }}{% endif %}</span></div>
+    <div class="class-info">Professor(a): {{ class.teacher_name }} &nbsp;|&nbsp; Domingos com aula: {{ class.session_count }} &nbsp;|&nbsp; Alunos ativos: {{ class.students|length }}</div>
+
+    <table>
+        <thead>
+            <tr>
+                <th style="min-width:110px;">Aluno</th>
+                {% for column in class.columns %}
+                <th>{{ column.date|date:'d/m' }}</th>
+                {% endfor %}
+                <th>Presenças</th>
+                <th>Freq.</th>
+                <th>Faltas seguidas</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for student in class.students %}
+            <tr>
+                <td class="student">{{ student.student_name }}</td>
+                {% for cell in student.attendance %}
+                    {% if cell is None %}
+                    <td class="noclass">—</td>
+                    {% elif cell %}
+                    <td class="present">P</td>
+                    {% else %}
+                    <td class="absent">F</td>
+                    {% endif %}
+                {% endfor %}
+                <td>{{ student.present_count }}/{{ student.total_sessions }}</td>
+                <td>{{ student.presence_percent }}%</td>
+                <td class="{% if student.risk_evasion %}risk{% endif %}">
+                    {% if student.risk_evasion %}{{ student.consecutive_absences }} (risco){% else %}{{ student.consecutive_absences }}{% endif %}
+                </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="{{ class.columns|length|add:4 }}" style="text-align:left;color:#888;">Nenhum aluno ativo nesta classe.</td></tr>
+            {% endfor %}
+        </tbody>
+        <tfoot>
+            <tr class="totals">
+                <td colspan="{{ class.columns|length|add:1 }}" style="text-align:right;">Oferta total: R$ {{ class.offering_total }}</td>
+                <td colspan="3">Média de bíblias: {{ class.avg_bibles|floatformat:1 }} | Revistas: {{ class.avg_magazines|floatformat:1 }} | Visitantes: {{ class.visitors_total }}</td>
+            </tr>
+        </tfoot>
+    </table>
+    {% empty %}
+    <p style="text-align:center;color:#888;margin-top:40px;">Nenhuma classe ativa neste mês.</p>
+    {% endfor %}
+
+    <div class="footer" style="margin-top:12px;text-align:center;font-size:8px;color:#999;">
+        Documento gerado pelo Sistema Gestão IDB — EBD/Igreja de Deus no Brasil
+    </div>
+</body>
+</html>

@@ -38,6 +38,9 @@ if 'test' in sys.argv:
 SECRET_KEY = config('SECRET_KEY', default='django-insecure-dev-key')
 DEBUG = config('DEBUG', default=True, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1', cast=Csv())
+# No Heroku (DYNO presente) o domínio "<app>.herokuapp.com" é sempre válido.
+if os.environ.get('DYNO'):
+    ALLOWED_HOSTS.append(f"{os.environ.get('HEROKU_APP_NAME') or 'app'}.herokuapp.com")
 
 
 # Application definition
@@ -60,6 +63,7 @@ INSTALLED_APPS = [
     # Apps locais
     'accounts',
     'finance',
+    'music',
 ]
 
 # Modelo de Usuário Customizado (essencial definir ANTES do primeiro migrate)
@@ -149,11 +153,22 @@ STORAGES = {
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# CORS
-CORS_ALLOWED_ORIGINS = [
-    config('FRONTEND_URL', default='http://localhost:3000'),
-]
+# CORS — aceita FRONTEND_URL (legado) ou uma lista CSV via CORS_ALLOWED_ORIGINS.
+CORS_ALLOWED_ORIGINS = config(
+    'CORS_ALLOWED_ORIGINS',
+    default=config('FRONTEND_URL', default='http://localhost:3000'),
+    cast=Csv(),
+)
 CORS_ALLOW_CREDENTIALS = True
+
+# Segurança de produção (Heroku/container): termina HTTPS no proxy e liga cookies seguros.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 # DRF & JWT
 REST_FRAMEWORK = {

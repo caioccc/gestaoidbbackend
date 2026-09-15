@@ -289,6 +289,9 @@ class ChurchMembership(models.Model):
         PASTOR = 'PASTOR', 'Pastor(a)'
         SECRETARIA = 'SECRETARIA', 'Secretário(a)'
         TESOUREIRO = 'TESOUREIRO', 'Tesoureiro(a)'
+        INTERCESSAO = 'INTERCESSAO', 'Intercessão & Visitação'
+        LOUVOR = 'LOUVOR', 'Líder de Louvor & Música'
+        MUSICO = 'MUSICO', 'Músico / Voluntário'
 
     user = models.ForeignKey(
         'User',
@@ -547,6 +550,363 @@ class Member(models.Model):
         self.save(update_fields=['public_hash', 'updated_at'])
 
 
+class SundaySchoolClass(models.Model):
+    """Classe da Escola Bíblica Dominical (EBD) da igreja ativa."""
+
+    class Category(models.TextChoices):
+        CHILDREN = 'CHILDREN', 'Infantil'
+        TEENS = 'TEENS', 'Adolescentes'
+        YOUTH = 'YOUTH', 'Jovens'
+        ADULTS = 'ADULTS', 'Adultos'
+        COUPLES = 'COUPLES', 'Casais'
+        DISCIPLESHIP = 'DISCIPLESHIP', 'Discipulado'
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='sunday_school_classes',
+        verbose_name='Igreja',
+    )
+    name = models.CharField('Nome da classe', max_length=120)
+    category = models.CharField(
+        'Categoria / Faixa',
+        max_length=20,
+        choices=Category.choices,
+        default=Category.ADULTS,
+    )
+    teacher_name = models.CharField('Professor(a)', max_length=150)
+    co_teacher_name = models.CharField('Professor(a) auxiliar', max_length=150, blank=True, default='')
+    room_location = models.CharField('Sala / Local', max_length=100, blank=True, default='')
+    is_active = models.BooleanField('Ativa', default=True)
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Criada por',
+    )
+    created_at = models.DateTimeField('Criada em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizada em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Classe de EBD'
+        verbose_name_plural = 'Classes de EBD'
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class SundaySchoolEnrollment(models.Model):
+    """Matrícula de um aluno em uma classe de EBD da igreja ativa.
+
+    O aluno pode estar vinculado a um membro do diretório ou ser avulso
+    (`member` nulo com `student_name` preenchido).
+    """
+
+    sunday_school_class = models.ForeignKey(
+        SundaySchoolClass,
+        on_delete=models.CASCADE,
+        related_name='enrollments',
+        verbose_name='Classe',
+    )
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.SET_NULL,
+        related_name='ebd_enrollments',
+        null=True,
+        blank=True,
+        verbose_name='Membro vinculado',
+    )
+    student_name = models.CharField('Nome do aluno', max_length=150)
+    phone = models.CharField('Telefone / WhatsApp', max_length=25, blank=True, default='')
+    is_active = models.BooleanField('Ativa', default=True)
+    joined_at = models.DateField('Matriculado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Matrícula de EBD'
+        verbose_name_plural = 'Matrículas de EBD'
+        ordering = ['student_name']
+
+    def __str__(self):
+        return f'{self.student_name} - {self.sunday_school_class.name}'
+
+
+class SundaySchoolSession(models.Model):
+    """Aula de EBD registrada (folha de chamada e consolidação da aula)."""
+
+    sunday_school_class = models.ForeignKey(
+        SundaySchoolClass,
+        on_delete=models.CASCADE,
+        related_name='sessions',
+        verbose_name='Classe',
+    )
+    date = models.DateField('Data da aula')
+    topic = models.CharField('Tema da aula', max_length=200, blank=True, default='')
+    bibles_count = models.PositiveIntegerField('Bíblias presentes', default=0)
+    magazines_count = models.PositiveIntegerField('Revistas trazidas', default=0)
+    visitors_count = models.PositiveIntegerField('Visitantes', default=0)
+    offering_amount = models.DecimalField(
+        'Oferta', max_digits=10, decimal_places=2, default=Decimal('0.00'),
+    )
+    notes = models.TextField('Observações', blank=True, default='')
+    registered_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Registrada por',
+    )
+    created_at = models.DateTimeField('Criada em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizada em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Aula de EBD'
+        verbose_name_plural = 'Aulas de EBD'
+        ordering = ['-date', '-id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['sunday_school_class', 'date'],
+                name='unique_session_per_class_date',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.sunday_school_class.name} - {self.date}'
+
+
+class SundaySchoolAttendance(models.Model):
+    """Presença individual em uma aula de EBD (folha de chamada)."""
+
+    session = models.ForeignKey(
+        SundaySchoolSession,
+        on_delete=models.CASCADE,
+        related_name='attendances',
+        verbose_name='Aula',
+    )
+    enrollment = models.ForeignKey(
+        SundaySchoolEnrollment,
+        on_delete=models.CASCADE,
+        related_name='attendances',
+        verbose_name='Matrícula',
+    )
+    is_present = models.BooleanField('Presente', default=False)
+    brought_bible = models.BooleanField('Trouxe Bíblia', default=False)
+    brought_magazine = models.BooleanField('Trouxe Revista', default=False)
+
+    class Meta:
+        verbose_name = 'Presença de EBD'
+        verbose_name_plural = 'Presenças de EBD'
+        ordering = ['enrollment__student_name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session', 'enrollment'],
+                name='unique_attendance_per_session_enrollment',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'presente' if self.is_present else 'ausente'
+        return f'{self.enrollment.student_name}: {state}'
+
+
+class PastoralVisit(models.Model):
+    """Visita pastoral planejada/realizada (mapa de visitação).
+
+    Pertence a uma competência (ano/mês) e pode estar vinculada a um membro
+    cadastrado ou a um ponto avulso. As coordenadas (latitude/longitude) são
+    salvas apenas ao nível da visita — o modelo Member permanece intocado.
+    """
+
+    class VisitType(models.TextChoices):
+        ROUTINE = 'ROUTINE', 'Rota / Rotina'
+        ILLNESS = 'ILLNESS', 'Doença'
+        BEREAVEMENT = 'BEREAVEMENT', 'Luto'
+        NEW_CONVERT = 'NEW_CONVERT', 'Novo Convertido'
+        SOCIAL_AID = 'SOCIAL_AID', 'Ação Social'
+        SPECIAL = 'SPECIAL', 'Especial'
+
+    class Status(models.TextChoices):
+        PLANNED = 'PLANNED', 'Planejada'
+        COMPLETED = 'COMPLETED', 'Realizada'
+        CANCELLED = 'CANCELLED', 'Cancelada'
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='pastoral_visits',
+        verbose_name='Igreja',
+    )
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.SET_NULL,
+        related_name='pastoral_visits',
+        null=True,
+        blank=True,
+        verbose_name='Membro',
+    )
+    target_name = models.CharField(
+        'Nome do visitado',
+        max_length=150,
+        blank=True,
+        help_text='Usado quando a visita é a um ponto avulso (sem membro cadastrado).',
+    )
+    target_phone = models.CharField('Telefone do visitado', max_length=20, blank=True)
+    prayer_request = models.ForeignKey(
+        'PrayerRequest',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='visits',
+        verbose_name='Pedido de Oração Vinculado',
+    )
+    visit_type = models.CharField(
+        'Tipo de visita',
+        max_length=20,
+        choices=VisitType.choices,
+        default=VisitType.ROUTINE,
+    )
+    status = models.CharField(
+        'Status',
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PLANNED,
+    )
+    competence_year = models.PositiveSmallIntegerField('Ano da competência')
+    competence_month = models.PositiveSmallIntegerField('Mês da competência')
+    scheduled_date = models.DateField('Data agendada')
+    completed_at = models.DateTimeField('Realizada em', null=True, blank=True)
+    visited_by = models.CharField('Visitadores', max_length=200, blank=True)
+    notes = models.TextField('Relatório da visita', blank=True)
+    needs_followup = models.BooleanField('Requer acompanhamento', default=False)
+
+    # Endereço + coordenadas persistidos apenas na visita.
+    cep = models.CharField('CEP', max_length=9, blank=True)
+    street = models.CharField('Logradouro', max_length=200, blank=True)
+    number = models.CharField('Número', max_length=20, blank=True)
+    neighborhood = models.CharField('Bairro', max_length=100, blank=True)
+    city = models.CharField('Cidade', max_length=100, blank=True)
+    state = models.CharField('UF', max_length=2, blank=True)
+    latitude = models.FloatField('Latitude', null=True, blank=True)
+    longitude = models.FloatField('Longitude', null=True, blank=True)
+
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        related_name='pastoral_visits_created',
+        null=True,
+        blank=True,
+        verbose_name='Criado por',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Visita Pastoral'
+        verbose_name_plural = 'Visitas Pastorais'
+        ordering = ['-scheduled_date', '-created_at']
+
+    def __str__(self):
+        return f'{self.get_visit_type_display()} - {self.target_name or getattr(self.member, "name", "")} ({self.competence_month}/{self.competence_year})'
+
+    @property
+    def display_name(self) -> str:
+        """Nome exibido: membro cadastrado ou ponto avulso."""
+        if self.member_id:
+            return self.member.name
+        return self.target_name
+
+
+class PrayerRequest(models.Model):
+    """Pedido de Oração: captação pública (agregador de links) ou interna (intercessão)."""
+
+    class Category(models.TextChoices):
+        HEALTH = 'HEALTH', 'Saúde / Enfermidade'
+        FAMILY = 'FAMILY', 'Família & Lar'
+        SPIRITUAL = 'SPIRITUAL', 'Vida Espiritual'
+        FINANCIAL = 'FINANCIAL', 'Emprego & Provisão'
+        GRIEF = 'GRIEF', 'Luto & Consolo'
+        THANKSGIVING = 'THANKSGIVING', 'Ações de Graças'
+        OTHER = 'OTHER', 'Outro Motivo'
+
+    class PreferredPeriod(models.TextChoices):
+        ANY = 'ANY', 'Qualquer Horário'
+        MORNING = 'MORNING', 'Manhã'
+        AFTERNOON = 'AFTERNOON', 'Tarde'
+        NIGHT = 'NIGHT', 'Noite'
+
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Novo / Aguardando'
+        PRAYING = 'PRAYING', 'Em Oração'
+        VISIT_SCHEDULED = 'VISIT_SCHEDULED', 'Visita Agendada'
+        ANSWERED = 'ANSWERED', 'Respondido / Testemunho'
+        ARCHIVED = 'ARCHIVED', 'Arquivado'
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='prayer_requests',
+        verbose_name='Igreja',
+    )
+    requester_name = models.CharField('Nome do solicitante', max_length=150)
+    requester_phone = models.CharField('Telefone do solicitante', max_length=25, blank=True, default='')
+    is_anonymous = models.BooleanField('Solicita anonimato', default=False)
+    category = models.CharField(
+        'Categoria do pedido',
+        max_length=30,
+        choices=Category.choices,
+        default=Category.SPIRITUAL,
+    )
+    description = models.TextField('Descrição / Motivo da oração')
+    wants_visit = models.BooleanField('Deseja visita pastoral', default=False)
+    cep = models.CharField('CEP', max_length=9, blank=True, default='')
+    street = models.CharField('Logradouro', max_length=200, blank=True, default='')
+    number = models.CharField('Número', max_length=20, blank=True, default='')
+    neighborhood = models.CharField('Bairro', max_length=100, blank=True, default='')
+    city = models.CharField('Cidade', max_length=100, blank=True, default='')
+    state = models.CharField('Estado (UF)', max_length=2, blank=True, default='')
+    preferred_period = models.CharField(
+        'Período preferido',
+        max_length=20,
+        choices=PreferredPeriod.choices,
+        default=PreferredPeriod.ANY,
+    )
+    status = models.CharField(
+        'Status',
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    assigned_to = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_prayer_requests',
+        verbose_name='Responsável',
+    )
+    pastoral_notes = models.TextField('Anotações pastorais', blank=True, default='')
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Pedido de Oração'
+        verbose_name_plural = 'Pedidos de Oração'
+        ordering = ['-created_at']
+
+    @property
+    def requester_display(self) -> str:
+        """Nome exibido: respeita o pedido de anonimato."""
+        if self.is_anonymous:
+            return 'Anônimo (Sigilo)'
+        return self.requester_name
+
+    def __str__(self) -> str:
+        requester = 'Anônimo' if self.is_anonymous else self.requester_name
+        return f'{requester} — {self.get_category_display()}'
+
+
 class CertificateTemplate(models.Model):
     """Modelos e molduras de certificados eclesiais da igreja.
 
@@ -700,6 +1060,9 @@ class MessageTemplate(models.Model):
         CARE = 'CARE', 'Cuidado / Ausência'
         VERSE = 'VERSE', 'Versículo'
         CARD_EXPIRING = 'CARD_EXPIRING', 'Carteirinha a Vencer'
+        EBD_CLASS_ANNOUNCEMENT = 'EBD_CLASS_ANNOUNCEMENT', 'Aviso de Aula (EBD)'
+        EBD_ABSENCE_RESCUE = 'EBD_ABSENCE_RESCUE', 'Resgate de Ausência (EBD)'
+        EBD_BIRTHDAY = 'EBD_BIRTHDAY', 'Aniversariante da Semana (EBD)'
         CUSTOM = 'CUSTOM', 'Personalizado'
 
     church = models.ForeignKey(
@@ -710,7 +1073,7 @@ class MessageTemplate(models.Model):
     )
     title = models.CharField('Título', max_length=120)
     category = models.CharField(
-        'Categoria', max_length=20, choices=Category.choices, default=Category.CUSTOM,
+        'Categoria', max_length=30, choices=Category.choices, default=Category.CUSTOM,
     )
     content = models.TextField(
         'Conteúdo da mensagem',
@@ -761,7 +1124,7 @@ class MemberContactLog(models.Model):
         verbose_name='Contatado por',
     )
     category = models.CharField(
-        'Categoria', max_length=20, choices=MessageTemplate.Category.choices,
+        'Categoria', max_length=30, choices=MessageTemplate.Category.choices,
         default=MessageTemplate.Category.CUSTOM,
     )
     message_content = models.TextField('Conteúdo enviado', blank=True, default='')
@@ -921,6 +1284,7 @@ class ChurchPublicLink(models.Model):
         INSTAGRAM = 'INSTAGRAM', 'Instagram'
         CALENDAR = 'CALENDAR', 'Agenda de Cultos'
         MEMBERSHIP = 'MEMBERSHIP', 'Ficha de Membro / Cadastro'
+        PRAYER = 'PRAYER', 'Pedido de Oração'
 
     PIX_TYPES = ['CNPJ', 'CPF', 'Telefone', 'E-mail', 'Chave Aleatória']
 

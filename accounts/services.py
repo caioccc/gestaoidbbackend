@@ -849,9 +849,16 @@ def normalize_whatsapp_phone(phone) -> str | None:
     return digits
 
 
-def render_message_template(content, member, church) -> str:
-    """Interpola os tokens `{{NOME}}`, `{{PRIMEIRO_NOME}}`, `{{IGREJA}}` e `{{CIDADE}}`."""
-    name = (member.name or '').strip()
+def render_message_template(content, member, church, extra=None) -> str:
+    """Interpola os tokens `{{NOME}}`, `{{PRIMEIRO_NOME}}`, `{{IGREJA}}` e
+    `{{CIDADE}}` (mais tokens extras via `extra`, ex.: `{{CLASSE}}`)."""
+    name = (member.name or '') if member else ''
+    return render_message_with_tokens(content, name, church, extra=extra)
+
+
+def render_message_with_tokens(content, name, church, extra=None) -> str:
+    """Interpola os tokens da mensagem a partir de um nome qualquer."""
+    name = (name or '').strip()
     first_name = name.split(' ', 1)[0]
     replacements = {
         '{{NOME}}': name,
@@ -859,6 +866,8 @@ def render_message_template(content, member, church) -> str:
         '{{IGREJA}}': church.name if church else '',
         '{{CIDADE}}': getattr(church, 'city', '') or '',
     }
+    for key, value in (extra or {}).items():
+        replacements['{{' + key + '}}'] = value
     result = content or ''
     for token, value in replacements.items():
         result = result.replace(token, value)
@@ -1077,6 +1086,50 @@ def build_members_report_pdf(church, members, on=None) -> bytes:
     status = pisa.CreatePDF(html, dest=output, encoding='utf-8')
     if status.err:
         raise RuntimeError('Erro ao gerar o PDF do rol de membros.')
+    return output.getvalue()
+
+
+def build_prayer_book_pdf(church, requests, on=None) -> bytes:
+    """Gera o PDF do Caderno de Oração com os motivos ativos (xhtml2pdf).
+
+    `requests` é uma QuerySet/lista já escopada pela view (somente pedidos
+    ativos da igreja ativa).
+    """
+    from io import BytesIO
+
+    from django.utils import timezone
+
+    from xhtml2pdf import pisa
+
+    today = on or timezone.localdate()
+    requests = list(requests)
+    request_list = []
+    for request in requests:
+        request_list.append({
+            'requester_display': (
+                'Anônimo (Sigilo)' if request.is_anonymous else request.requester_name
+            ),
+            'get_category_display': request.get_category_display(),
+            'description': request.description,
+            'wants_visit': request.wants_visit,
+            'neighborhood': request.neighborhood,
+            'preferred_period': request.preferred_period,
+            'get_preferred_period_display': request.get_preferred_period_display(),
+            'created_at': request.created_at,
+        })
+    context = {
+        'church': church,
+        'requests': request_list,
+        'generated_date': (
+            f'{today.day} de {_MONTH_PT[today.month]} de {today.year}'
+        ),
+    }
+
+    html = render_to_string('accounts/prayer_book.html', context)
+    output = BytesIO()
+    status = pisa.CreatePDF(html, dest=output, encoding='utf-8')
+    if status.err:
+        raise RuntimeError('Erro ao gerar o PDF do caderno de oração.')
     return output.getvalue()
 
 
@@ -1368,4 +1421,244 @@ def build_base_pdf_certificate(certificate) -> bytes:
 
     output = BytesIO()
     writer.write(output)
+    return output.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Escola Bíblica Dominical (EBD): WhatsApp semiautomático + relatório mensal
+# ---------------------------------------------------------------------------
+
+SUNDAY_SCHOOL_TEMPLATES = [
+    {
+        'title': 'Aviso de Aula (EBD)',
+        'category': 'EBD_CLASS_ANNOUNCEMENT',
+        'content': (
+            '🙏 {{PRIMEIRO_NOME}}, amanhã temos Escola Bíblica Dominical! '
+            'Esperamos você na classe {{CLASSE}}.\n\n'
+            'Tema da próxima aula: {{TEMA}}\nUm abraço de toda a turma 💙'
+        ),
+    },
+    {
+        'title': 'Resgate de Ausência (EBD)',
+        'category': 'EBD_ABSENCE_RESCUE',
+        'content': (
+            '💙 Oi, {{PRIMEIRO_NOME}}! Sentimos a sua falta na EBD, na classe '
+            '{{CLASSE}}. Queremos saber como você está. Se precisar conversar, '
+            'orar ou de qualquer ajuda, estamos bem pertinho. Um abraço da {{IGREJA}}.'
+        ),
+    },
+    {
+        'title': 'Aniversariante da Semana (EBD)',
+        'category': 'EBD_BIRTHDAY',
+        'content': (
+            '🎉 Feliz aniversário, {{PRIMEIRO_NOME}}! Que Deus abençoe o seu novo '
+            'ano de vida com muita paz e alegria.\n\nÉ um presente ter você na '
+            'classe {{CLASSE}}. Com carinho, {{PROFESSOR}} 🎂'
+        ),
+    },
+]
+
+
+def default_sunday_school_content(kind) -> str:
+    for data in SUNDAY_SCHOOL_TEMPLATES:
+        if data['category'] == kind:
+            return data['content']
+    return ''
+
+
+def build_sunday_school_whatsapp_url(kind, enrollment, church, topic='') -> str | None:
+    """Monta a URL `wa.me` com o template EBD renderizado para um aluno.
+
+    `kind` deve ser uma categoria de `MessageTemplate` EBD (ex.:
+    `EBD_ABSENCE_RESCUE`). Sem modelo ativo, usa o texto padrão embutido.
+    """
+    from .models import MessageTemplate  # noqa: PLC0415
+
+    phone = normalize_whatsapp_phone(enrollment.phone)
+    if not phone:
+        return None
+    template = MessageTemplate.objects.filter(
+        church=church,
+        category=kind,
+        is_active=True,
+    ).first()
+    content = (template.content if template else None) or default_sunday_school_content(kind) or ''
+    extra = {
+        'CLASSE': enrollment.sunday_school_class.name,
+        'TEMA': topic or '',
+        'PROFESSOR': enrollment.sunday_school_class.teacher_name or '',
+    }
+    message = render_message_with_tokens(content, enrollment.student_name, church, extra=extra)
+    return build_whatsapp_url(phone, message)
+
+
+def _sundays_of_month(year, month):
+    import datetime  # noqa: PLC0415
+
+    if month == 12:
+        last_day = datetime.date(year + 1, 1, 1) - datetime.timedelta(days=1)
+    else:
+        last_day = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1)
+    days = []
+    current = datetime.date(year, month, 1)
+    while current <= last_day:
+        if current.weekday() == 6:
+            days.append(current)
+        current += datetime.timedelta(days=1)
+    return days
+
+
+def build_sunday_school_monthly_report(church, year, month, class_id=None):
+    """Matriz de frequência mensal (aluno × domingos) por classe de EBD.
+
+    Retorna, por classe: colunas (domingos do mês com/sem aula), alunos com a
+    grade de P/F, % de presença, totais de oferta/materiais/visitantes e risco
+    de evasão (3+ faltas consecutivas entre os domingos com aula).
+    """
+    from decimal import Decimal  # noqa: PLC0415
+    from datetime import date  # noqa: PLC0415
+
+    from .models import SundaySchoolClass, SundaySchoolEnrollment, SundaySchoolSession  # noqa: PLC0415
+
+    from .models import SundaySchoolAttendance  # noqa: PLC0415
+
+    classes_qs = SundaySchoolClass.objects.filter(church=church).order_by('name')
+    if class_id is not None:
+        classes_qs = classes_qs.filter(pk=class_id)
+
+    sundays = _sundays_of_month(year, month)
+    report = {
+        'year': year,
+        'month': month,
+        'month_name': _MONTH_PT[month] if 1 <= month <= 12 else str(month),
+        'classes': [],
+    }
+
+    for sunday_class in classes_qs:
+        sessions = list(
+            SundaySchoolSession.objects.filter(
+                sunday_school_class=sunday_class,
+                date__year=year,
+                date__month=month,
+            ).order_by('date')
+        )
+        sessions_by_date = {session.date: session for session in sessions}
+        attendance_map = {
+            session.id: {
+                a.enrollment_id: a
+                for a in SundaySchoolAttendance.objects.filter(session=session)
+            }
+            for session in sessions
+        }
+
+        columns = []
+        for day in sundays:
+            session = sessions_by_date.get(day)
+            columns.append({
+                'date': day.isoformat(),
+                'session_id': session.id if session else None,
+                'topic': session.topic if session else '',
+            })
+
+        enrollments = list(
+            SundaySchoolEnrollment.objects.filter(
+                sunday_school_class=sunday_class,
+                is_active=True,
+            ).order_by('student_name')
+        )
+
+        students = []
+        for enrollment in enrollments:
+            row = []
+            present_count = 0
+            consecutive_absences = 0
+            max_absences = 0
+            for column in columns:
+                session = sessions_by_date.get(date.fromisoformat(column['date']))
+                if session is None:
+                    row.append(None)
+                    continue
+                attendance = attendance_map[session.id].get(enrollment.id)
+                is_present = bool(attendance and attendance.is_present)
+                row.append(is_present)
+                if is_present:
+                    present_count += 1
+                    consecutive_absences = 0
+                else:
+                    consecutive_absences += 1
+                    max_absences = max(max_absences, consecutive_absences)
+
+            session_count = len(sessions)
+            presence_percent = round(present_count * 100 / session_count, 1) if session_count else 0
+            risk = max_absences >= 3
+            whatsapp_url = None
+            if risk:
+                whatsapp_url = build_sunday_school_whatsapp_url(
+                    'EBD_ABSENCE_RESCUE', enrollment, church,
+                )
+            students.append({
+                'enrollment_id': enrollment.id,
+                'student_name': enrollment.student_name,
+                'phone': enrollment.phone or '',
+                'whatsapp_url': whatsapp_url,
+                'attendance': row,
+                'present_count': present_count,
+                'total_sessions': session_count,
+                'presence_percent': presence_percent,
+                'consecutive_absences': max_absences,
+                'risk_evasion': risk,
+            })
+
+        students.sort(key=lambda s: s['presence_percent'])
+
+        class_entry = {
+            'class_id': sunday_class.id,
+            'class_name': sunday_class.name,
+            'category_display': sunday_class.get_category_display(),
+            'teacher_name': sunday_class.teacher_name,
+            'room_location': sunday_class.room_location,
+            'columns': columns,
+            'students': students,
+            'offering_total': str(
+                sum((s.offering_amount for s in sessions), Decimal('0.00'))
+            ),
+            'visitors_total': sum(s.visitors_count for s in sessions),
+            'session_count': session_count,
+        }
+        if sessions:
+            class_entry['avg_bibles'] = round(
+                sum(s.bibles_count for s in sessions) / len(sessions), 1
+            )
+            class_entry['avg_magazines'] = round(
+                sum(s.magazines_count for s in sessions) / len(sessions), 1
+            )
+        else:
+            class_entry['avg_bibles'] = 0
+            class_entry['avg_magazines'] = 0
+        report['classes'].append(class_entry)
+
+    return report
+
+
+def build_sunday_school_report_pdf(church, report) -> bytes:
+    """Gera o PDF do Relatório Mensal de EBD (xhtml2pdf)."""
+    from io import BytesIO  # noqa: PLC0415
+
+    from django.utils import timezone  # noqa: PLC0415
+
+    from xhtml2pdf import pisa  # noqa: PLC0415
+
+    context = {
+        'church': church,
+        'report': report,
+        'generated_date': (
+            f'{timezone.localdate().day} de {_MONTH_PT[timezone.localdate().month]} '
+            f'de {timezone.localdate().year}'
+        ),
+    }
+    html = render_to_string('accounts/sunday_school_report.html', context)
+    output = BytesIO()
+    pisa_status = pisa.CreatePDF(html, dest=output, encoding='utf-8')
+    if pisa_status.err:
+        raise RuntimeError('Erro ao gerar o PDF do relatório mensal de EBD.')
     return output.getvalue()

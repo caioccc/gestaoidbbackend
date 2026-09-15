@@ -46,7 +46,8 @@ RUN mkdir -p /app/staticfiles \
 # Expõe a porta do Django/Gunicorn
 EXPOSE 8000
 
-# Comando padrão: roda migrations, cria superusuários iniciais e sobe o Gunicorn
+# Comando padrão: roda migrations, cria superusuários iniciais e sobe o Gunicorn.
+# No Heroku a porta é injetada via $PORT; local/Docker usa 8000.
 CMD ["sh", "-c", "python manage.py migrate --noinput \
     && python manage.py create_initial_superusers \
-    && gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3"]
+    && gunicorn core.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 2 --timeout 120"]

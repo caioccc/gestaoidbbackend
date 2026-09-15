@@ -1,0 +1,8 @@
+# Deploy no Heroku via Container Registry (Heroku/GitHub Action "heroku-container-build")
+# 1. Build da imagem a partir do Dockerfile (que já instala pango/cairo p/ WeasyPrint)
+# 2. O processo "web" usa o CMD do Dockerfile (migrate + create_initial_superusers + gunicorn)
+build:
+  docker:
+    web:
+      dockerfile: Dockerfile
+      context: .
