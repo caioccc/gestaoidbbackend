@@ -2710,10 +2710,6 @@ class PastoralVisitViewSet(viewsets.ModelViewSet):
                     prayer.save(update_fields=['status'])
 
     def perform_destroy(self, instance):
-        if instance.status == PastoralVisit.Status.COMPLETED:
-            raise ValidationError(
-                {'detail': 'Visitas realizadas não podem ser excluídas.'}
-            )
         super().perform_destroy(instance)
 
     def _snapshot_from_member(self, data):
