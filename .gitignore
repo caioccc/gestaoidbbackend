@@ -18,7 +18,7 @@ local_settings.py
 # Env / segredos
 .env
 .env.local
-!.env.example
+.env.example
 
 # Ferramentas / IDE
 .pytest_cache/
