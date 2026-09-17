@@ -1390,6 +1390,11 @@ class CalendarEventViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         user = self.request.user
+        if user.church is None:
+            raise ValidationError({
+                'detail': 'Você não possui uma igreja ativa. Selecione uma igreja '
+                          'no perfil antes de criar eventos.'
+            })
         audience = serializer.validated_data.get('audience', '')
         forced = _default_audience_for(user)
         if forced:

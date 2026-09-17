@@ -1285,6 +1285,7 @@ class ChurchPublicLink(models.Model):
         CALENDAR = 'CALENDAR', 'Agenda de Cultos'
         MEMBERSHIP = 'MEMBERSHIP', 'Ficha de Membro / Cadastro'
         PRAYER = 'PRAYER', 'Pedido de Oração'
+        GROWTH_GROUPS = 'GROWTH_GROUPS', 'Grupos de Crescimento'
 
     PIX_TYPES = ['CNPJ', 'CPF', 'Telefone', 'E-mail', 'Chave Aleatória']
 

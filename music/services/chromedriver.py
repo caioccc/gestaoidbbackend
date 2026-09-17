@@ -16,10 +16,14 @@ def is_heroku() -> bool:
 
 
 def get_chrome_binary() -> str | None:
-    if is_heroku():
-        return '/app/.chrome-for-testing/chrome-linux64/chrome'
+    # DOCKER_RUN é verificado ANTES de is_heroku(): quando o deploy no Heroku
+    # é feito via Container Registry (heroku.yml -> build: docker:), o Heroku
+    # injeta DYNO=1 mesmo assim, mas o binário instalado é o /usr/bin/chromium
+    # do Dockerfile — não o pacote "chrome-for-testing" do buildpack clássico.
     if getattr(settings, 'DOCKER_RUN', False):
         return '/usr/bin/chromium'
+    if is_heroku():
+        return '/app/.chrome-for-testing/chrome-linux64/chrome'
     return None
 
 
@@ -38,20 +42,25 @@ def create_chrome_driver():
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
     )
-    if is_heroku():
+    if getattr(settings, 'DOCKER_RUN', False):
+        chrome_options.add_argument('--disable-setuid-sandbox')
+        chrome_options.binary_location = '/usr/bin/chromium'
+        if not os.path.exists(chrome_options.binary_location):
+            raise FileNotFoundError(
+                'DOCKER_RUN=True mas /usr/bin/chromium não existe na imagem; '
+                'confira se o Dockerfile instala os pacotes chromium/chromium-driver.'
+            )
+    elif is_heroku():
         chrome_options.add_argument('--disable-setuid-sandbox')
         chrome_options.add_argument('--single-process')
         chrome_options.binary_location = '/app/.chrome-for-testing/chrome-linux64/chrome'
-        # No Heroku, se o binário do Chrome não foi instalado no build
-        # (buildpack "chrome-for-testing" / chromedriver via heroku.yml),
-        # falha rápido em vez de tentar baixar o driver em runtime (~150MB).
+        # Só chega aqui em deploy via buildpack clássico (sem Dockerfile).
+        # No seu caso (Container Registry) DOCKER_RUN=True cobre o cenário acima.
         if not os.path.exists(chrome_options.binary_location):
             raise FileNotFoundError(
                 'Chrome não instalado no dyno Heroku; habilite o buildpack '
                 'de Chrome ou deixe as camadas requests/yt-dlp resolverem.'
             )
-    elif getattr(settings, 'DOCKER_RUN', False):
-        chrome_options.binary_location = '/usr/bin/chromium'
 
     try:
         return Chrome(options=chrome_options)

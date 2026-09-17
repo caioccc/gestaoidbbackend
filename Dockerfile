@@ -29,7 +29,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     postgresql-client \
+    chromium \
+    chromium-driver \
+    fonts-liberation \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    libx11-xcb1 \
+    libxss1 \
+    libasound2 \
+    libgbm1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Sinaliza para o app (music/services/chromedriver.py) que o Chromium do
+# sistema está em /usr/bin/chromium, independentemente de o dyno ter DYNO=1
+# (o Heroku injeta DYNO mesmo em deploy via Container Registry).
+ENV DOCKER_RUN=True
 
 # Instala as dependências Python (copia apenas o requirements p/ aproveitar cache)
 COPY requirements.txt .

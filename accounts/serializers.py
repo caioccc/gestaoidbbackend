@@ -1533,6 +1533,7 @@ DEFAULT_LINK_ICONS = {
     ChurchPublicLink.LinkType.CALENDAR: 'calendar',
     ChurchPublicLink.LinkType.MEMBERSHIP: 'user-plus',
     ChurchPublicLink.LinkType.PRAYER: 'pray',
+    ChurchPublicLink.LinkType.GROWTH_GROUPS: 'users',
 }
 
 
@@ -1700,6 +1701,7 @@ class ChurchPublicLinkSerializer(serializers.ModelSerializer):
             ChurchPublicLink.LinkType.CALENDAR,
             ChurchPublicLink.LinkType.MEMBERSHIP,
             ChurchPublicLink.LinkType.PRAYER,
+            ChurchPublicLink.LinkType.GROWTH_GROUPS,
         ):
             # Sistema: a URL é resolvida a partir dos hashes públicos da igreja.
             attrs['url'] = ''
@@ -1803,6 +1805,8 @@ class PublicChurchPublicLinkSerializer(serializers.ModelSerializer):
             if obj.church.member_form_hash:
                 return f'{settings.FRONTEND_URL}/formulario/{obj.church.member_form_hash}'
             return ''
+        if obj.link_type == ChurchPublicLink.LinkType.GROWTH_GROUPS:
+            return f'{settings.FRONTEND_URL}/gc/{obj.church.slug}'
         return obj.url
 
 
@@ -1830,6 +1834,7 @@ class PublicChurchLinksSerializer(serializers.Serializer):
             ChurchPublicLink.LinkType.CALENDAR,
             ChurchPublicLink.LinkType.MEMBERSHIP,
             ChurchPublicLink.LinkType.PRAYER,
+            ChurchPublicLink.LinkType.GROWTH_GROUPS,
         )
         stored = set(
             church.public_links.filter(link_type__in=system_types)
@@ -1858,6 +1863,14 @@ class PublicChurchLinksSerializer(serializers.Serializer):
                 'title': 'Pedido de Oração',
                 'url': '',
                 'icon_key': 'pray',
+                'highlight': False,
+            })
+        if ChurchPublicLink.LinkType.GROWTH_GROUPS not in stored:
+            system.append({
+                'link_type': ChurchPublicLink.LinkType.GROWTH_GROUPS,
+                'title': 'Grupos de Crescimento',
+                'url': f'{settings.FRONTEND_URL}/gc/{church.slug}',
+                'icon_key': 'users',
                 'highlight': False,
             })
         return system

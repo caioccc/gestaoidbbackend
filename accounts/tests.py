@@ -3986,12 +3986,14 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
 
         listed = client.get(reverse('church-link-list'))
         self.assertEqual(listed.status_code, status.HTTP_200_OK)
-        # 3 padrões (Agenda de Cultos / Ficha de Membro / Pedido de Oração) + o link criado
-        self.assertEqual(len(listed.data), 4)
+        # 4 padrões (Agenda de Cultos / Ficha de Membro / Pedido de Oração /
+        # Grupos de Crescimento) + o link criado
+        self.assertEqual(len(listed.data), 5)
         titles = {l['title'] for l in listed.data}
         self.assertIn('Agenda de Cultos', titles)
         self.assertIn('Ficha de Membro / Cadastro', titles)
         self.assertIn('Pedido de Oração', titles)
+        self.assertIn('Grupos de Crescimento', titles)
 
     def test_secretaria_can_manage(self):
         client = self._client(self.secretaria)
@@ -4129,7 +4131,7 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
         )
         listed = self._client(self.pastor).get(reverse('church-link-list'))
         # apenas os padrões da igreja ativa; o link alheio não aparece
-        self.assertEqual(len(listed.data), 3)
+        self.assertEqual(len(listed.data), 4)
         ids = [l['id'] for l in listed.data]
         self.assertNotIn(link.pk, ids)
 
@@ -4266,6 +4268,14 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
         system_types = {s['link_type'] for s in data['system_links']}
         self.assertIn('CALENDAR', system_types)
         self.assertIn('MEMBERSHIP', system_types)
+        self.assertIn('GROWTH_GROUPS', system_types)
+        growth = next(
+            s for s in data['system_links']
+            if s['link_type'] == 'GROWTH_GROUPS'
+        )
+        self.assertEqual(growth['title'], 'Grupos de Crescimento')
+        self.assertTrue(growth['url'].endswith(f'/gc/{self.sede.slug}'))
+        self.assertEqual(growth['icon_key'], 'users')
 
     def test_public_exposes_pix_amount_modes(self):
         open_pix = self._create_link(

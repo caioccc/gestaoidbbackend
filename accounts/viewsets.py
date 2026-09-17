@@ -1236,6 +1236,7 @@ class ChurchPublicLinkViewSet(viewsets.ModelViewSet):
         (ChurchPublicLink.LinkType.CALENDAR, 'Agenda de Cultos', 'calendar'),
         (ChurchPublicLink.LinkType.MEMBERSHIP, 'Ficha de Membro / Cadastro', 'user-plus'),
         (ChurchPublicLink.LinkType.PRAYER, 'Pedido de Oração', 'pray'),
+        (ChurchPublicLink.LinkType.GROWTH_GROUPS, 'Grupos de Crescimento', 'users'),
     )
 
     def get_queryset(self):
