@@ -178,6 +178,8 @@ class WorshipSetlistSerializer(serializers.ModelSerializer):
 class SongSerializer(serializers.ModelSerializer):
     band_name = serializers.CharField(source='band.name', read_only=True)
     band_color = serializers.CharField(source='band.color', read_only=True)
+    times_played = serializers.SerializerMethodField()
+    last_played = serializers.SerializerMethodField()
 
     class Meta:
         model = Song
@@ -188,7 +190,24 @@ class SongSerializer(serializers.ModelSerializer):
             'bpm', 'time_signature', 'chords', 'chords_json', 'lyrics',
             'tags', 'times_played', 'last_played', 'is_active', 'created_at',
         ]
-        read_only_fields = ['church', 'times_played', 'last_played']
+        read_only_fields = ['church']
+
+    def get_times_played(self, obj):
+        worship = getattr(obj, 'worship_plays', None)
+        band = getattr(obj, 'band_plays', None)
+        if worship is None and band is None:
+            return obj.times_played
+        return (worship or 0) + (band or 0)
+
+    def get_last_played(self, obj):
+        candidates = [
+            getattr(obj, 'worship_last', None),
+            getattr(obj, 'band_last', None),
+        ]
+        candidates = [d for d in candidates if d]
+        if candidates:
+            return max(candidates)
+        return obj.last_played
 
     def validate(self, attrs):
         title = (attrs.get('title') or '').strip()
@@ -199,12 +218,13 @@ class SongSerializer(serializers.ModelSerializer):
 
 
 class SongHistorySerializer(serializers.Serializer):
-    """Histórico de cultos em que a música foi tocada."""
+    """Histórico de setlists (cultos e bandas) em que a música foi tocada."""
 
     date = serializers.DateField()
-    roster_id = serializers.IntegerField()
-    theme = serializers.CharField(required=False, allow_blank=True)
-    custom_key = serializers.CharField(required=False, allow_blank=True)
+    name = serializers.CharField(required=False, allow_blank=True)
+    key = serializers.CharField(required=False, allow_blank=True)
+    kind = serializers.CharField(required=False, allow_blank=True)
+    setlist_id = serializers.IntegerField(required=False)
 
 
 class SongEnrichPayloadSerializer(serializers.Serializer):

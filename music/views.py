@@ -382,7 +382,35 @@ class SongViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return Song.objects.none()
-        qs = Song.objects.filter(church=church)
+        today = timezone.localdate()
+        qs = Song.objects.filter(church=church).annotate(
+            worship_plays=django_models.Count(
+                'setlist_items',
+                filter=django_models.Q(
+                    setlist_items__setlist__roster__date__lte=today
+                ),
+                distinct=True,
+            ),
+            band_plays=django_models.Count(
+                'band_setlist_items',
+                filter=django_models.Q(
+                    band_setlist_items__setlist__date__lte=today
+                ),
+                distinct=True,
+            ),
+            worship_last=django_models.Max(
+                'setlist_items__setlist__roster__date',
+                filter=django_models.Q(
+                    setlist_items__setlist__roster__date__lte=today
+                ),
+            ),
+            band_last=django_models.Max(
+                'band_setlist_items__setlist__date',
+                filter=django_models.Q(
+                    band_setlist_items__setlist__date__lte=today
+                ),
+            ),
+        )
         band = self.request.query_params.get('band')
         if band:
             qs = qs.filter(band_id=band)
@@ -407,21 +435,39 @@ class SongViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'])
     def history(self, request, pk=None):
         song = self.get_object()
-        items = (
+        fallback_key = song.church_key or song.original_key
+        rows = []
+
+        worship_items = (
             SetlistItem.objects.filter(song=song)
             .select_related('setlist__roster')
-            .order_by('-setlist__roster__date')[:60]
         )
-        rows = [
-            {
-                'date': item.setlist.roster.date,
-                'roster_id': item.setlist.roster.id,
-                'theme': item.setlist.roster.theme,
-                'custom_key': item.custom_key,
-            }
-            for item in items
-        ]
-        serializer = SongHistorySerializer(rows, many=True)
+        for item in worship_items:
+            roster = item.setlist.roster
+            rows.append({
+                'date': roster.date,
+                'name': roster.theme or 'Culto',
+                'key': item.custom_key or fallback_key,
+                'kind': 'worship',
+                'setlist_id': item.setlist_id,
+            })
+
+        band_items = (
+            BandSetlistItem.objects.filter(song=song)
+            .select_related('setlist')
+        )
+        for item in band_items:
+            setlist = item.setlist
+            rows.append({
+                'date': setlist.date,
+                'name': setlist.description or setlist.theme or 'Setlist',
+                'key': item.custom_key or fallback_key,
+                'kind': 'band',
+                'setlist_id': setlist.id,
+            })
+
+        rows.sort(key=lambda row: row['date'], reverse=True)
+        serializer = SongHistorySerializer(rows[:60], many=True)
         return Response({'results': serializer.data})
 
 

@@ -1,13 +1,28 @@
 """Testes de regressão: permission corrigida, relacionamento church_memberships, my_rosters e bandas."""
+from datetime import timedelta
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.db.models import Count
 from django.db.utils import IntegrityError
+from django.utils import timezone
 from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.models import Church, ChurchMembership
-from music.models import Band, BandSetlist, BandSetlistItem, Song, VolunteerRoster, RosterAssignment, Ministry, MinistryRole
+from music.models import (
+    Band,
+    BandSetlist,
+    BandSetlistItem,
+    Ministry,
+    MinistryRole,
+    RosterAssignment,
+    SetlistItem,
+    Song,
+    VolunteerRoster,
+    WorshipSetlist,
+)
+from music.serializers import SongSerializer
 
 User = get_user_model()
 
@@ -241,3 +256,98 @@ class BandSetlistTest(MusicManagerFixturesMixin, TestCase):
         v.action = 'list'
         qs = v.get_queryset()
         self.assertEqual(list(qs.values_list('description', flat=True)), ['A'])
+
+
+class SongTimesPlayedTest(MusicManagerFixturesMixin, TestCase):
+    """`times_played` e `last_played` devem ser calculados a partir dos setlists já realizados."""
+
+    def setUp(self):
+        super().setUp()
+        self.song = Song.objects.create(
+            church=self.church, title='M1', youtube_id='aaaaaaaaaaa',
+        )
+        self.today = timezone.localdate()
+
+    def _song_serialized(self):
+        from music.views import SongViewSet
+        v = SongViewSet()
+        v.request = self._rf('get', '/api/music/songs/')
+        v.action = 'list'
+        obj = v.get_queryset().get(pk=self.song.pk)
+        return SongSerializer(obj).data
+
+    def test_counts_only_past_band_setlists(self):
+        past = BandSetlist.objects.create(
+            church=self.church, date=self.today - timedelta(days=3),
+            description='Passado',
+        )
+        BandSetlistItem.objects.create(setlist=past, song=self.song, order=1)
+        future = BandSetlist.objects.create(
+            church=self.church, date=self.today + timedelta(days=5),
+            description='Futuro',
+        )
+        BandSetlistItem.objects.create(setlist=future, song=self.song, order=1)
+
+        data = self._song_serialized()
+        self.assertEqual(data['times_played'], 1)
+        self.assertEqual(data['last_played'], self.today - timedelta(days=3))
+
+    def test_counts_past_worship_setlist(self):
+        roster = VolunteerRoster.objects.create(
+            church=self.church, date=self.today - timedelta(days=1), theme='Culto',
+        )
+        setlist = WorshipSetlist.objects.create(roster=roster)
+        SetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+
+        data = self._song_serialized()
+        self.assertEqual(data['times_played'], 1)
+        self.assertEqual(data['last_played'], self.today - timedelta(days=1))
+
+    def test_zero_when_no_past_setlists(self):
+        data = self._song_serialized()
+        self.assertEqual(data['times_played'], 0)
+        self.assertIsNone(data['last_played'])
+
+
+class SongHistoryTest(MusicManagerFixturesMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.song = Song.objects.create(
+            church=self.church, title='M1', youtube_id='aaaaaaaaaaa', church_key='Em',
+        )
+
+    def _history(self):
+        from music.views import SongViewSet
+        v = SongViewSet()
+        req = self._rf('get', f'/api/music/songs/{self.song.id}/history/')
+        v.request = req
+        v.action = 'history'
+        v.kwargs = {'pk': self.song.id}
+        v.format_kwarg = None
+        return v.history(req, pk=self.song.id)
+
+    def test_history_includes_band_setlist(self):
+        setlist = BandSetlist.objects.create(
+            church=self.church, date='2026-09-06', description='culto teste',
+        )
+        BandSetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+
+        resp = self._history()
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['date'], '2026-09-06')
+        self.assertEqual(results[0]['name'], 'culto teste')
+        self.assertEqual(results[0]['key'], 'Em')
+        self.assertEqual(results[0]['kind'], 'band')
+
+    def test_history_uses_custom_key_when_set(self):
+        setlist = BandSetlist.objects.create(
+            church=self.church, date='2026-09-06', description='culto teste',
+        )
+        BandSetlistItem.objects.create(
+            setlist=setlist, song=self.song, order=1, custom_key='G#m',
+        )
+
+        results = self._history().data['results']
+        self.assertEqual(results[0]['key'], 'G#m')
