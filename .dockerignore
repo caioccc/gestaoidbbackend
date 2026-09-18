@@ -13,3 +13,10 @@ staticfiles/
 .ruff_cache/
 Dockerfile
 .dockerignore
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv
+.git
