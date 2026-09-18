@@ -2901,6 +2901,34 @@ class PrayerRequestViewSet(viewsets.ModelViewSet):
             raise ValidationError({'detail': 'Número de WhatsApp inválido.'})
         return Response({'id': request_obj.id, 'url': url, 'phone': phone})
 
+    @action(detail=False, methods=['get'], url_path='assignable-users')
+    def assignable_users(self, request):
+        """Usuários elegíveis para assumir um pedido de oração (Intercessão/Pastoral).
+
+        O endpoint de membros da igreja é restrito a PASTOR/SECRETARIA; a
+        INTERCESSÃO precisa apenas da lista de quem pode ser responsável.
+        """
+        church = request.user.church
+        if church is None:
+            return Response([])
+        memberships = (
+            ChurchMembership.objects.filter(
+                church=church,
+                user__is_active=True,
+                role__in=[
+                    ChurchMembership.Role.INTERCESSAO,
+                    ChurchMembership.Role.PASTOR,
+                    ChurchMembership.Role.SECRETARIA,
+                ],
+            )
+            .select_related('user')
+            .order_by('user__name')
+        )
+        return Response([
+            {'id': m.user_id, 'name': m.user.name, 'role': m.role}
+            for m in memberships
+        ])
+
     @action(detail=False, methods=['get'], url_path='print-sheet')
     def print_sheet(self, request):
         """Caderno de Oração em PDF (motivos ativos da igreja)."""

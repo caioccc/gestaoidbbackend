@@ -5638,6 +5638,32 @@ class PrayerRequestTests(BaseChurchTestCase):
         self.assertEqual(len(resp.data), 1)
         self.assertEqual(resp.data[0]['requester_name'], 'Ana Souza')
 
+    def test_assignable_users_only_eligible_roles(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        pastor = self._user(
+            'pastor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        tesoureiro = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        musico = self._user(
+            'musico@teste.com', church=self.sede,
+            role=ChurchMembership.Role.MUSICO,
+        )
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-assignable-users'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ids = {item['id'] for item in resp.data}
+        self.assertIn(intercessor.id, ids)
+        self.assertIn(pastor.id, ids)
+        self.assertNotIn(tesoureiro.id, ids)
+        self.assertNotIn(musico.id, ids)
+
     def test_rbac_treasurer_blocked(self):
         tesoureiro = self._user(
             'tesoureiro@teste.com', church=self.sede,
