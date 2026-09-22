@@ -374,7 +374,7 @@ class SongViewSet(viewsets.ModelViewSet):
     pagination_class = None
 
     def get_permissions(self):
-        if self.action in ('list', 'retrieve', 'history'):
+        if self.action in ('list', 'retrieve', 'history', 'check_youtube'):
             return [IsChurchRole(*VIEW_ROLES)()]
         return [IsChurchRole(*MANAGER_ROLES)()]
 
@@ -431,6 +431,26 @@ class SongViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church)
+
+    @action(detail=False, methods=['get'], url_path='check-youtube')
+    def check_youtube(self, request):
+        """Busca global (catálogo da denominação) por youtube_id para pré-cadastro.
+
+        Se um vídeo já foi cadastrado por qualquer igreja, devolve os dados para
+        preencher o formulário e evitar novo scraping (Selenium/Chordify).
+        """
+        video_id = (request.query_params.get('video_id') or '').strip()
+        if not video_id:
+            return Response({'found': False, 'song': None})
+        existing = (
+            Song.objects.filter(youtube_id=video_id)
+            .select_related('band')
+            .order_by('-updated_at')
+            .first()
+        )
+        if existing is None:
+            return Response({'found': False, 'song': None})
+        return Response({'found': True, 'song': SongSerializer(existing).data})
 
     @action(detail=True, methods=['get'])
     def history(self, request, pk=None):

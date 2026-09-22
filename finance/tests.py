@@ -233,6 +233,30 @@ class CalendarEventUnifiedTests(RepasseTestCase):
         self.assertEqual(resp.data['audience'], 'GENERAL')
         self.assertEqual(resp.data['created_by'], self.sec.id)
 
+    def test_create_event_with_color(self):
+        resp = self._create(self._client(self.sec), color='#ff5722')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['color'], '#ff5722')
+        ev = CalendarEvent.objects.get(pk=resp.data['id'])
+        self.assertEqual(ev.color, '#ff5722')
+
+    def test_event_color_defaults_to_blank(self):
+        resp = self._create(self._client(self.sec))
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['color'], '')
+
+    def test_public_calendar_exposes_color(self):
+        ev = CalendarEvent.objects.create(
+            church=self.sede, audience='GENERAL', title='Culto de Ceia',
+            category='culto', color='#40c057', date='2026-10-15',
+        )
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=['calendar_public_hash'])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        item = next(e for e in resp.data['events'] if e['id'] == ev.pk)
+        self.assertEqual(item['color'], '#40c057')
+
     def test_treasurer_creates_finance_event(self):
         resp = self._create(self._client(self.tes), title='Conta de Luz')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)

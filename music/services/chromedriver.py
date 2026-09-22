@@ -12,24 +12,32 @@ def is_heroku() -> bool:
 
 def get_chrome_paths() -> tuple[str | None, str | None]:
     """Detecta automaticamente os binários do Chromium e ChromeDriver."""
+    localappdata = os.path.expandvars(r"%LOCALAPPDATA%")
     candidates_browser = [
         getattr(settings, "CHROME_BIN", None),
         os.getenv("CHROME_BIN"),
+        # Linux (produção / Docker / Heroku)
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/google-chrome",
+        "/app/.chrome-for-testing/chrome-linux64/chrome",
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        os.path.join(localappdata, "Google", "Chrome", "Application", "chrome.exe"),
         shutil.which("chromium"),
         shutil.which("chromium-browser"),
         shutil.which("google-chrome"),
-        "/app/.chrome-for-testing/chrome-linux64/chrome",
+        shutil.which("chrome"),
+        shutil.which("chrome.exe"),
     ]
 
     candidates_driver = [
         getattr(settings, "CHROMEDRIVER_PATH", None),
         os.getenv("CHROMEDRIVER_PATH"),
         "/usr/bin/chromedriver",
-        shutil.which("chromedriver"),
         "/app/.chrome-for-testing/chromedriver-linux64/chromedriver",
+        shutil.which("chromedriver"),
+        shutil.which("chromedriver.exe"),
     ]
 
     browser_bin = next((p for p in candidates_browser if p and os.path.exists(p)), None)
@@ -48,7 +56,9 @@ def create_chrome_driver():
 
     if not browser_path:
         raise FileNotFoundError(
-            "Nenhum executável de Chrome/Chromium encontrado no ambiente (/usr/bin/chromium)."
+            "Nenhum executável de Chrome/Chromium encontrado no ambiente "
+            "(procurou em /usr/bin/chromium, Google Chrome no Windows e PATH). "
+            "Instale o Google Chrome/Chromium e tente novamente."
         )
 
     chrome_options = Options()

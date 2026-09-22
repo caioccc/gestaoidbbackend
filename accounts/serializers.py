@@ -650,7 +650,12 @@ class LoanSerializer(serializers.ModelSerializer):
     member_name = serializers.CharField(
         source='member.name', read_only=True, default=None,
     )
+    member_phone = serializers.CharField(
+        source='member.phone', read_only=True, default=None,
+    )
     borrower_display = serializers.CharField(read_only=True)
+    contact_phone = serializers.SerializerMethodField()
+    whatsapp_url = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
 
@@ -658,8 +663,9 @@ class LoanSerializer(serializers.ModelSerializer):
         model = Loan
         fields = [
             'id', 'church', 'item', 'item_name', 'member', 'member_name',
-            'borrower_name', 'borrower_display', 'borrowed_at',
-            'expected_return', 'returned_at', 'status', 'notes',
+            'borrower_name', 'borrower_phone', 'borrower_display',
+            'member_phone', 'contact_phone', 'whatsapp_url',
+            'borrowed_at', 'expected_return', 'returned_at', 'status', 'notes',
             'created_by_name', 'created_at', 'updated_at',
         ]
         read_only_fields = [
@@ -672,6 +678,22 @@ class LoanSerializer(serializers.ModelSerializer):
 
     def get_created_by_name(self, obj):
         return obj.created_by.name if obj.created_by_id else None
+
+    def get_contact_phone(self, obj):
+        phone = (obj.member.phone if obj.member_id else obj.borrower_phone or '').strip()
+        return phone or None
+
+    def get_whatsapp_url(self, obj):
+        phone = self.get_contact_phone(obj)
+        if not phone:
+            return None
+        digits = re.sub(r'\D', '', phone)
+        if len(digits) in (10, 11):
+            digits = f'55{digits}'
+        if len(digits) < 12 or len(digits) > 15:
+            return None
+        message = 'Olá! Falamos da igreja sobre o material emprestado.'
+        return f'https://wa.me/{digits}?text={quote(message)}'
 
     def _context_church(self):
         church = self.context.get('church')

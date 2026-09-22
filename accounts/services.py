@@ -1550,6 +1550,7 @@ def build_sunday_school_monthly_report(church, year, month, class_id=None):
             }
             for session in sessions
         }
+        session_count = len(sessions)
 
         columns = []
         for day in sundays:
@@ -1588,7 +1589,6 @@ def build_sunday_school_monthly_report(church, year, month, class_id=None):
                     consecutive_absences += 1
                     max_absences = max(max_absences, consecutive_absences)
 
-            session_count = len(sessions)
             presence_percent = round(present_count * 100 / session_count, 1) if session_count else 0
             risk = max_absences >= 3
             whatsapp_url = None

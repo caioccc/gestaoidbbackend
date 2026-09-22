@@ -169,9 +169,11 @@ class CalendarEventSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'church', 'audience', 'audience_display', 'created_by',
             'created_by_name', 'title', 'category', 'category_display',
-            'description', 'start_time', 'end_time', 'members', 'members_names',
+            'color', 'description', 'start_time', 'end_time', 'members', 'members_names',
             'repeat_monthly', 'repeat_weekly', 'weekdays', 'repeat_interval',
-            'repeat_end_date', 'date', 'month', 'day', 'created_at',
+            'repeat_end_date', 'date', 'month', 'day',
+            'repeat_monthly_weekday', 'repeat_monthly_ordinal',
+            'created_at',
         ]
         read_only_fields = ['church', 'created_by', 'created_at']
 
@@ -250,15 +252,43 @@ class CalendarEventSerializer(serializers.ModelSerializer):
             attrs['month'] = None
             attrs['day'] = None
         elif repeat_monthly:
-            if day is None:
-                raise serializers.ValidationError(
-                    {'day': 'Informe o dia para um evento recorrente mensal.'}
-                )
-            attrs['repeat_weekly'] = False
-            attrs['weekdays'] = []
-            attrs['repeat_interval'] = 1
-            attrs['repeat_end_date'] = None
-            attrs['date'] = None
+            weekday = eff('repeat_monthly_weekday', None)
+            ordinal = eff('repeat_monthly_ordinal', None)
+            if (weekday is None) != (ordinal is None):
+                raise serializers.ValidationError({
+                    'repeat_monthly_weekday':
+                        'Informe dia da semana e ocorrência juntos '
+                        '(ex.: primeiro domingo do mês).'
+                })
+            if weekday is not None:
+                if not 0 <= weekday <= 6:
+                    raise serializers.ValidationError(
+                        {'repeat_monthly_weekday':
+                         'Dia da semana inválido (use 0=Seg .. 6=Dom).'}
+                    )
+                if ordinal not in (-1, 1, 2, 3, 4, 5):
+                    raise serializers.ValidationError(
+                        {'repeat_monthly_ordinal':
+                         'Ocorrência inválida (use 1..5, ou -1 = última).'}
+                    )
+                attrs['repeat_weekly'] = False
+                attrs['weekdays'] = []
+                attrs['repeat_interval'] = 1
+                attrs['repeat_end_date'] = None
+                attrs['day'] = None
+                attrs['date'] = None
+            else:
+                if day is None:
+                    raise serializers.ValidationError(
+                        {'day': 'Informe o dia para um evento recorrente mensal.'}
+                    )
+                attrs['repeat_weekly'] = False
+                attrs['weekdays'] = []
+                attrs['repeat_interval'] = 1
+                attrs['repeat_end_date'] = None
+                attrs['date'] = None
+                attrs['repeat_monthly_weekday'] = None
+                attrs['repeat_monthly_ordinal'] = None
         else:
             if anchor is None:
                 raise serializers.ValidationError(
@@ -283,9 +313,10 @@ class PublicCalendarEventSerializer(serializers.ModelSerializer):
         model = CalendarEvent
         fields = [
             'id', 'title', 'category', 'category_display',
-            'description', 'start_time', 'end_time',
+            'color', 'description', 'start_time', 'end_time',
             'repeat_monthly', 'repeat_weekly', 'weekdays', 'repeat_interval',
             'repeat_end_date', 'date', 'month', 'day',
+            'repeat_monthly_weekday', 'repeat_monthly_ordinal',
         ]
 
 

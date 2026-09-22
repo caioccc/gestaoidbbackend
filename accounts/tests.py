@@ -6020,6 +6020,56 @@ class SundaySchoolTests(BaseChurchTestCase):
         self.assertEqual(by_name['João Vale']['consecutive_absences'], 3)
         self.assertIsNone(by_name['João Vale']['whatsapp_url'])
 
+    def test_monthly_report_class_without_students(self):
+        sunday_class = self._class()
+        client = self._client(self._secretaria())
+
+        SundaySchoolSession.objects.create(
+            sunday_school_class=sunday_class,
+            date='2026-09-06',
+            offering_amount=decimal.Decimal('10.00'),
+        )
+        SundaySchoolSession.objects.create(
+            sunday_school_class=sunday_class,
+            date='2026-09-13',
+        )
+
+        resp = client.get(
+            reverse('sunday-school-monthly-report'),
+            {'year': 2026, 'month': 9},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(len(resp.data['classes']), 1)
+        class_report = resp.data['classes'][0]
+        self.assertEqual(class_report['session_count'], 2)
+        self.assertEqual(class_report['students'], [])
+        self.assertEqual(class_report['offering_total'], '10.00')
+        self.assertEqual(class_report['visitors_total'], 0)
+
+        resp = client.get(
+            reverse('sunday-school-monthly-report-pdf'),
+            {'year': 2026, 'month': 9},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_monthly_report_class_without_sessions_or_students(self):
+        sunday_class = self._class()
+        other = self._class(name='Infantil', category='CHILDREN')
+        self._student(other)
+        client = self._client(self._secretaria())
+
+        resp = client.get(
+            reverse('sunday-school-monthly-report'),
+            {'year': 2026, 'month': 9},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        class_report = next(
+            c for c in resp.data['classes'] if c['class_id'] == sunday_class.pk
+        )
+        self.assertEqual(class_report['session_count'], 0)
+        self.assertEqual(class_report['students'], [])
+        self.assertEqual(class_report['avg_bibles'], 0)
+
     def test_class_announcement_whatsapp(self):
         sunday_class = self._class()
         self._student(sunday_class)

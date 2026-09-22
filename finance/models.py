@@ -196,6 +196,10 @@ class CalendarEvent(models.Model):
     category = models.CharField(
         'Categoria', max_length=20, choices=Category.choices, default=Category.EVENT,
     )
+    color = models.CharField(
+        'Cor', max_length=7, blank=True, default='',
+        help_text='Cor em hex (ex.: #228be6) exibida no calendário.',
+    )
     description = models.TextField('Descrição', blank=True)
     start_time = models.TimeField('Horário de início', null=True, blank=True)
     end_time = models.TimeField('Horário de fim', null=True, blank=True,
@@ -239,6 +243,22 @@ class CalendarEvent(models.Model):
         validators=[MinValueValidator(1), MaxValueValidator(31)],
         null=True,
         blank=True,
+    )
+    repeat_monthly_weekday = models.PositiveIntegerField(
+        'Dia da semana (mensal por ocorrência)',
+        validators=[MinValueValidator(0), MaxValueValidator(6)],
+        null=True,
+        blank=True,
+        help_text='Usado com repeat_monthly_ordinal p/ cultos de frequência '
+                  '(ex.: primeiro domingo do mês → ordinal=1, weekday=6).',
+    )
+    repeat_monthly_ordinal = models.IntegerField(
+        'Ocorrência no mês',
+        validators=[MinValueValidator(-1), MaxValueValidator(5)],
+        null=True,
+        blank=True,
+        help_text='1..5 = 1ª..5ª ocorrência; -1 = última do mês. '
+                  'Use com repeat_monthly_weekday.',
     )
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
 

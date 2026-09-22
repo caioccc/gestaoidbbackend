@@ -2972,10 +2972,10 @@ class PublicPrayerRequestView(APIView):
 
 
 class SundaySchoolClassViewSet(viewsets.ModelViewSet):
-    """CRUD das classes de EBD da igreja ativa (Secretaria/Pastor)."""
+    """CRUD das classes de EBD da igreja ativa (Secretaria/Pastor/Professor EBD)."""
 
     serializer_class = SundaySchoolClassSerializer
-    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR')]
+    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR', 'PROFESSOR_EBD')]
     pagination_class = None
 
     def get_serializer_context(self):
@@ -3081,7 +3081,7 @@ class SundaySchoolSessionViewSet(viewsets.ModelViewSet):
     """Aulas EBD: lista por classe/data, prepara a folha de chamada e salva."""
 
     serializer_class = SundaySchoolSessionSerializer
-    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR')]
+    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR', 'PROFESSOR_EBD')]
     pagination_class = None
 
     def get_queryset(self):
@@ -3198,7 +3198,7 @@ class SundaySchoolSessionViewSet(viewsets.ModelViewSet):
 class SundaySchoolMonthlyReportView(APIView):
     """Relatório mensal de EBD (matriz aluno × domingos + totais por classe)."""
 
-    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR')]
+    permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR', 'PROFESSOR_EBD')]
 
     def get(self, request):
         church = request.user.church

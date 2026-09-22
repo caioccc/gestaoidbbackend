@@ -292,6 +292,7 @@ class ChurchMembership(models.Model):
         INTERCESSAO = 'INTERCESSAO', 'Intercessão & Visitação'
         LOUVOR = 'LOUVOR', 'Líder de Louvor & Música'
         MUSICO = 'MUSICO', 'Músico / Voluntário'
+        PROFESSOR_EBD = 'PROFESSOR_EBD', 'Professor(a) de EBD'
 
     user = models.ForeignKey(
         'User',
@@ -1816,6 +1817,12 @@ class Loan(models.Model):
         'Nome do tomador (quando não vinculado a um membro)',
         max_length=200,
         blank=True,
+    )
+    borrower_phone = models.CharField(
+        'Telefone do tomador (quando não vinculado a um membro)',
+        max_length=25,
+        blank=True,
+        default='',
     )
     borrowed_at = models.DateField('Data do empréstimo')
     expected_return = models.DateField('Devolução prevista')
