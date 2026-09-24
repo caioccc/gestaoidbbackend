@@ -194,6 +194,39 @@ SIMPLE_JWT = {
     ),
 }
 
+# Observabilidade: emite logs de INFO+ para o stderr (capturado pelo Heroku/log.
+# Gunicorn). O modulo de serviços do Chordify loga cada etapa da coleta com
+# tempo decorrido, essencial para diagnóstico de lentidão/bloqueio (Cloudflare).
+_log_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[%(asctime)s] %(levelname)s %(name)s %(message)s',
+            'datefmt': '%Y-%m-%d %H:%M:%S',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': _log_level,
+            'propagate': False,
+        },
+        'music.services.chordify': {
+            'handlers': ['console'],
+            'level': _log_level,
+            'propagate': False,
+        },
+    },
+}
+
 
 
 EMAIL_BACKEND = os.environ.get(

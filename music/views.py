@@ -1,3 +1,6 @@
+import logging
+import re
+
 from django.db import models as django_models
 from django.db import transaction
 from django.db.models.deletion import ProtectedError
@@ -42,6 +45,8 @@ from .serializers import (
 from .services import chordify as chordify_service
 from .services import exports as exports_service
 from .services import youtube as youtube_service
+
+logger = logging.getLogger(__name__)
 
 MANAGER_ROLES = ('LOUVOR', 'PASTOR', 'SECRETARIA')
 VIEW_ROLES = ('MUSICO',) + MANAGER_ROLES
@@ -517,6 +522,16 @@ class ChordifyView(APIView):
         youtube_id = (request.GET.get('youtube_id') or '').strip()
         if not youtube_id:
             return Response({'error': 'O parâmetro "youtube_id" é obrigatório.'}, status=400)
+        if not re.fullmatch(r'[\w-]{11}', youtube_id):
+            return Response(
+                {'error': 'O parâmetro "youtube_id" deve ter exatamente 11 caracteres.',
+                 'success': False},
+                status=400,
+            )
         instrument = request.GET.get('instrument') or 'guitar'
-        data = chordify_service.enrich_chordify_data(youtube_id, instrument)
+        try:
+            data = chordify_service.enrich_chordify_data(youtube_id, instrument)
+        except Exception as exc:  # noqa: BLE001
+            logger.error('Erro inesperado no Chordify para %s: %s', youtube_id, exc)
+            data = chordify_service.chordify_unavailable(str(exc))
         return Response(data)

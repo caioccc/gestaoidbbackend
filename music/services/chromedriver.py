@@ -46,6 +46,26 @@ def get_chrome_paths() -> tuple[str | None, str | None]:
     return browser_bin, driver_bin
 
 
+def _apply_stealth(driver):
+    """Remove o sinalizador `navigator.webdriver` (detecção de automação).
+
+    Best-effort: falha silenciosamente se o ChromeDriver não suportar
+    `execute_cdp_cmd` (versões antigas) — sem quebrar a inicialização.
+    """
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": (
+                    "Object.defineProperty(navigator, 'webdriver', "
+                    "{get: () => undefined});"
+                )
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("navigator.webdriver não pôde ser mascarado (ChromeDriver antigo).")
+
+
 def create_chrome_driver():
     """Cria uma instância do ChromeDriver configurada para o ambiente Docker/Heroku."""
     from selenium.webdriver import Chrome
@@ -72,15 +92,22 @@ def create_chrome_driver():
     chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--lang=pt-BR")
+    # Reduz a detecção de automação (bloqueio do Cloudflare/WAF)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     )
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
 
     if driver_path:
         try:
             service = Service(executable_path=driver_path)
-            return Chrome(service=service, options=chrome_options)
+            driver = Chrome(service=service, options=chrome_options)
+            _apply_stealth(driver)
+            return driver
         except Exception as err:
             logger.warning(
                 "Falha ao iniciar ChromeDriver do sistema (%s): %s. Tentando webdriver-manager...",
@@ -92,7 +119,9 @@ def create_chrome_driver():
         from webdriver_manager.chrome import ChromeDriverManager
 
         service = Service(ChromeDriverManager().install())
-        return Chrome(service=service, options=chrome_options)
+        driver = Chrome(service=service, options=chrome_options)
+        _apply_stealth(driver)
+        return driver
     except Exception as err:
         logger.error("Falha ao inicializar ChromeDriver via webdriver-manager: %s", err)
         raise
