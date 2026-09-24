@@ -76,9 +76,12 @@ class RosterAssignmentAdmin(admin.ModelAdmin):
 
 @admin.register(Song)
 class SongAdmin(admin.ModelAdmin):
-    list_display = ('title', 'artist', 'youtube_id', 'church_key', 'bpm', 'times_played')
+    list_display = (
+        'title', 'artist', 'youtube_id', 'church_key', 'bpm',
+        'chord_status', 'chord_retries', 'chord_processed_at', 'times_played',
+    )
     search_fields = ('title', 'artist', 'tags')
-    list_filter = ('is_active',)
+    list_filter = ('is_active', 'chord_status')
 
 
 @admin.register(WorshipSetlist)

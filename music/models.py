@@ -234,6 +234,13 @@ class Band(models.Model):
 class Song(models.Model):
     """Música do repertório: link YouTube, tom, BPM, acordes com timing e letra."""
 
+    class ChordStatus(models.TextChoices):
+        PENDING = 'PENDING', 'Fila (aguardando extração)'
+        PROCESSING = 'PROCESSING', 'Processando'
+        COMPLETED = 'COMPLETED', 'Concluída'
+        FAILED = 'FAILED', 'Falhou'
+        MANUAL = 'MANUAL', 'Manual'
+
     church = models.ForeignKey(
         'accounts.Church',
         on_delete=models.CASCADE,
@@ -265,6 +272,15 @@ class Song(models.Model):
     times_played = models.PositiveIntegerField('Vezes tocada', default=0)
     last_played = models.DateField('Última vez', null=True, blank=True)
     is_active = models.BooleanField('Ativo', default=True)
+    chord_status = models.CharField(
+        'Status da cifra', max_length=20, choices=ChordStatus.choices,
+        default=ChordStatus.PENDING, db_index=True,
+    )
+    chord_error = models.TextField('Erro da extração', blank=True, default='')
+    chord_retries = models.PositiveSmallIntegerField('Tentativas de extração', default=0)
+    chord_processed_at = models.DateTimeField(
+        'Processado em', null=True, blank=True,
+    )
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
     updated_at = models.DateTimeField('Atualizado em', auto_now=True)
 

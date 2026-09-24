@@ -379,7 +379,9 @@ class SongViewSet(viewsets.ModelViewSet):
     pagination_class = None
 
     def get_permissions(self):
-        if self.action in ('list', 'retrieve', 'history', 'check_youtube'):
+        if self.action in (
+            'list', 'retrieve', 'history', 'check_youtube', 'reprocess',
+        ):
             return [IsChurchRole(*VIEW_ROLES)()]
         return [IsChurchRole(*MANAGER_ROLES)()]
 
@@ -435,7 +437,59 @@ class SongViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        serializer.save(church=self.request.user.church)
+        saved = serializer.save(church=self.request.user.church)
+        logger.info(
+            'Songs[create] música #%s "%s" (youtube_id=%s) salva com chord_status=%s%s',
+            saved.pk,
+            saved.title,
+            saved.youtube_id or '-',
+            saved.chord_status,
+            ' | cifras fornecidas manualmente' if saved.chord_status == 'MANUAL' else '',
+        )
+
+    def perform_update(self, serializer):
+        saved = serializer.save()
+        logger.info(
+            'Songs[update] música #%s "%s" atualizada (chord_status=%s retries=%d)',
+            saved.pk,
+            saved.title,
+            saved.chord_status,
+            saved.chord_retries,
+        )
+
+    @action(detail=True, methods=['post'], url_path='reprocess')
+    def reprocess(self, request, pk=None):
+        """Coloca a música de volta na fila do worker de extração de cifras.
+
+        Qualquer perfil da igreja com acesso ao repertório pode reprocessar.
+        Reseta status/erro/tentativas; o worker local (Docker, IP residencial)
+        faz a coleta no Chordify em background.
+        """
+        song = self.get_object()
+        song.chord_status = Song.ChordStatus.PENDING
+        song.chord_error = ''
+        song.chord_retries = 0
+        song.chord_processed_at = None
+        song.save(update_fields=[
+            'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
+            'updated_at',
+        ])
+        logger.info(
+            'Songs[reprocess] música #%s "%s" (youtube_id=%s) reenfileirada '
+            'para extração (PENDING) por usuário #%s',
+            song.pk,
+            song.title,
+            song.youtube_id or '-',
+            request.user.pk,
+        )
+        return Response(
+            {
+                'success': True,
+                'message': 'Música enviada para reprocessamento da cifra.',
+                'song': SongSerializer(song).data,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=['get'], url_path='check-youtube')
     def check_youtube(self, request):

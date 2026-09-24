@@ -114,6 +114,24 @@ DATABASES = {
     )
 }
 
+# Worker local de extração de cifras (Chordify): aponta para o banco de
+# PRODUÇÃO (Heroku) sem alterar a configuração do web dyno. Se TARGET_DATABASE_URL
+# estiver definida, o worker processa a fila direto no banco remoto.
+_TARGET_DATABASE_URL = os.environ.get('TARGET_DATABASE_URL')
+if _TARGET_DATABASE_URL:
+    DATABASES['default'] = dj_database_url.parse(
+        _TARGET_DATABASE_URL,
+        conn_max_age=600,
+        ssl_require='sslmode=require' in _TARGET_DATABASE_URL,
+    )
+    logger = logging.getLogger('core.settings')
+    logger.info(
+        'core.settings TARGET_DATABASE_URL detectada: usando banco remoto '
+        '(host=%s db=%s) via dj_database_url.',
+        DATABASES['default'].get('HOST', '?'),
+        DATABASES['default'].get('NAME', '?'),
+    )
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -214,12 +232,31 @@ LOGGING = {
         },
     },
     'loggers': {
+        '': {
+            'handlers': ['console'],
+            'level': _log_level,
+        },
         'django': {
             'handlers': ['console'],
             'level': _log_level,
             'propagate': False,
         },
+        'django.server': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'music': {
+            'handlers': ['console'],
+            'level': _log_level,
+            'propagate': False,
+        },
         'music.services.chordify': {
+            'handlers': ['console'],
+            'level': _log_level,
+            'propagate': False,
+        },
+        'music.worker.chordify': {
             'handlers': ['console'],
             'level': _log_level,
             'propagate': False,

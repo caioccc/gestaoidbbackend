@@ -189,8 +189,70 @@ class SongSerializer(serializers.ModelSerializer):
             'thumbnail_url', 'duration_seconds', 'original_key', 'church_key',
             'bpm', 'time_signature', 'chords', 'chords_json', 'lyrics',
             'tags', 'times_played', 'last_played', 'is_active', 'created_at',
+            'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
         ]
-        read_only_fields = ['church']
+        read_only_fields = ['church', 'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at']
+
+    @staticmethod
+    def _chords_payload(initial_data):
+        """Retorna None se nem `chords` nem `chords_json` vierem no payload;
+        caso contrário retorna o valor do campo presente (dá prioridade a
+        `chords_json` quando ambos aparecem)."""
+        if 'chords_json' in initial_data:
+            return initial_data.get('chords_json')
+        if 'chords' in initial_data:
+            return initial_data.get('chords')
+        return None
+
+    @staticmethod
+    def _chords_empty(value):
+        if value is None:
+            return True
+        if isinstance(value, (list, dict)):
+            return len(value) == 0
+        return not str(value).strip()
+
+    @staticmethod
+    def _apply_chord_status(instance, payload):
+        """Define o status da cifra no save da API:
+
+        - payload vazio (cifras limpas): PENDING → volta para a fila do worker;
+        - payload com cifras (usuário forneceu manualmente): MANUAL → o worker
+          jamais sobrescreve; o erro/tentativas antigos são zerados;
+        - payload ausente: status atual mantido (não cloba COMPLETED/MANUAL).
+        """
+        if payload is None:
+            return
+        if SongSerializer._chords_empty(payload):
+            instance.chord_status = Song.ChordStatus.PENDING
+        else:
+            instance.chord_status = Song.ChordStatus.MANUAL
+        instance.chord_error = ''
+        instance.chord_retries = 0
+        instance.chord_processed_at = None
+
+    def create(self, validated_data):
+        instance = super().create(validated_data)
+        self._apply_chord_status(instance, self._chords_payload(self.initial_data))
+        instance.save(update_fields=[
+            'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
+        ])
+        return instance
+
+    def update(self, instance, validated_data):
+        instance = super().update(instance, validated_data)
+        self._apply_chord_status(instance, self._chords_payload(self.initial_data))
+        instance.save(update_fields=[
+            'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
+        ])
+        return instance
+
+    def validate(self, attrs):
+        title = (attrs.get('title') or '').strip()
+        if not title:
+            raise serializers.ValidationError({'title': 'Informe o título da música.'})
+        attrs['title'] = title
+        return attrs
 
     def get_times_played(self, obj):
         worship = getattr(obj, 'worship_plays', None)
@@ -208,13 +270,6 @@ class SongSerializer(serializers.ModelSerializer):
         if candidates:
             return max(candidates)
         return obj.last_played
-
-    def validate(self, attrs):
-        title = (attrs.get('title') or '').strip()
-        if not title:
-            raise serializers.ValidationError({'title': 'Informe o título da música.'})
-        attrs['title'] = title
-        return attrs
 
 
 class SongHistorySerializer(serializers.Serializer):
