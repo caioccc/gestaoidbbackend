@@ -15,7 +15,7 @@ from rest_framework.request import Request
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from accounts.models import Church, ChurchMembership
-from music.models import BandSetlist, Song, VolunteerRoster, WorshipSetlist
+from music.models import BandSetlist, BandSetlistItem, Song, VolunteerRoster, WorshipSetlist
 from music.serializers import SongSerializer
 from music.views import (
     BandSetlistViewSet,
@@ -267,6 +267,21 @@ class SetlistGovernanceTestCase(TestCase):
         resp = BandSetlistViewSet.as_view({'post': 'create'})(request)
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.data['created_by'], self.louvore.id)
+
+    def test_band_setlist_response_includes_song_thumbnail(self):
+        self.song.thumbnail_url = 'https://example.com/song-cover.jpg'
+        self.song.save(update_fields=['thumbnail_url'])
+        setlist = self._band_setlist(created_by=self.louvore)
+        BandSetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+        request = self.rf.get(f'/api/music/setlists/{setlist.id}/')
+        force_authenticate(request, user=self.louvore)
+        resp = BandSetlistViewSet.as_view({'get': 'retrieve'})(request, pk=setlist.id)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp.data['items'][0]['song_thumbnail_url'],
+            self.song.thumbnail_url,
+        )
+        self.assertEqual(resp.data['items'][0]['song_youtube_id'], self.song.youtube_id)
 
     def test_band_setlist_louvore_update_allowed(self):
         # Ownership: LOUVORE criou a própria setlist → pode editar (200).

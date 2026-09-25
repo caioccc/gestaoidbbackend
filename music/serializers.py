@@ -385,12 +385,14 @@ class BandSetlistItemSerializer(serializers.ModelSerializer):
     song_artist = serializers.CharField(source='song.artist', read_only=True)
     song_church_key = serializers.CharField(source='song.church_key', read_only=True)
     song_bpm = serializers.IntegerField(source='song.bpm', read_only=True)
+    song_thumbnail_url = serializers.CharField(source='song.thumbnail_url', read_only=True)
+    song_youtube_id = serializers.CharField(source='song.youtube_id', read_only=True)
 
     class Meta:
         model = BandSetlistItem
         fields = [
             'id', 'setlist', 'song', 'song_title', 'song_artist',
-            'song_church_key', 'song_bpm',
+            'song_church_key', 'song_bpm', 'song_thumbnail_url', 'song_youtube_id',
             'order', 'custom_key', 'notes',
         ]
 
