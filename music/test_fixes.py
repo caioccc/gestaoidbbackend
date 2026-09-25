@@ -185,6 +185,14 @@ class BandSetlistTest(MusicManagerFixturesMixin, TestCase):
         super().setUp()
         self.band = Band.objects.create(church=self.church, name='Siloé')
         self.song = Song.objects.create(church=self.church, title='M1', youtube_id='aaaaaaaaaaa')
+        from accounts.models import ChurchMembership
+        pastor = User.objects.create(
+            email='pastor@fix.com', name='Pastor', church=self.church, is_active=True,
+        )
+        ChurchMembership.objects.create(
+            user=pastor, church=self.church, role=ChurchMembership.Role.PASTOR,
+        )
+        self.pastor = pastor
 
     def test_model_creation_and_str(self):
         setlist = BandSetlist.objects.create(
@@ -237,7 +245,7 @@ class BandSetlistTest(MusicManagerFixturesMixin, TestCase):
         }
         factory = APIRequestFactory()
         request = factory.put(f'/api/music/setlists/{setlist.id}/', data=data, format='json')
-        force_authenticate(request, user=self.user)
+        force_authenticate(request, user=self.pastor)
         view = BandSetlistViewSet.as_view({'put': 'update'})
         resp = view(request, pk=setlist.id)
         self.assertEqual(resp.status_code, 200)

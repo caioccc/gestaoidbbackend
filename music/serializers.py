@@ -14,6 +14,7 @@ from .models import (
     VolunteerRoster,
     WorshipSetlist,
 )
+from .permissions import can_edit_song, can_edit_setlist, can_govern_setlist
 
 
 class BandPhotoField(serializers.Field):
@@ -180,6 +181,8 @@ class SongSerializer(serializers.ModelSerializer):
     band_color = serializers.CharField(source='band.color', read_only=True)
     times_played = serializers.SerializerMethodField()
     last_played = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
 
     class Meta:
         model = Song
@@ -190,8 +193,9 @@ class SongSerializer(serializers.ModelSerializer):
             'bpm', 'time_signature', 'chords', 'chords_json', 'lyrics',
             'tags', 'times_played', 'last_played', 'is_active', 'created_at',
             'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
+            'created_by', 'created_by_name', 'can_edit',
         ]
-        read_only_fields = ['church', 'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at']
+        read_only_fields = ['church', 'created_by', 'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at']
 
     @staticmethod
     def _chords_payload(initial_data):
@@ -270,6 +274,17 @@ class SongSerializer(serializers.ModelSerializer):
         if candidates:
             return max(candidates)
         return obj.last_played
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by_id:
+            return ''
+        user = obj.created_by
+        return user.name or user.email
+
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return bool(user and can_edit_song(user, obj))
 
 
 class SongHistorySerializer(serializers.Serializer):
@@ -385,6 +400,9 @@ class BandSetlistSerializer(serializers.ModelSerializer):
     band_name = serializers.CharField(source='band.name', read_only=True)
     band_color = serializers.CharField(source='band.color', read_only=True)
     created_by_name = serializers.SerializerMethodField()
+    can_edit = serializers.SerializerMethodField()
+    can_delete = serializers.SerializerMethodField()
+    can_manage = serializers.SerializerMethodField()
 
     class Meta:
         model = BandSetlist
@@ -392,11 +410,27 @@ class BandSetlistSerializer(serializers.ModelSerializer):
             'id', 'church', 'band', 'band_name', 'band_color', 'date',
             'description', 'theme', 'notes', 'created_by', 'created_by_name',
             'created_at', 'updated_at', 'items',
+            'can_edit', 'can_delete', 'can_manage',
         ]
         read_only_fields = ['church', 'created_by']
 
     def get_created_by_name(self, obj):
         return obj.created_by.name if obj.created_by_id else ''
+
+    def get_can_edit(self, obj):
+        request = self.context.get('request')
+        return can_edit_setlist(getattr(request, 'user', None), obj)
+
+    def get_can_delete(self, obj):
+        request = self.context.get('request')
+        return can_edit_setlist(getattr(request, 'user', None), obj)
+
+    def get_can_manage(self, obj):
+        """Governança global (PASTOR/ADMIN): controla todas, mesmo sem ser o
+        criador. É `True` junto com `can_edit` para pastores."""
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        return can_edit_setlist(user, obj) and can_govern_setlist(user)
 
 
 class BandSetlistPayloadSerializer(serializers.Serializer):

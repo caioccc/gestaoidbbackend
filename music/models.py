@@ -247,6 +247,15 @@ class Song(models.Model):
         related_name='songs',
         verbose_name='Igreja',
     )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_songs',
+        verbose_name='Criado por',
+        help_text='Usuário que adicionou a música ao repertório.',
+    )
     band = models.ForeignKey(
         Band,
         on_delete=models.SET_NULL,

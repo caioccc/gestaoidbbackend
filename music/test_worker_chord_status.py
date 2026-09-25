@@ -256,6 +256,7 @@ class ReproduceChordStatusSerializerTest(TestCase):
 
     def test_update_without_chords_preserves_completed(self):
         song = self._create_song(
+            created_by=self.user,
             chord_status=Song.ChordStatus.COMPLETED, chords='1000;C:maj;0;2',
         )
         request = self.factory.patch(
@@ -271,7 +272,9 @@ class ReproduceChordStatusSerializerTest(TestCase):
         self.assertEqual(song.chord_status, Song.ChordStatus.COMPLETED)
 
     def test_update_with_empty_chords_resets_to_pending(self):
-        song = self._create_song(chord_status=Song.ChordStatus.COMPLETED)
+        song = self._create_song(
+            created_by=self.user, chord_status=Song.ChordStatus.COMPLETED,
+        )
         request = self.factory.patch(
             f'/api/music/songs/{song.id}/',
             data={'title': 'M1', 'chords': ''}, format='json',
@@ -282,7 +285,9 @@ class ReproduceChordStatusSerializerTest(TestCase):
         self.assertEqual(song.chord_status, Song.ChordStatus.PENDING)
 
     def test_update_with_chords_marks_manual(self):
-        song = self._create_song(chord_status=Song.ChordStatus.COMPLETED)
+        song = self._create_song(
+            created_by=self.user, chord_status=Song.ChordStatus.COMPLETED,
+        )
         request = self.factory.patch(
             f'/api/music/songs/{song.id}/',
             data={'title': 'M1',

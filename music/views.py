@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -15,6 +16,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsChurchRole
+from .permissions import (
+    IsSongOwnerOrAdmin,
+    IsSetlistOwnerOrPastor,
+)
 
 from .models import (
     Band,
@@ -50,6 +55,31 @@ logger = logging.getLogger(__name__)
 
 MANAGER_ROLES = ('LOUVOR', 'PASTOR', 'SECRETARIA')
 VIEW_ROLES = ('MUSICO',) + MANAGER_ROLES
+
+# Editar/excluir setlists (de banda e a do culto): apenas PASTOR/ADMIN.
+SETLIST_GOVERNANCE_ROLES = ('PASTOR',)
+
+# Ordenações aceitas no list de músicas (repertório). A "chave" é enviada
+# via `?ordering=` pelo frontend; o valor é o alvo do `order_by`.
+SONG_ORDERING_MAP = {
+    'random': '?',
+    'times_played': '-total_plays',
+    '-times_played': 'total_plays',
+    'band': 'band__name',
+    '-band': '-band__name',
+    'artist': 'artist',
+    '-artist': '-artist',
+    'title': 'title',
+    '-title': '-title',
+}
+
+
+class SongPagination(PageNumberPagination):
+    """Paginação das músicas do repertório (?page & ?page_size)."""
+
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 def _apply_month_filter(qs, query_params):
@@ -113,7 +143,15 @@ class BandSetlistViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ('list', 'retrieve'):
             return [IsChurchRole(*VIEW_ROLES)()]
-        return [IsChurchRole(*MANAGER_ROLES)()]
+        if self.action in ('create',):
+            # Qualquer membro ativo pode criar a SUA setlist de banda
+            # (quem cria vira `created_by`). Governança fica no objeto.
+            return [IsSetlistOwnerOrPastor()]
+        if self.action in ('update', 'partial_update', 'destroy'):
+            # Ownership: o criador edita/exclui a sua; PASTOR/ADMIN
+            # governa todas; demais perfis recebem HTTP 403.
+            return [IsSetlistOwnerOrPastor()]
+        return [IsChurchRole(*VIEW_ROLES)()]
 
     def get_queryset(self):
         church = self.request.user.church
@@ -232,6 +270,14 @@ class VolunteerRosterViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ('my_assignments', 'my_rosters'):
+            return [IsChurchRole(*VIEW_ROLES)()]
+        if self.action == 'manage_setlist':
+            # Ownership: quem criou o roster governa a setlist do culto; a
+            # sua; PASTOR/ADMIN governa todas. Demais perfis HTTP 403.
+            return [IsSetlistOwnerOrPastor()]
+        if self.action == 'create':
+            # Criação aberta a qualquer membro com igreja ativa (a setlist
+            # do culto vira "sua", com ownership no `created_by` do roster).
             return [IsChurchRole(*VIEW_ROLES)()]
         return [IsChurchRole(*MANAGER_ROLES)()]
 
@@ -352,9 +398,15 @@ class VolunteerRosterViewSet(viewsets.ModelViewSet):
 
         with transaction.atomic():
             SetlistItem.objects.filter(setlist=setlist).delete()
-            SetlistItem.objects.bulk_create([
-                SetlistItem(setlist=setlist, **item) for item in items_data
-            ])
+            items = [
+                SetlistItem(
+                    setlist=setlist, song_id=item['song'],
+                    order=item['order'], custom_key=item['custom_key'],
+                    notes=item['notes'],
+                )
+                for item in items_data
+            ]
+            SetlistItem.objects.bulk_create(items)
 
         setlist.refresh_from_db()
         return Response(WorshipSetlistSerializer(setlist).data)
@@ -376,21 +428,23 @@ class RosterAssignmentViewSet(viewsets.ModelViewSet):
 
 class SongViewSet(viewsets.ModelViewSet):
     serializer_class = SongSerializer
-    pagination_class = None
+    pagination_class = SongPagination
 
     def get_permissions(self):
         if self.action in (
             'list', 'retrieve', 'history', 'check_youtube', 'reprocess',
         ):
             return [IsChurchRole(*VIEW_ROLES)()]
-        return [IsChurchRole(*MANAGER_ROLES)()]
+        return [IsSongOwnerOrAdmin()]
 
     def get_queryset(self):
         church = self.request.user.church
         if church is None:
             return Song.objects.none()
         today = timezone.localdate()
-        qs = Song.objects.filter(church=church).annotate(
+        qs = Song.objects.filter(church=church).select_related(
+            'band', 'created_by'
+        ).annotate(
             worship_plays=django_models.Count(
                 'setlist_items',
                 filter=django_models.Q(
@@ -417,6 +471,8 @@ class SongViewSet(viewsets.ModelViewSet):
                     band_setlist_items__setlist__date__lte=today
                 ),
             ),
+            total_plays=django_models.F('worship_plays')
+            + django_models.F('band_plays'),
         )
         band = self.request.query_params.get('band')
         if band:
@@ -434,10 +490,27 @@ class SongViewSet(viewsets.ModelViewSet):
                 | django_models.Q(artist__icontains=search)
                 | django_models.Q(tags__icontains=search)
             )
-        return qs
+        ordering = self.request.query_params.get('ordering')
+        order_target = SONG_ORDERING_MAP.get(ordering, '?')
+        return qs.order_by(order_target)
+
+    def list(self, request, *args, **kwargs):
+        """Lista paginada quando `?page=`/`?page_size=` é informado; caso
+        contrário devolve o array completo (compatibilidade com os pickers
+        de setlists, que precisam de todo o repertório)."""
+        queryset = self.filter_queryset(self.get_queryset())
+        if request.query_params.get('page') or request.query_params.get('page_size'):
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def perform_create(self, serializer):
-        saved = serializer.save(church=self.request.user.church)
+        saved = serializer.save(
+            church=self.request.user.church, created_by=self.request.user
+        )
         logger.info(
             'Songs[create] música #%s "%s" (youtube_id=%s) salva com chord_status=%s%s',
             saved.pk,
