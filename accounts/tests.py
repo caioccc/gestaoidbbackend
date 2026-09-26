@@ -5595,7 +5595,13 @@ class PrayerRequestTests(BaseChurchTestCase):
                 'category': 'FAMILY',
                 'description': 'Oração pela minha família.',
                 'wants_visit': True,
+                'cep': '58000-000',
+                'street': 'Rua das Acácias',
+                'number': '120',
+                'complement': 'Apto 41',
                 'neighborhood': 'Bodocongó',
+                'city': 'João Pessoa',
+                'state': 'PB',
                 'preferred_period': 'MORNING',
                 'is_anonymous': True,
             },
@@ -5606,6 +5612,91 @@ class PrayerRequestTests(BaseChurchTestCase):
         self.assertEqual(pr.church, self.sede)
         self.assertEqual(pr.status, PrayerRequest.Status.PENDING)
         self.assertTrue(pr.is_anonymous)
+        self.assertEqual(pr.complement, 'Apto 41')
+        self.assertEqual(pr.street, 'Rua das Acácias')
+        self.assertEqual(pr.state, 'PB')
+
+    def _visit_payload(self, **overrides):
+        payload = {
+            'requester_name': 'Maria Silva',
+            'category': 'FAMILY',
+            'description': 'Preciso de uma visita pastoral.',
+            'wants_visit': True,
+            'cep': '58000000',
+            'street': 'Rua das Acácias',
+            'number': '120',
+            'neighborhood': 'Bodocongó',
+            'city': 'João Pessoa',
+            'state': 'PB',
+            'preferred_period': 'MORNING',
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_public_visit_requires_full_address(self):
+        """Visita pastoral sem endereço completo é rejeitada — sem endereço a
+        equipe não consegue agendar a visita."""
+        client = APIClient()
+        for field in ('cep', 'street', 'number', 'neighborhood', 'city', 'state'):
+            with self.subTest(missing=field):
+                payload = self._visit_payload()
+                payload[field] = ''
+                resp = client.post(
+                    reverse('public-church-prayer-requests', args=[self.sede.slug]),
+                    payload,
+                    format='json',
+                )
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+                self.assertIn(field, resp.data)
+        self.assertEqual(PrayerRequest.objects.count(), 0)
+
+    def test_public_visit_requires_preferred_period(self):
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=[self.sede.slug]),
+            self._visit_payload(preferred_period='ANY'),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('preferred_period', resp.data)
+
+    def test_public_visit_rejects_short_cep(self):
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=[self.sede.slug]),
+            self._visit_payload(cep='5800'),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('cep', resp.data)
+
+    def test_public_visit_allows_empty_complement(self):
+        """Complemento é a única exceção: continua opcional."""
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=[self.sede.slug]),
+            self._visit_payload(complement=''),
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(PrayerRequest.objects.get(pk=resp.data['id']).complement, '')
+
+    def test_public_without_visit_needs_no_address(self):
+        """Pedido de oração sem visita não exige endereço nenhum."""
+        client = APIClient()
+        resp = client.post(
+            reverse('public-church-prayer-requests', args=[self.sede.slug]),
+            {
+                'requester_name': 'Maria Silva',
+                'category': 'FAMILY',
+                'description': 'Oração pela minha família.',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        pr = PrayerRequest.objects.get(pk=resp.data['id'])
+        self.assertFalse(pr.wants_visit)
+        self.assertEqual(pr.preferred_period, PrayerRequest.PreferredPeriod.ANY)
 
     def test_public_submit_unknown_slug_404(self):
         client = APIClient()
@@ -5693,6 +5784,71 @@ class PrayerRequestTests(BaseChurchTestCase):
         pr.refresh_from_db()
         self.assertEqual(pr.status, PrayerRequest.Status.PRAYING)
         self.assertEqual(pr.pastoral_notes, 'Orando pela família.')
+
+    def test_archived_hidden_from_default_list(self):
+        """Pedidos arquivados são histórico: não aparecem na listagem padrão,
+        nem quando a busca ou outros filtros são usados."""
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer(requester_name='Ana Souza')
+        self._prayer(requester_name='Bruno Lima', status=PrayerRequest.Status.ARCHIVED)
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['requester_name'] for item in resp.data], ['Ana Souza'])
+
+        searched = client.get(reverse('prayer-request-list'), {'q': 'Bruno'})
+        self.assertEqual(len(searched.data), 0)
+
+    def test_archived_visible_when_status_filtered(self):
+        """Selecionar o status Arquivado traz o histórico de volta."""
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer(requester_name='Ana Souza')
+        self._prayer(requester_name='Bruno Lima', status=PrayerRequest.Status.ARCHIVED)
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-list'), {'status': 'ARCHIVED'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['requester_name'] for item in resp.data], ['Bruno Lima'])
+
+    def test_invalid_status_filter_still_hides_archived(self):
+        """Um status desconhecido não deve vazar o histórico arquivado."""
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer(status=PrayerRequest.Status.ARCHIVED)
+        client = self._client(intercessor)
+        resp = client.get(reverse('prayer-request-list'), {'status': 'ALL'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 0)
+
+    def test_intercessao_can_delete(self):
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        pr = self._prayer()
+        client = self._client(intercessor)
+        resp = client.delete(reverse('prayer-request-detail', args=[pr.pk]))
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(PrayerRequest.objects.filter(pk=pr.pk).exists())
+
+    def test_treasurer_cannot_delete(self):
+        """A exclusão respeita as mesmas permissões da triagem."""
+        tesoureiro = self._user(
+            'tesoureiro@teste.com', church=self.sede,
+            role=ChurchMembership.Role.TESOUREIRO,
+        )
+        pr = self._prayer()
+        client = self._client(tesoureiro)
+        resp = client.delete(reverse('prayer-request-detail', args=[pr.pk]))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(PrayerRequest.objects.filter(pk=pr.pk).exists())
 
     def test_prepare_whatsapp(self):
         intercessor = self._user(

@@ -257,6 +257,93 @@ class CalendarEventUnifiedTests(RepasseTestCase):
         item = next(e for e in resp.data['events'] if e['id'] == ev.pk)
         self.assertEqual(item['color'], '#40c057')
 
+    def test_public_calendar_hides_finance_audience(self):
+        CalendarEvent.objects.create(
+            church=self.sede, audience='FINANCE', title='Fechamento de Caixa',
+            category='meeting', date='2026-10-15',
+        )
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=['calendar_public_hash'])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('Fechamento de Caixa', [e['title'] for e in resp.data['events']])
+
+    def test_public_calendar_hides_bills_and_deadlines_even_as_general(self):
+        for title, category in (
+            ('Conta de Água', 'bill'),
+            ('Conta de Luz', 'bill'),
+            ('Vencimento de IPTU', 'deadline'),
+        ):
+            CalendarEvent.objects.create(
+                church=self.sede, audience='GENERAL', title=title,
+                category=category, date='2026-10-15',
+            )
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=['calendar_public_hash'])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['events'], [])
+
+    def test_public_calendar_keeps_public_categories(self):
+        for title, category in (
+            ('Culto Domingo', 'culto'),
+            ('Ensaio de Louvor', 'ensaio'),
+            ('Confraternização', 'event'),
+            ('Reunião de Jovens', 'meeting'),
+        ):
+            CalendarEvent.objects.create(
+                church=self.sede, audience='GENERAL', title=title,
+                category=category, date='2026-10-15',
+            )
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=['calendar_public_hash'])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        titles = {e['title'] for e in resp.data['events']}
+        self.assertEqual(
+            titles,
+            {'Culto Domingo', 'Ensaio de Louvor', 'Confraternização', 'Reunião de Jovens'},
+        )
+
+    def test_public_calendar_returns_church_details(self):
+        self.sede.street = 'Rua das Oliveiras'
+        self.sede.number = '120'
+        self.sede.neighborhood = 'Centro'
+        self.sede.city = 'Curitiba'
+        self.sede.state = 'PR'
+        self.sede.latitude = -25.4284
+        self.sede.longitude = -49.2733
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=[
+            'street', 'number', 'neighborhood', 'city', 'state',
+            'latitude', 'longitude', 'calendar_public_hash',
+        ])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        church = resp.data['church']
+        address = church['address']
+        self.assertEqual(address['street'], 'Rua das Oliveiras')
+        self.assertEqual(address['number'], '120')
+        self.assertEqual(address['neighborhood'], 'Centro')
+        self.assertEqual(address['city'], 'Curitiba')
+        self.assertEqual(address['state'], 'PR')
+        self.assertEqual(church['latitude'], -25.4284)
+        self.assertEqual(church['longitude'], -49.2733)
+        self.assertIn('slug', church)
+        self.assertIn('public_links_enabled', church)
+        self.assertIn('logo', church)
+
+    def test_public_calendar_never_exposes_members_or_authors(self):
+        CalendarEvent.objects.create(
+            church=self.sede, audience='GENERAL', title='Culto de Ceia',
+            category='culto', date='2026-10-15', created_by=self.sec,
+        )
+        self.sede.ensure_public_hash()
+        self.sede.save(update_fields=['calendar_public_hash'])
+        resp = APIClient().get(reverse('public-calendar', args=[self.sede.calendar_public_hash]))
+        item = resp.data['events'][0]
+        for leaked in ('created_by', 'created_by_name', 'members', 'members_names', 'audience'):
+            self.assertNotIn(leaked, item)
+
     def test_treasurer_creates_finance_event(self):
         resp = self._create(self._client(self.tes), title='Conta de Luz')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)

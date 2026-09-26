@@ -21,6 +21,7 @@ from rest_framework.views import APIView
 
 from accounts.models import Church, Member
 from accounts.permissions import CanAccessTargetChurch, is_admin
+from accounts import services as accounts_services
 
 from .models import (
     CalendarEvent,
@@ -1464,9 +1465,20 @@ class PublicCalendarEventsView(APIView):
 
     Nunca expõe dados de membros nem autores. Acesso pela URL pública
     /calendar/<hash> da igreja.
+
+    Além de `audience=GENERAL`, descarta as categorias estritamente
+    administrativas/financeiras (contas fixas e prazos/vencimentos): mesmo que a
+    secretaria crie um evento de conta de luz com audiência GENERAL, ele nunca
+    pode vazar para a agenda pública.
     """
 
     permission_classes = [AllowAny]
+
+    #: Categorias que jamais podem aparecer na agenda pública.
+    PRIVATE_CATEGORIES = (
+        CalendarEvent.Category.BILL,
+        CalendarEvent.Category.DEADLINE,
+    )
 
     def get(self, request, hash):
         church = Church.objects.filter(calendar_public_hash=hash).first()
@@ -1478,11 +1490,26 @@ class PublicCalendarEventsView(APIView):
         qs = CalendarEvent.objects.filter(
             church=church,
             audience=CalendarEvent.Audience.GENERAL,
-        )
+        ).exclude(category__in=self.PRIVATE_CATEGORIES)
         return Response({
             'church': {
                 'id': church.id,
                 'name': church.name,
+                'logo': accounts_services.cloudinary_url(church.logo),
+                'slug': church.slug,
+                'public_links_enabled': church.public_links_enabled,
+                'theme_color': church.theme_color,
+                'phone': church.phone,
+                'address': {
+                    'street': church.street,
+                    'number': church.number,
+                    'neighborhood': church.neighborhood,
+                    'city': church.city,
+                    'state': church.state,
+                    'cep': church.cep,
+                },
+                'latitude': church.latitude,
+                'longitude': church.longitude,
             },
             'events': PublicCalendarEventSerializer(qs, many=True).data,
         })

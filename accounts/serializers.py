@@ -2066,7 +2066,7 @@ class PrayerRequestSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'church', 'requester_name', 'requester_phone', 'is_anonymous',
             'category', 'category_display', 'description', 'wants_visit',
-            'cep', 'street', 'number', 'neighborhood', 'city', 'state',
+            'cep', 'street', 'number', 'complement', 'neighborhood', 'city', 'state',
             'preferred_period', 'preferred_period_display',
             'status', 'status_display', 'assigned_to', 'assigned_to_name',
             'pastoral_notes', 'whatsapp_url', 'elapsed_days', 'created_at',
@@ -2113,7 +2113,8 @@ class PublicPrayerRequestSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'church', 'requester_name', 'requester_phone', 'is_anonymous',
             'category', 'description', 'wants_visit', 'cep', 'street', 'number',
-            'neighborhood', 'city', 'state', 'preferred_period', 'status', 'created_at',
+            'complement', 'neighborhood', 'city', 'state', 'preferred_period',
+            'status', 'created_at',
         ]
         read_only_fields = ['id', 'church', 'status', 'created_at']
         extra_kwargs = {
@@ -2143,6 +2144,43 @@ class PublicPrayerRequestSerializer(serializers.ModelSerializer):
         if value not in PrayerRequest.PreferredPeriod.values:
             raise serializers.ValidationError('Período inválido.')
         return value
+
+    def validate(self, attrs):
+        """Quando o solicitante pede visita pastoral, o endereço completo é
+        obrigatório — oplemento é a única exceção, por ser opcional na
+        prática. Sem isso a equipe pastoral não consegue agendar a visita."""
+        if not attrs.get('wants_visit'):
+            return attrs
+
+        required = {
+            'cep': 'Informe o CEP para a visita pastoral.',
+            'street': 'Informe o logradouro para a visita pastoral.',
+            'number': 'Informe o número para a visita pastoral.',
+            'neighborhood': 'Informe o bairro para a visita pastoral.',
+            'city': 'Informe a cidade para a visita pastoral.',
+            'state': 'Informe o estado (UF) para a visita pastoral.',
+        }
+        errors = {}
+        for field, message in required.items():
+            if not (attrs.get(field) or '').strip():
+                errors[field] = [message]
+
+        cep_digits = (attrs.get('cep') or '').replace(' ', '').replace('-', '')
+        if len(cep_digits) != 8:
+            errors.setdefault('cep', []).append('Informe um CEP válido com 8 dígitos.')
+
+        state = (attrs.get('state') or '').strip().upper()
+        if state and len(state) != 2:
+            errors.setdefault('state', []).append('Informe a UF com 2 letras.')
+
+        if attrs.get('preferred_period') == PrayerRequest.PreferredPeriod.ANY:
+            errors.setdefault('preferred_period', []).append(
+                'Escolha o melhor período para a visita pastoral.'
+            )
+
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
 
 
 class PastoralVisitSerializer(serializers.ModelSerializer):

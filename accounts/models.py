@@ -865,6 +865,7 @@ class PrayerRequest(models.Model):
     cep = models.CharField('CEP', max_length=9, blank=True, default='')
     street = models.CharField('Logradouro', max_length=200, blank=True, default='')
     number = models.CharField('Número', max_length=20, blank=True, default='')
+    complement = models.CharField('Complemento', max_length=100, blank=True, default='')
     neighborhood = models.CharField('Bairro', max_length=100, blank=True, default='')
     city = models.CharField('Cidade', max_length=100, blank=True, default='')
     state = models.CharField('Estado (UF)', max_length=2, blank=True, default='')

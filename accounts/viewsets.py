@@ -2860,10 +2860,13 @@ class PrayerRequestViewSet(viewsets.ModelViewSet):
             return PrayerRequest.objects.none()
         qs = PrayerRequest.objects.filter(church=church).select_related('assigned_to')
         params = self.request.query_params
-        if params.get('status'):
-            status_value = params['status'].upper()
-            if status_value in PrayerRequest.Status.values:
-                qs = qs.filter(status=status_value)
+        status_value = params.get('status', '').upper()
+        if status_value in PrayerRequest.Status.values:
+            qs = qs.filter(status=status_value)
+        else:
+            # Arquivados são histórico: ficam fora das listagens e só voltam
+            # quando o filtro de status é explicitamente "Arquivado".
+            qs = qs.exclude(status=PrayerRequest.Status.ARCHIVED)
         if params.get('category'):
             category = params['category'].upper()
             if category in PrayerRequest.Category.values:
