@@ -1262,6 +1262,108 @@ class ChurchHierarchyTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('card_primary_color', resp.data)
 
+    def _set_logo(self, church):
+        """Grava um nome de logo no campo FileField sem subir nada pro storage."""
+        name = f'gestao_idb/churches/{church.id}/logos/church_logo.png'
+        church.logo = name
+        church.save(update_fields=['logo'])
+        return name
+
+    def _profile_client(self):
+        pastor = self._user(
+            'pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        return self._client(pastor), reverse(
+            'church-manage-profile', args=[self.congregation.id]
+        )
+
+    def test_church_profile_put_with_current_logo_url_is_accepted(self):
+        """Regressão do 400 "Logo inválido.".
+
+        O PUT com a resposta inteira do GET devolve o logo como URL, e o campo
+        só sabe ler data URL base64. Aceitar a URL já salva mantém o logo
+        intacto em vez de zerar a coluna.
+        """
+        self._set_logo(self.congregation)
+        client, url = self._profile_client()
+
+        get = client.get(url)
+        self.assertEqual(get.status_code, status.HTTP_200_OK)
+        self.assertIsNotNone(get.data['logo'])
+
+        payload = dict(get.data)
+        payload['card_primary_color'] = '#123456'
+
+        put = client.put(url, payload, format='json')
+        self.assertEqual(put.status_code, status.HTTP_200_OK)
+        self.assertEqual(put.data['card_primary_color'], '#123456')
+
+        self.congregation.refresh_from_db()
+        self.assertTrue(self.congregation.logo)
+        self.assertTrue(self.congregation.logo.name.endswith('church_logo.png'))
+
+    def test_church_profile_put_with_foreign_logo_url_is_rejected(self):
+        """Só a URL vigente passa: apontar o logo para outro host continua
+        inválido, e a rejeição não pode zerar a coluna."""
+        self._set_logo(self.congregation)
+        client, url = self._profile_client()
+
+        resp = client.put(
+            url,
+            {
+                'name': self.congregation.name,
+                'city': self.congregation.city,
+                'state': self.congregation.state,
+                'logo': 'https://example.com/logo-de-outro-host.png',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('logo', resp.data)
+
+        self.congregation.refresh_from_db()
+        self.assertTrue(self.congregation.logo)
+
+    def test_church_card_config_patch_sends_only_card_fields(self):
+        """O form de carteirinha manda PATCH só com as chaves card_*, então
+        name/city/cep não podem ser exigidos nem sobrescritos."""
+        client, url = self._profile_client()
+
+        resp = client.patch(
+            url,
+            {'card_primary_color': '#ABCDEF', 'card_theme': 'BLACK_PREMIUM'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['card_primary_color'], '#ABCDEF')
+
+        self.congregation.refresh_from_db()
+        self.assertEqual(self.congregation.card_theme, 'BLACK_PREMIUM')
+        self.assertEqual(self.congregation.name, 'Congregação Teste')
+        self.assertEqual(self.congregation.city, 'Campina Grande')
+        self.assertEqual(self.congregation.accounting_category, 'DIZIMO')
+
+    def test_church_card_config_patch_keeps_logo(self):
+        """PATCH sem o campo logo não pode apagar o logo existente."""
+        self._set_logo(self.congregation)
+        client, url = self._profile_client()
+
+        resp = client.patch(url, {'card_valid_until': '2027-12-31'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.congregation.refresh_from_db()
+        self.assertTrue(self.congregation.logo)
+        self.assertEqual(str(self.congregation.card_valid_until), '2027-12-31')
+
+    def test_church_profile_patch_with_empty_body_is_ok(self):
+        """PATCH parcial não exige name/city/state."""
+        client, url = self._profile_client()
+
+        resp = client.patch(url, {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
     def test_sede_manager_cannot_access_alien_congregation_profile(self):
         other_sede = Church.objects.create(
             name='Outra Sede',

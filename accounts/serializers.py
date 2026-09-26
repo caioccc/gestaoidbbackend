@@ -44,11 +44,21 @@ User = get_user_model()
 
 
 class ChurchLogoField(serializers.Field):
-    """Campo de logo da igreja: aceita data URL (base64) e devolve a URL."""
+    """Campo de logo da igreja: aceita data URL (base64) e devolve a URL.
+
+    Aceita também reenviar a URL que já está salva, para que um PUT com a
+    resposta inteira do GET não seja rejeitado: nesse caso o campo é pulado
+    (SkipField) e o logo atual fica intacto. Só a URL vigente passa — qualquer
+    outra http(s) continua inválida, porque aceitá-la deixaria o cliente
+    apontar o logo da igreja para um host arbitrário.
+    """
 
     def to_internal_value(self, data):
         if data in (None, '', False):
             return None
+        current = services.cloudinary_url(getattr(self.parent.instance, 'logo', None))
+        if isinstance(data, str) and current and data == current:
+            raise serializers.SkipField()
         uploaded = services.data_url_to_file(data, 'church_logo.png')
         if uploaded is None:
             raise serializers.ValidationError('Logo inválido.')

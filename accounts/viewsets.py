@@ -2329,20 +2329,20 @@ class ProfileView(APIView):
             )
         return Response(ChurchProfileSerializer(church).data)
 
-    def put(self, request):
+    def put(self, request, partial=False):
         church = self._get_church(request)
         if church is None:
             return Response(
                 {'detail': 'Usuário sem igreja vinculada.'},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        serializer = ChurchProfileSerializer(church, data=request.data)
+        serializer = ChurchProfileSerializer(church, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
 
     def patch(self, request):
-        return self.put(request)
+        return self.put(request, partial=True)
 
 
 class AdminChurchProfileView(APIView):
@@ -2357,15 +2357,15 @@ class AdminChurchProfileView(APIView):
         church = self._church(pk)
         return Response(ChurchProfileSerializer(church).data)
 
-    def put(self, request, pk):
+    def put(self, request, pk, partial=False):
         church = self._church(pk)
-        serializer = ChurchProfileSerializer(church, data=request.data)
+        serializer = ChurchProfileSerializer(church, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
 
     def patch(self, request, pk):
-        return self.put(request, pk)
+        return self.put(request, pk, partial=True)
 
 
 class ChurchProfileManageView(APIView):
@@ -2385,15 +2385,15 @@ class ChurchProfileManageView(APIView):
         church = self._church(pk)
         return Response(ChurchProfileSerializer(church).data)
 
-    def put(self, request, pk):
+    def put(self, request, pk, partial=False):
         church = self._church(pk)
-        serializer = ChurchProfileSerializer(church, data=request.data)
+        serializer = ChurchProfileSerializer(church, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
 
     def patch(self, request, pk):
-        return self.put(request, pk)
+        return self.put(request, pk, partial=True)
 
 
 def _validate_new_password(password) -> Response | None:
