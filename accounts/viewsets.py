@@ -108,6 +108,22 @@ from .serializers import (
 ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
 
 
+def _query_date(value):
+    """Query param de data em `YYYY-MM-DD`, ou `None` se não for utilizável.
+
+    O `parse_date` do Django levanta `ValueError` quando o formato é válido mas
+    a data não existe no calendário (`2026-02-31`). Num filtro vindo da query
+    string isso viraria 500, então um formato inválido é simplesmente ignorado.
+    """
+    raw = (value or '').strip()
+    if not raw:
+        return None
+    try:
+        return parse_date(raw)
+    except ValueError:
+        return None
+
+
 def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Distância em metros entre dois pontos (fórmula de Haversine)."""
     from math import asin, cos, radians, sin, sqrt
@@ -1068,6 +1084,12 @@ class WorshipServiceViewSet(viewsets.ModelViewSet):
     """Registro de cultos da igreja ativa (livro de cultos).
 
     Disponível a todos os perfis com igreja ativa (sem restrição de papel).
+
+    Filtros:
+    - `?start_date=<YYYY-MM-DD>` / `?end_date=<YYYY-MM-DD>` (período do culto;
+      datas inválidas são ignoradas);
+    - `?service_type=<CELEBRACAO|DOUTRINA|ORACAO|VIGILIA|CEIA|ESCOLA_BIBLICA|JOVENS|OUTRO>`;
+    - `?search=<texto>` (tema, pregador, dirigente, texto bíblico ou observações).
     """
 
     serializer_class = WorshipServiceSerializer
@@ -1078,7 +1100,27 @@ class WorshipServiceViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return WorshipService.objects.none()
-        return WorshipService.objects.filter(church=church).order_by('-date', '-id')
+        qs = WorshipService.objects.filter(church=church)
+        params = self.request.query_params
+        start = _query_date(params.get('start_date'))
+        if start:
+            qs = qs.filter(date__gte=start)
+        end = _query_date(params.get('end_date'))
+        if end:
+            qs = qs.filter(date__lte=end)
+        service_type = (params.get('service_type') or '').strip()
+        if service_type in dict(WorshipService.ServiceType.choices):
+            qs = qs.filter(service_type=service_type)
+        search = (params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(theme__icontains=search)
+                | Q(preacher__icontains=search)
+                | Q(presider__icontains=search)
+                | Q(scripture__icontains=search)
+                | Q(notes__icontains=search)
+            )
+        return qs.order_by('-date', '-id')
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church, created_by=self.request.user)
@@ -1187,6 +1229,12 @@ class ChurchMinutesViewSet(viewsets.ModelViewSet):
     """Gestão de atas da igreja ativa, com PDF opcional e link público.
 
     Disponível a todos os perfis com igreja ativa (sem restrição de papel).
+
+    Filtros:
+    - `?start_date=<YYYY-MM-DD>` / `?end_date=<YYYY-MM-DD>` (período da reunião;
+      datas inválidas são ignoradas);
+    - `?meeting_type=<ASSEMBLEIA_GERAL|ASSEMBLEIA_EXTRAORDINARIA|DIRETORIA|CONSELHO|OUTRO>`;
+    - `?search=<texto>` (título, local, redator, participantes ou texto da ata).
     """
 
     serializer_class = ChurchMinutesSerializer
@@ -1197,7 +1245,27 @@ class ChurchMinutesViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return ChurchMinutes.objects.none()
-        return ChurchMinutes.objects.filter(church=church).order_by('-meeting_date', '-id')
+        qs = ChurchMinutes.objects.filter(church=church)
+        params = self.request.query_params
+        start = _query_date(params.get('start_date'))
+        if start:
+            qs = qs.filter(meeting_date__gte=start)
+        end = _query_date(params.get('end_date'))
+        if end:
+            qs = qs.filter(meeting_date__lte=end)
+        meeting_type = (params.get('meeting_type') or '').strip()
+        if meeting_type in dict(ChurchMinutes.MeetingType.choices):
+            qs = qs.filter(meeting_type=meeting_type)
+        search = (params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search)
+                | Q(location__icontains=search)
+                | Q(recorder__icontains=search)
+                | Q(participants__icontains=search)
+                | Q(content__icontains=search)
+            )
+        return qs.order_by('-meeting_date', '-id')
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church, created_by=self.request.user)
@@ -2873,6 +2941,10 @@ class PrayerRequestViewSet(viewsets.ModelViewSet):
                 qs = qs.filter(category=category)
         if params.get('wants_visit') in ('1', 'true', 'True'):
             qs = qs.filter(wants_visit=True)
+        if params.get('preferred_period'):
+            period = params['preferred_period'].upper()
+            if period in PrayerRequest.PreferredPeriod.values:
+                qs = qs.filter(preferred_period=period)
         search = params.get('q', '').strip()
         if search:
             qs = qs.filter(

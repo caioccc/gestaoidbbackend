@@ -3436,6 +3436,11 @@ class WorshipServiceTests(BaseChurchTestCase):
         data.update(kwargs)
         return data
 
+    def _create(self, **kwargs):
+        resp = self.client.post(reverse('worship-list'), self._payload(**kwargs), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        return resp.data
+
     def test_create_list_update_delete(self):
         resp = self.client.post(reverse('worship-list'), self._payload(), format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
@@ -3473,6 +3478,48 @@ class WorshipServiceTests(BaseChurchTestCase):
         )
         resp = self._client(other).get(reverse('worship-list'))
         self.assertEqual(resp.data, [])
+
+    def test_filters_by_period_type_and_search(self):
+        self._create(date='2026-01-11', theme='A palavra que transforma')
+        self._create(
+            date='2026-07-19',
+            service_type='VIGILIA',
+            theme='Vigília da natividade',
+            preacher='Pb. Lucas Andrade',
+            notes='Acolhimento dos visitantes à meia-noite.',
+        )
+        self._create(date='2025-04-06', service_type='ESCOLA_BIBLICA', theme='A Cartinha e a Vida')
+
+        def filtered(**params):
+            resp = self.client.get(reverse('worship-list'), params)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            return [row['date'] for row in resp.data]
+
+        self.assertEqual(len(filtered()), 3)
+        self.assertEqual(
+            filtered(start_date='2026-01-01'),
+            ['2026-07-19', '2026-01-11'],
+        )
+        self.assertEqual(filtered(end_date='2025-12-31'), ['2025-04-06'])
+        self.assertEqual(
+            filtered(start_date='2026-01-01', end_date='2026-12-31'),
+            ['2026-07-19', '2026-01-11'],
+        )
+        self.assertEqual(filtered(service_type='VIGILIA'), ['2026-07-19'])
+        self.assertEqual(filtered(search='Lucas'), ['2026-07-19'])
+        self.assertEqual(filtered(search='Cartinha'), ['2025-04-06'])
+        # Periodo + tipo combinados nao podem devolver registro fora do recorte.
+        self.assertEqual(filtered(start_date='2026-01-01', service_type='ESCOLA_BIBLICA'), [])
+
+    def test_invalid_filter_params_are_ignored(self):
+        self.client.post(reverse('worship-list'), self._payload(), format='json')
+        resp = self.client.get(reverse('worship-list'), {
+            'start_date': 'ontem',
+            'end_date': '2026-02-31',
+            'service_type': 'TIPO_QUE_NAO_EXISTE',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
 
     def test_negative_counts_rejected(self):
         resp = self.client.post(
@@ -3556,6 +3603,61 @@ class ChurchMinutesTests(BaseChurchTestCase):
         )
         resp = self._client(other).get(reverse('minutes-list'))
         self.assertEqual(resp.data, [])
+
+    def test_filters_by_period_type_and_search(self):
+        self._create_minute(meeting_date='2026-01-15', title='Ata da Assembleia Geral')
+        self._create_minute(
+            meeting_date='2026-06-20',
+            title='Ata da Reunião da Diretoria',
+            meeting_type='DIRETORIA',
+            location='Sala de Reuniões',
+            content='Pauta única sobre o orçamento.',
+        )
+        self._create_minute(
+            meeting_date='2025-03-08',
+            title='Ata do Conselho',
+            meeting_type='CONSELHO',
+        )
+
+        def filtered(**params):
+            resp = self.client.get(reverse('minutes-list'), params)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            return [row['title'] for row in resp.data]
+
+        self.assertEqual(len(filtered()), 3)
+        self.assertEqual(
+            filtered(start_date='2026-01-01'),
+            ['Ata da Reunião da Diretoria', 'Ata da Assembleia Geral'],
+        )
+        self.assertEqual(
+            filtered(end_date='2025-12-31'),
+            ['Ata do Conselho'],
+        )
+        self.assertEqual(
+            filtered(start_date='2026-01-01', end_date='2026-12-31'),
+            ['Ata da Reunião da Diretoria', 'Ata da Assembleia Geral'],
+        )
+        self.assertEqual(
+            filtered(meeting_type='DIRETORIA'),
+            ['Ata da Reunião da Diretoria'],
+        )
+        self.assertEqual(filtered(search='orçamento'), ['Ata da Reunião da Diretoria'])
+        self.assertEqual(filtered(search='Sala de Reuniões'), ['Ata da Reunião da Diretoria'])
+        # Periodo + tipo combinados nao podem devolver registro fora do recorte.
+        self.assertEqual(
+            filtered(start_date='2026-01-01', meeting_type='CONSELHO'),
+            [],
+        )
+
+    def test_invalid_filter_params_are_ignored(self):
+        self._create_minute()
+        resp = self.client.get(reverse('minutes-list'), {
+            'start_date': 'nao-e-data',
+            'end_date': '2026-13-45',
+            'meeting_type': 'TIPO_QUE_NAO_EXISTE',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 1)
 
     def test_all_profiles_can_write(self):
         treasurer = self._user(
@@ -5886,6 +5988,34 @@ class PrayerRequestTests(BaseChurchTestCase):
         pr.refresh_from_db()
         self.assertEqual(pr.status, PrayerRequest.Status.PRAYING)
         self.assertEqual(pr.pastoral_notes, 'Orando pela família.')
+
+    def test_preferred_period_filter(self):
+        """Filtro de período preferido (Manhã/Tarde/Noite) aplicado server-side."""
+        intercessor = self._user(
+            'intercessor@teste.com', church=self.sede,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        self._prayer(requester_name='Ana Souza', preferred_period=PrayerRequest.PreferredPeriod.MORNING)
+        self._prayer(requester_name='Bruno Lima', preferred_period=PrayerRequest.PreferredPeriod.AFTERNOON)
+        client = self._client(intercessor)
+
+        resp = client.get(
+            reverse('prayer-request-list'), {'preferred_period': 'MORNING'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['requester_name'] for item in resp.data], ['Ana Souza'])
+
+        resp = client.get(
+            reverse('prayer-request-list'), {'preferred_period': 'afternoon'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['requester_name'] for item in resp.data], ['Bruno Lima'])
+
+        resp = client.get(
+            reverse('prayer-request-list'), {'preferred_period': 'NOITE_INVALIDA'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 2)
 
     def test_archived_hidden_from_default_list(self):
         """Pedidos arquivados são histórico: não aparecem na listagem padrão,
