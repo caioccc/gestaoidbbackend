@@ -3470,6 +3470,37 @@ class WorshipServiceTests(BaseChurchTestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
 
+    def test_without_paginate_returns_plain_list(self):
+        self._create(date='2026-01-11')
+        self._create(date='2026-02-11')
+        resp = self.client.get(reverse('worship-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(resp.data, list)
+        self.assertEqual(len(resp.data), 2)
+        self.assertNotIn('count', resp.data)
+
+    def test_paginate_returns_count_and_results(self):
+        for i in range(3):
+            self._create(date=f'2026-01-{i + 10:02d}')
+        resp = self.client.get(reverse('worship-list'), {'paginate': '1'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), 3)
+        self.assertIn('next', resp.data)
+        self.assertIn('previous', resp.data)
+
+    def test_paginate_respects_filters(self):
+        self._create(date='2026-01-11', service_type='DOUTRINA')
+        self._create(date='2026-02-11', service_type='VIGILIA')
+        resp = self.client.get(reverse('worship-list'), {
+            'paginate': '1',
+            'service_type': 'VIGILIA',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
+        self.assertEqual(resp.data['results'][0]['service_type'], 'VIGILIA')
+
     def test_scoped_to_active_church(self):
         self.client.post(reverse('worship-list'), self._payload(), format='json')
         other = self._user(
@@ -3990,6 +4021,54 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         resp = self._client(self.secretaria).get(reverse('member-submissions'))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_submissions_list_without_paginate_returns_plain_list(self):
+        client = self._client(self.pastor)
+        resp = client.get(reverse('member-submissions'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(resp.data, list)
+
+    def test_submissions_list_paginate_returns_count_and_results(self):
+        for i in range(3):
+            MemberSubmission.objects.create(
+                church=self.sede,
+                source_hash='teste-paginacao',
+                data={'name': f'Candidato {i}'},
+            )
+        client = self._client(self.pastor)
+        resp = client.get(
+            reverse('member-submissions'),
+            {'paginate': '1', 'page_size': 2},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 3)
+        self.assertIsNotNone(resp.data['next'])
+        self.assertIsNone(resp.data['previous'])
+        self.assertEqual(len(resp.data['results']), 2)
+        resp2 = client.get(resp.data['next'])
+        self.assertEqual(resp2.data['count'], 3)
+        self.assertIsNone(resp2.data['next'])
+        self.assertEqual(len(resp2.data['results']), 1)
+
+    def test_submissions_list_paginate_respects_status_filter(self):
+        MemberSubmission.objects.create(
+            church=self.sede,
+            source_hash='teste-paginacao',
+            data={'name': 'Pendente'},
+        )
+        MemberSubmission.objects.create(
+            church=self.sede,
+            source_hash='teste-paginacao',
+            data={'name': 'Aprovado'},
+            status=MemberSubmission.Status.APPROVED,
+        )
+        client = self._client(self.pastor)
+        resp = client.get(
+            reverse('member-submissions'),
+            {'paginate': '1', 'status': 'PENDING'},
+        )
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(resp.data['results'][0]['data']['name'], 'Pendente')
 
     def test_approve_member_submission_applies_data(self):
         self._submit(self.card_hash)

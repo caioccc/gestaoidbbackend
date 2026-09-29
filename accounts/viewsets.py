@@ -737,6 +737,14 @@ class MemberListPagination(PageNumberPagination):
     max_page_size = 200
 
 
+class WorshipServicePagination(PageNumberPagination):
+    """Paginação do registro de cultos (ativa com `?paginate=1`)."""
+
+    page_size = 25
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+
 class MemberSelfViewSet(viewsets.ModelViewSet):
     """CRUD de membros da igreja ativa (Secretaria/Pastor/Admin). Sem dados
     financeiros.
@@ -1121,6 +1129,12 @@ class WorshipServiceViewSet(viewsets.ModelViewSet):
                 | Q(notes__icontains=search)
             )
         return qs.order_by('-date', '-id')
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get('paginate') != '1':
+            return super().list(request, *args, **kwargs)
+        self.pagination_class = WorshipServicePagination
+        return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church, created_by=self.request.user)
@@ -2046,6 +2060,10 @@ class MemberSubmissionsView(APIView):
     """Lista as submissões (pendências de revisão) da igreja ativa.
 
     PASTOR/SECRETARIA. `?status=PENDING|APPROVED|REJECTED` filtra.
+
+    Retorna um array quando chamada sem paginação, e
+    `{count, next, previous, results}` (25 por página, `page`/`page_size`)
+    quando `?paginate=1`.
     """
 
     permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
@@ -2055,10 +2073,19 @@ class MemberSubmissionsView(APIView):
         church = request.user.church
         if church is None:
             return Response([])
-        qs = MemberSubmission.objects.filter(church=church).select_related('member')
+        qs = (
+            MemberSubmission.objects.filter(church=church)
+            .select_related('member')
+            .order_by('-created_at')
+        )
         status_filter = request.query_params.get('status')
         if status_filter:
             qs = qs.filter(status=status_filter)
+        if request.query_params.get('paginate') == '1':
+            paginator = MemberListPagination()
+            page = paginator.paginate_queryset(qs, request)
+            serializer = MemberSubmissionSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
         return Response(MemberSubmissionSerializer(qs, many=True).data)
 
 
