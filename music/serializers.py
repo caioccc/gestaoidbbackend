@@ -1,3 +1,5 @@
+from django.db.models import Count, Max, Q
+from django.utils import timezone
 from rest_framework import serializers
 
 from accounts import services as accounts_services
@@ -15,6 +17,81 @@ from .models import (
     WorshipSetlist,
 )
 from .permissions import can_edit_song, can_edit_setlist, can_govern_setlist
+
+
+def visible_songs(user, church=None):
+    """Músicas que `user` pode enxergar: as públicas da igreja + as privadas
+    que ele mesmo cadastrou. Usado nos querysets e nas validações de payload
+    para que nenhuma rota contorne o isolamento.
+
+    Não usar em `check-youtube`: aquela busca é global de propósito.
+    """
+    qs = Song.objects.all()
+    if church is not None:
+        qs = qs.filter(church=church)
+    return qs.filter(Q(is_private=False) | Q(created_by=user))
+
+
+def apply_visibility(qs, user, param, private_label='Minhas privadas'):
+    """Aplica o isolamento obrigatório e, se vier, o filtro `?visibility=`.
+
+    `all` (ou ausente) devolve públicas + as privadas do próprio usuário;
+    `public` e `private` restringem a fatia sem nunca alcançar itens de
+    terceiros, porque o isolamento acima já é incondicional.
+    """
+    qs = qs.filter(Q(is_private=False) | Q(created_by=user))
+    if param == 'public':
+        return qs.filter(is_private=False)
+    if param == 'private':
+        return qs.filter(is_private=True, created_by=user)
+    return qs
+
+
+def band_stats_map(song_ids, today, user=None, church=None):
+    """Contagem de execuções por banda, agrupada pela banda do SETLIST (não
+    pela banda fixa da música: uma mesma música toca em bandas diferentes).
+
+    Devolve `{song_id: [{band, band_name, band_color, times_played,
+    last_played}]}`. Setlists sem banda entram como `band: None`.
+
+    `user`/`church` limitam a contagem aos setlists que aquele usuário pode
+    ver: sem isso, o número de execuções revelaria a existência (e a data) de
+    setlists privados de terceiros. Chamadas sem `user` contam só setlists
+    públicos.
+    """
+    qs = BandSetlistItem.objects.filter(
+        song_id__in=list(song_ids), setlist__date__lte=today
+    )
+    if church is not None:
+        qs = qs.filter(setlist__church=church)
+    if user is not None and getattr(user, 'is_authenticated', False):
+        qs = qs.filter(
+            Q(setlist__is_private=False) | Q(setlist__created_by=user)
+        )
+    else:
+        qs = qs.filter(setlist__is_private=False)
+    rows = (
+        qs
+        .values(
+            'song_id', 'setlist__band_id',
+            'setlist__band__name', 'setlist__band__color',
+        )
+        .annotate(
+            times_played=Count('id', distinct=True),
+            last_played=Max('setlist__date'),
+        )
+        .order_by('song_id', '-times_played', 'setlist__band__name')
+    )
+    stats: dict = {}
+    for row in rows:
+        stats.setdefault(row['song_id'], []).append({
+            'band': row['setlist__band_id'],
+            'band_name': row['setlist__band__name'] or '',
+            'band_color': row['setlist__band__color'] or '',
+            'times_played': row['times_played'],
+            'last_played': row['last_played'],
+        })
+    return stats
 
 
 class BandPhotoField(serializers.Field):
@@ -176,11 +253,20 @@ class WorshipSetlistSerializer(serializers.ModelSerializer):
         fields = ['id', 'roster', 'items', 'created_at', 'updated_at']
 
 
+class SongBandStatSerializer(serializers.Serializer):
+    """Execuções de uma música, agrupadas pela banda do setlist."""
+
+    band = serializers.IntegerField(allow_null=True)
+    band_name = serializers.CharField(allow_blank=True)
+    band_color = serializers.CharField(allow_blank=True)
+    times_played = serializers.IntegerField()
+    last_played = serializers.DateField(allow_null=True)
+
+
 class SongSerializer(serializers.ModelSerializer):
     band_name = serializers.CharField(source='band.name', read_only=True)
     band_color = serializers.CharField(source='band.color', read_only=True)
-    times_played = serializers.SerializerMethodField()
-    last_played = serializers.SerializerMethodField()
+    band_stats = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
 
@@ -191,7 +277,7 @@ class SongSerializer(serializers.ModelSerializer):
             'title', 'artist', 'youtube_id', 'youtube_title',
             'thumbnail_url', 'duration_seconds', 'original_key', 'church_key',
             'bpm', 'time_signature', 'chords', 'chords_json', 'lyrics',
-            'tags', 'times_played', 'last_played', 'is_active', 'created_at',
+            'tags', 'band_stats', 'is_active', 'is_private', 'created_at',
             'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
             'created_by', 'created_by_name', 'can_edit',
         ]
@@ -256,24 +342,49 @@ class SongSerializer(serializers.ModelSerializer):
         if not title:
             raise serializers.ValidationError({'title': 'Informe o título da música.'})
         attrs['title'] = title
+
+        # Uma música privada não pode continuar dentro de um setlist público:
+        # quem não é dono do setlist enxergaria a música (ou uma setlist
+        # quebrada) que deveria estar escondida. O usuário precisa remover a
+        # música desses setlists ou torná-los privados antes de privatizá-la.
+        if attrs.get('is_private') and self.instance is not None \
+                and not self.instance.is_private:
+            public_setlists = (
+                BandSetlist.objects
+                .filter(
+                    items__song=self.instance,
+                    church_id=self.instance.church_id,
+                    is_private=False,
+                )
+                .distinct()
+            )
+            public_setlists = list(public_setlists)
+            if public_setlists:
+                nomes = ', '.join(sl.description or f'#{sl.pk}' for sl in public_setlists[:5])
+                extra = (
+                    f' (+{len(public_setlists) - 5})' if len(public_setlists) > 5 else ''
+                )
+                raise serializers.ValidationError({
+                    'is_private': (
+                        'Esta música está em setlists públicos. Remova-a deles ou '
+                        f'marque-os como privados antes de deixá-la privada: {nomes}{extra}.'
+                    )
+                })
         return attrs
 
-    def get_times_played(self, obj):
-        worship = getattr(obj, 'worship_plays', None)
-        band = getattr(obj, 'band_plays', None)
-        if worship is None and band is None:
-            return obj.times_played
-        return (worship or 0) + (band or 0)
-
-    def get_last_played(self, obj):
-        candidates = [
-            getattr(obj, 'worship_last', None),
-            getattr(obj, 'band_last', None),
-        ]
-        candidates = [d for d in candidates if d]
-        if candidates:
-            return max(candidates)
-        return obj.last_played
+    def get_band_stats(self, obj):
+        """Execuções agrupadas por banda. Música privada nunca conta."""
+        if getattr(obj, 'is_private', False):
+            return []
+        cache = getattr(obj, '_band_stats_cache', None)
+        if cache is not None:
+            return cache
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        church = getattr(user, 'church', None) or obj.church
+        return band_stats_map(
+            [obj.pk], timezone.localdate(), user=user, church=church
+        ).get(obj.pk, [])
 
     def get_created_by_name(self, obj):
         if not obj.created_by_id:
@@ -411,7 +522,7 @@ class BandSetlistSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'church', 'band', 'band_name', 'band_color', 'date',
             'description', 'theme', 'notes', 'created_by', 'created_by_name',
-            'created_at', 'updated_at', 'items',
+            'created_at', 'updated_at', 'items', 'is_private',
             'can_edit', 'can_delete', 'can_manage',
         ]
         read_only_fields = ['church', 'created_by']
@@ -448,6 +559,7 @@ class BandSetlistPayloadSerializer(serializers.Serializer):
     description = serializers.CharField(max_length=200)
     theme = serializers.CharField(required=False, allow_blank=True, max_length=200)
     notes = serializers.CharField(required=False, allow_blank=True)
+    is_private = serializers.BooleanField(required=False)
     items = serializers.ListField(
         child=serializers.DictField(), required=False, allow_empty=True,
     )
@@ -458,6 +570,31 @@ class BandSetlistPayloadSerializer(serializers.Serializer):
         church = getattr(getattr(request, 'user', None), 'church', None)
         if church is not None:
             self.fields['band'].queryset = Band.objects.filter(church=church)
+        self._songs = visible_songs(
+            getattr(request, 'user', None), church=church
+        )
+
+    def _resolve_songs(self, items):
+        """Valida os IDs de `items` contra o repertório VISÍVEL ao autor.
+
+        Antes cada ID ia direto para o `bulk_create`, o que permitia apontar
+        para uma música de outra igreja (ou privada de outra pessoa) só com
+        um POST forjado.
+        """
+        ids = [int(item.get('song')) for item in items or [] if item.get('song')]
+        found = {
+            song.pk: song
+            for song in self._songs.filter(pk__in=ids).select_related('band')
+        }
+        missing = [pk for pk in ids if pk not in found]
+        if missing:
+            raise serializers.ValidationError({
+                'items': (
+                    'Música indisponível para você (de outra igreja ou privada '
+                    f'de outro usuário): {", ".join(str(pk) for pk in missing)}.'
+                )
+            })
+        return found
 
     def validate_items(self, items):
         cleaned = []
@@ -472,3 +609,50 @@ class BandSetlistPayloadSerializer(serializers.Serializer):
                 'notes': (item.get('notes') or '').strip(),
             })
         return cleaned
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        setlist = self.context.get('setlist')
+        items = attrs.get('items')
+
+        # `is_private` ausente num update significa "mantém o valor atual";
+        # num create significa pública.
+        if 'is_private' in attrs:
+            is_private = attrs['is_private']
+        else:
+            is_private = bool(getattr(setlist, 'is_private', False))
+
+        if items is None:
+            # Update parcial sem `items`: os itens já gravados continuam lá,
+            # então a regra "público não aceita música privada" precisa ser
+            # checada contra eles — senão um PATCH {is_private: false} numa
+            # setlist privada com música privada burlaria a validação.
+            if not is_private and setlist is not None and setlist.pk:
+                stored = [
+                    {'song': item.song_id}
+                    for item in setlist.items.select_related('song')
+                ]
+                if stored:
+                    items = stored
+            else:
+                return attrs
+
+        songs = self._resolve_songs(items)
+        if not is_private:
+            private = [
+                songs[item['song']] for item in items
+                if songs[item['song']].is_private
+            ]
+            if private:
+                raise serializers.ValidationError({
+                    'items': (
+                        'Não é possível adicionar música privada a um setlist '
+                        'público. Deixe o setlist como privado ou remova: '
+                        + ', '.join(song.title for song in private[:5])
+                        + (
+                            f' (+{len(private) - 5})' if len(private) > 5 else ''
+                        )
+                        + '.'
+                    )
+                })
+        return attrs

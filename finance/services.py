@@ -1333,25 +1333,26 @@ def generate_filled_national_report(church, year: int, month: int) -> bytes:
         f"ESTADO DO: {church.state.upper()}"
     )
 
-    def sum_entries(category) -> Decimal:
-        return FinancialEntry.objects.filter(
+    entry_totals = {
+        row['category']: row['total'] or Decimal('0.00')
+        for row in FinancialEntry.objects.filter(
             church=church, date__year=year, date__month=month,
-            category=category,
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
-
-    def sum_exits(category) -> Decimal:
-        return FinancialExit.objects.filter(
+        ).values('category').annotate(total=Sum('amount'))
+    }
+    exit_totals = {
+        row['category']: row['total'] or Decimal('0.00')
+        for row in FinancialExit.objects.filter(
             church=church, date__year=year, date__month=month,
-            category=category,
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+        ).values('category').annotate(total=Sum('amount'))
+    }
 
     # Entradas (coluna C) — uma linha por categoria.
     for row, category in _NATIONAL_ENTRY_ROWS.items():
-        ws.cell(row=row, column=3).value = float(sum_entries(category))
+        ws.cell(row=row, column=3).value = float(entry_totals.get(category, Decimal('0.00')))
 
     # Despesas (coluna J) — mesma categoria da linha.
     for row, category in _NATIONAL_ENTRY_ROWS.items():
-        ws.cell(row=row, column=10).value = float(sum_exits(category))
+        ws.cell(row=row, column=10).value = float(exit_totals.get(category, Decimal('0.00')))
 
     buf = BytesIO()
     wb.save(buf)

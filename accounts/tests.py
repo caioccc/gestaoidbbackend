@@ -2975,6 +2975,229 @@ class BirthdayMembersTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
+class ServerSidePaginationTests(BaseChurchTestCase):
+    """Paginação no servidor das listagens de inventário, atas e certificados.
+
+    Contrato: sem `?paginate=1` a resposta continua sendo array (consumidores
+    antigos e pickers); com `?paginate=1` vira `{count, next, previous, results}`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.pastor = self._user(
+            'pastor-pag@teste.com', church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        self.client = self._client(self.pastor)
+
+    def _list(self, url_name, params=None):
+        resp = self.client.get(reverse(url_name), params or {})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp
+
+    def _assert_plain_by_default(self, url_name, expected_len):
+        resp = self._list(url_name)
+        self.assertIsInstance(resp.data, list)
+        self.assertEqual(len(resp.data), expected_len)
+
+    def _assert_paginated(self, url_name, params=None, page_size=2):
+        base = dict(params or {})
+        resp = self._list(url_name, {**base, 'paginate': '1', 'page_size': page_size})
+        self.assertEqual(resp.data['count'], 3)
+        self.assertEqual(len(resp.data['results']), page_size)
+        self.assertIsNotNone(resp.data['next'])
+        self.assertIsNone(resp.data['previous'])
+        first = resp.data['results']
+        resp2 = self._list(url_name, {**base, 'paginate': '1', 'page_size': page_size, 'page': 2})
+        self.assertIsNone(resp2.data['next'])
+        self.assertIsNotNone(resp2.data['previous'])
+        self.assertEqual(len(resp2.data['results']), 1)
+        # páginas diferentes não podem repetir registros
+        first_ids = {r['id'] for r in first}
+        second_ids = {r['id'] for r in resp2.data['results']}
+        self.assertFalse(first_ids & second_ids)
+        return resp2
+
+    def _seed_inventory(self):
+        loc_a = StorageLocation.objects.create(church=self.sede, name='Anexo A')
+        loc_b = StorageLocation.objects.create(church=self.sede, name='Anexo B')
+        for index in range(3):
+            MaterialItem.objects.create(
+                church=self.sede,
+                name=f'Material {index}',
+                description='descricao comum' if index < 2 else 'descricao exclusiva',
+                location=loc_a if index % 2 == 0 else loc_b,
+            )
+
+    def test_storage_locations_pagination(self):
+        for name in ('Anexo A', 'Anexo B', 'Anexo C'):
+            StorageLocation.objects.create(church=self.sede, name=name)
+        self._assert_plain_by_default('storage-location-list', 3)
+        self._assert_paginated('storage-location-list')
+
+    def test_material_items_pagination(self):
+        self._seed_inventory()
+        self._assert_plain_by_default('material-list', 3)
+        self._assert_paginated('material-list')
+
+    def test_material_items_pagination_respects_search(self):
+        self._seed_inventory()
+        resp = self._list('material-list', {'paginate': '1', 'page_size': 10, 'search': 'exclusiva'})
+        self.assertEqual(resp.data['count'], 1)
+        self.assertEqual(len(resp.data['results']), 1)
+
+    def test_material_items_pagination_search_matches_name(self):
+        self._seed_inventory()
+        resp = self._list('material-list', {'paginate': '1', 'page_size': 10, 'search': 'Material 1'})
+        self.assertEqual(resp.data['count'], 1)
+
+    def test_material_items_current_loan_prefetch_matches_unpaginated(self):
+        self._seed_inventory()
+        item = MaterialItem.objects.filter(church=self.sede).first()
+        Loan.objects.create(
+            church=self.sede, item=item, borrower_name='Maria',
+            borrowed_at='2026-09-01', expected_return='2026-09-20',
+        )
+        plain = self._list('material-list').data
+        plain_loan = [i for i in plain if i['id'] == item.id][0]['current_loan']
+        paged = self._list('material-list', {'paginate': '1', 'page_size': 50}).data
+        paged_loan = [i for i in paged['results'] if i['id'] == item.id][0]['current_loan']
+        self.assertIsNotNone(plain_loan)
+        self.assertIsNotNone(paged_loan)
+        self.assertEqual(plain_loan['loan_id'], paged_loan['loan_id'])
+        self.assertEqual(plain_loan['borrower_display'], 'Maria')
+
+    def test_material_items_pagination_respects_location(self):
+        self._seed_inventory()
+        loc = StorageLocation.objects.get(name='Anexo A')
+        resp = self._list('material-list', {'paginate': '1', 'page_size': 10, 'location': loc.id})
+        self.assertEqual(resp.data['count'], 2)
+
+    def _seed_loans(self):
+        from datetime import date, timedelta  # noqa: PLC0415
+        item = MaterialItem.objects.create(
+            church=self.sede, name='Mixer', location=StorageLocation.objects.create(
+                church=self.sede, name='Deposito'),
+        )
+        today = date.today()
+        Loan.objects.create(
+            church=self.sede, item=item, borrower_name='Aberto',
+            borrowed_at=today - timedelta(days=1), expected_return=today + timedelta(days=5),
+        )
+        Loan.objects.create(
+            church=self.sede, item=item, borrower_name='Atrasado',
+            borrowed_at=today - timedelta(days=30), expected_return=today - timedelta(days=2),
+        )
+        Loan.objects.create(
+            church=self.sede, item=item, borrower_name='Devolvido',
+            borrowed_at=today - timedelta(days=40), expected_return=today - timedelta(days=35),
+            returned_at=today - timedelta(days=34),
+        )
+
+    def test_loans_pagination(self):
+        self._seed_loans()
+        self._assert_plain_by_default('loan-list', 3)
+        self._assert_paginated('loan-list')
+
+    def test_loans_pagination_respects_status(self):
+        self._seed_loans()
+        for status, expected in (('open', 2), ('overdue', 1), ('returned', 1)):
+            resp = self._list('loan-list', {'paginate': '1', 'page_size': 10, 'status': status})
+            self.assertEqual(resp.data['count'], expected, status)
+
+    def test_loans_open_includes_overdue_like_the_ui_tab(self):
+        # A aba "Abertos" da tela lista também os atrasados (só exclui os
+        # devolvidos), então o filtro não pode esconder os atrasados.
+        self._seed_loans()
+        resp = self._list('loan-list', {'paginate': '1', 'page_size': 10, 'status': 'open'})
+        names = [r['borrower_display'] for r in resp.data['results']]
+        self.assertIn('Atrasado', names)
+        self.assertNotIn('Devolvido', names)
+
+    def test_loans_order_open_by_due_date_then_returned_by_returned_at(self):
+        self._seed_loans()
+        resp = self._list('loan-list', {'paginate': '1', 'page_size': 10})
+        self.assertEqual(
+            [r['borrower_display'] for r in resp.data['results']],
+            ['Atrasado', 'Aberto', 'Devolvido'],
+        )
+
+    def test_loans_pagination_respects_item_filter(self):
+        self._seed_loans()
+        other = MaterialItem.objects.create(
+            church=self.sede, name='Cabo', location=StorageLocation.objects.create(
+                church=self.sede, name='Sala'),
+        )
+        Loan.objects.create(
+            church=self.sede, item=other, borrower_name='Outro',
+            borrowed_at='2026-09-01', expected_return='2026-09-20',
+        )
+        resp = self._list('loan-list', {'paginate': '1', 'page_size': 10, 'item': other.id})
+        self.assertEqual(resp.data['count'], 1)
+
+    def _seed_minutes(self):
+        from datetime import date  # noqa: PLC0415
+        for index in range(3):
+            ChurchMinutes.objects.create(
+                church=self.sede,
+                title=f'Ata {index}',
+                meeting_date=date(2026, 1, index + 1),
+                content='texto',
+                created_by=self.pastor,
+            )
+
+    def test_minutes_pagination(self):
+        self._seed_minutes()
+        self._assert_plain_by_default('minutes-list', 3)
+        self._assert_paginated('minutes-list')
+
+    def _seed_certificates(self):
+        from datetime import date  # noqa: PLC0415
+        for index in range(3):
+            EcclesiasticalCertificate.objects.create(
+                church=self.sede,
+                certificate_type=CertificateTemplate.CertificateType.BAPTISM,
+                recipient_name=f'Recipient {index}',
+                event_date=date(2026, 2, index + 1),
+                officiant_name='Pr. João',
+            )
+
+    def test_certificates_pagination(self):
+        self._seed_certificates()
+        self._assert_plain_by_default('certificate-list', 3)
+        self._assert_paginated('certificate-list')
+
+    def test_certificates_pagination_respects_filters(self):
+        self._seed_certificates()
+        resp = self._list('certificate-list', {
+            'paginate': '1', 'page_size': 10, 'year': '2026', 'search': 'Recipient 1',
+        })
+        self.assertEqual(resp.data['count'], 1)
+
+    def test_certificate_templates_pagination(self):
+        for index in range(3):
+            CertificateTemplate.objects.create(church=self.sede, name=f'Modelo {index}')
+        self._assert_plain_by_default('certificate-template-list', 3)
+        self._assert_paginated('certificate-template-list')
+
+    def test_paginated_list_stays_scoped_to_church(self):
+        self._seed_inventory()
+        MaterialItem.objects.create(
+            church=self.congregation, name='Alheio',
+            location=StorageLocation.objects.create(church=self.congregation, name='Sala'),
+        )
+        resp = self._list('material-list', {'paginate': '1', 'page_size': 50})
+        self.assertEqual(resp.data['count'], 3)
+        self.assertFalse(any(r['name'] == 'Alheio' for r in resp.data['results']))
+
+    def test_page_out_of_range_returns_404(self):
+        self._seed_inventory()
+        resp = self.client.get(
+            reverse('material-list'), {'paginate': '1', 'page_size': 10, 'page': 99},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+
 class InventoryTests(BaseChurchTestCase):
     """Gestão de materiais/equipamentos: locais, itens e empréstimos."""
 
@@ -6420,6 +6643,118 @@ class SundaySchoolTests(BaseChurchTestCase):
         self.assertTrue(attendance.is_present)
         self.assertTrue(attendance.brought_bible)
         self.assertEqual(resp.data['present_count'], 1)
+
+    def test_session_get_adds_enrollments_created_after_session(self):
+        """Regressão: matrículas feitas depois da aula precisam entrar na folha.
+
+        A folha era criada só na primeira abertura; as matrículas cadastradas
+        depois ficavam invisíveis na chamada mesmo constando em `enrollment_count`.
+        """
+        sunday_class = self._class()
+        first = self._student(sunday_class, student_name='Maria Silva')
+        client = self._client(self._secretaria())
+
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-06'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(len(resp.data['attendances']), 1)
+
+        # Marca presença e consolida a aula.
+        resp = client.post(
+            reverse('sunday-school-session-list'),
+            {
+                'sunday_school_class': sunday_class.pk,
+                'date': '2026-09-06',
+                'attendance': [{'enrollment_id': first.pk, 'is_present': True}],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        # 49 matrículas entram depois da aula já existir.
+        late = [
+            self._student(sunday_class, student_name=f'Aluno {i:02d}') for i in range(49)
+        ]
+
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-06'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(len(resp.data['attendances']), 50)
+        enrollment_ids = {a['enrollment'] for a in resp.data['attendances']}
+        self.assertEqual(enrollment_ids, {first.pk} | {e.pk for e in late})
+        # A presença já registrada no primeiro aluno não foi perdida.
+        kept = next(a for a in resp.data['attendances'] if a['enrollment'] == first.pk)
+        self.assertTrue(kept['is_present'])
+        self.assertEqual(resp.data['present_count'], 1)
+
+        # Reabrir de novo não duplica nenhuma linha.
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-06'},
+        )
+        self.assertEqual(len(resp.data['attendances']), 50)
+
+    def test_session_post_ignores_inactive_enrollment_of_same_class(self):
+        """Matrícula inativa da própria classe não quebra o salvamento da folha."""
+        sunday_class = self._class()
+        active = self._student(sunday_class, student_name='Maria Silva')
+        inactive = self._student(
+            sunday_class, student_name='João Vale', is_active=False,
+        )
+        client = self._client(self._secretaria())
+
+        client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-20'},
+        )
+        resp = client.post(
+            reverse('sunday-school-session-list'),
+            {
+                'sunday_school_class': sunday_class.pk,
+                'date': '2026-09-20',
+                'attendance': [
+                    {'enrollment_id': active.pk, 'is_present': True},
+                    {'enrollment_id': inactive.pk, 'is_present': True},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['present_count'], 1)
+
+    def test_session_get_keeps_attendance_of_deactivated_enrollment(self):
+        """Presença histórica de matrícula desativada não é apagada."""
+        sunday_class = self._class()
+        enrollment = self._student(sunday_class)
+        client = self._client(self._secretaria())
+
+        client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-27'},
+        )
+        client.post(
+            reverse('sunday-school-session-list'),
+            {
+                'sunday_school_class': sunday_class.pk,
+                'date': '2026-09-27',
+                'attendance': [{'enrollment_id': enrollment.pk, 'is_present': True}],
+            },
+            format='json',
+        )
+
+        enrollment.is_active = False
+        enrollment.save(update_fields=['is_active'])
+
+        resp = client.get(
+            reverse('sunday-school-session-list'),
+            {'class_id': sunday_class.pk, 'date': '2026-09-27'},
+        )
+        self.assertEqual(len(resp.data['attendances']), 1)
+        self.assertTrue(resp.data['attendances'][0]['is_present'])
 
     def test_session_post_rejects_foreign_enrollment(self):
         sunday_class = self._class()

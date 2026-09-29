@@ -278,9 +278,17 @@ class Song(models.Model):
     chords_json = models.JSONField('Acordes com timing', null=True, blank=True)
     lyrics = models.TextField('Letra', blank=True)
     tags = models.CharField('Tags (separadas por vírgula)', max_length=500, blank=True)
+    # Colunas legadas: mantidas por compatibilidade com o admin, mas a API
+    # expõe a contagem por banda em `band_stats` (ver `SongViewSet`).
     times_played = models.PositiveIntegerField('Vezes tocada', default=0)
     last_played = models.DateField('Última vez', null=True, blank=True)
     is_active = models.BooleanField('Ativo', default=True)
+    is_private = models.BooleanField(
+        'Privado',
+        default=False,
+        db_index=True,
+        help_text='Quando privado, só o usuário que cadastrou a música consegue vê-la.',
+    )
     chord_status = models.CharField(
         'Status da cifra', max_length=20, choices=ChordStatus.choices,
         default=ChordStatus.PENDING, db_index=True,
@@ -390,6 +398,12 @@ class BandSetlist(models.Model):
         blank=True,
         related_name='created_band_setlists',
         verbose_name='Criado por',
+    )
+    is_private = models.BooleanField(
+        'Privado',
+        default=False,
+        db_index=True,
+        help_text='Quando privado, só o usuário que criou o setlist consegue vê-lo.',
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

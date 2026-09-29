@@ -267,7 +267,11 @@ class BandSetlistTest(MusicManagerFixturesMixin, TestCase):
 
 
 class SongTimesPlayedTest(MusicManagerFixturesMixin, TestCase):
-    """`times_played` e `last_played` devem ser calculados a partir dos setlists já realizados."""
+    """`band_stats` conta as execuções por BANDA do setlist, só as já realizadas.
+
+    O antigo par `times_played`/`last_played` foi substituído por essa quebra
+    por banda: o número agregado somava culto e banda e não dizia quem tocou.
+    """
 
     def setUp(self):
         super().setUp()
@@ -275,6 +279,8 @@ class SongTimesPlayedTest(MusicManagerFixturesMixin, TestCase):
             church=self.church, title='M1', youtube_id='aaaaaaaaaaa',
         )
         self.today = timezone.localdate()
+        self.band_a = Band.objects.create(church=self.church, name='Alpha', color='#111111')
+        self.band_b = Band.objects.create(church=self.church, name='Beta', color='#222222')
 
     def _song_serialized(self):
         from music.views import SongViewSet
@@ -287,34 +293,52 @@ class SongTimesPlayedTest(MusicManagerFixturesMixin, TestCase):
     def test_counts_only_past_band_setlists(self):
         past = BandSetlist.objects.create(
             church=self.church, date=self.today - timedelta(days=3),
-            description='Passado',
+            description='Passado', band=self.band_a,
         )
         BandSetlistItem.objects.create(setlist=past, song=self.song, order=1)
         future = BandSetlist.objects.create(
             church=self.church, date=self.today + timedelta(days=5),
-            description='Futuro',
+            description='Futuro', band=self.band_a,
         )
         BandSetlistItem.objects.create(setlist=future, song=self.song, order=1)
 
-        data = self._song_serialized()
-        self.assertEqual(data['times_played'], 1)
-        self.assertEqual(data['last_played'], self.today - timedelta(days=3))
+        stats = self._song_serialized()['band_stats']
+        self.assertEqual(len(stats), 1)
+        self.assertEqual(stats[0]['band_name'], 'Alpha')
+        self.assertEqual(stats[0]['times_played'], 1)
+        self.assertEqual(stats[0]['last_played'], self.today - timedelta(days=3))
 
-    def test_counts_past_worship_setlist(self):
+    def test_groups_per_band(self):
+        for band, days in ((self.band_a, 1), (self.band_a, 2), (self.band_b, 4)):
+            setlist = BandSetlist.objects.create(
+                church=self.church, date=self.today - timedelta(days=days),
+                description=f'Setlist {days}', band=band,
+            )
+            BandSetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+
+        stats = {row['band_name']: row for row in self._song_serialized()['band_stats']}
+        self.assertEqual(stats['Alpha']['times_played'], 2)
+        self.assertEqual(stats['Alpha']['last_played'], self.today - timedelta(days=1))
+        self.assertEqual(stats['Beta']['times_played'], 1)
+        self.assertEqual(stats['Beta']['last_played'], self.today - timedelta(days=4))
+
+    def test_worship_setlist_does_not_count(self):
+        """O setlist do culto é público e não entra na contagem por banda."""
         roster = VolunteerRoster.objects.create(
             church=self.church, date=self.today - timedelta(days=1), theme='Culto',
         )
         setlist = WorshipSetlist.objects.create(roster=roster)
         SetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
 
-        data = self._song_serialized()
-        self.assertEqual(data['times_played'], 1)
-        self.assertEqual(data['last_played'], self.today - timedelta(days=1))
+        self.assertEqual(self._song_serialized()['band_stats'], [])
 
-    def test_zero_when_no_past_setlists(self):
+    def test_empty_when_no_past_setlists(self):
+        self.assertEqual(self._song_serialized()['band_stats'], [])
+
+    def test_removed_aggregate_fields_are_gone(self):
         data = self._song_serialized()
-        self.assertEqual(data['times_played'], 0)
-        self.assertIsNone(data['last_played'])
+        self.assertNotIn('times_played', data)
+        self.assertNotIn('last_played', data)
 
 
 class SongHistoryTest(MusicManagerFixturesMixin, TestCase):

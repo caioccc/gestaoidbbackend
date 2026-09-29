@@ -29,6 +29,7 @@ from .models import (
     FinancialEntry,
     FinancialExit,
     FinancialReceipt,
+    MonthlyClosing,
     MonthlyValidation,
     Tither,
     TitheRecord,
@@ -463,6 +464,55 @@ class TithersMatrixView(APIView):
         )
 
 
+def _monthly_closing_rows(church, year):
+    existing = {
+        closing.month: closing
+        for closing in MonthlyClosing.objects.filter(church=church, year=year)
+    }
+    missing = [
+        MonthlyClosing(church=church, year=year, month=month)
+        for month in range(1, 13)
+        if month not in existing
+    ]
+    if missing:
+        MonthlyClosing.objects.bulk_create(missing, ignore_conflicts=True)
+        existing = {
+            closing.month: closing
+            for closing in MonthlyClosing.objects.filter(church=church, year=year)
+        }
+
+    entry_totals = {
+        row['date__month']: row['total']
+        for row in FinancialEntry.objects.filter(
+            church=church, date__year=year,
+        ).values('date__month').annotate(total=Sum('amount'))
+    }
+    exit_totals = {
+        row['date__month']: row['total']
+        for row in FinancialExit.objects.filter(
+            church=church, date__year=year,
+        ).values('date__month').annotate(total=Sum('amount'))
+    }
+    previous = MonthlyClosing.objects.filter(
+        church=church, year__lt=year,
+    ).order_by('-year', '-month').first()
+    previous_balance = previous.final_balance if previous else Decimal('0.00')
+    rows = []
+    for month in range(1, 13):
+        closing = existing[month]
+        closing.previous_balance = previous_balance
+        closing.total_entries = entry_totals.get(month) or Decimal('0.00')
+        closing.total_exits = exit_totals.get(month) or Decimal('0.00')
+        closing.calculate_final_balance()
+        previous_balance = closing.final_balance
+        rows.append(closing)
+    MonthlyClosing.objects.bulk_update(
+        rows,
+        ['previous_balance', 'total_entries', 'total_exits', 'final_balance'],
+    )
+    return rows
+
+
 class MonthlyClosingsView(APIView):
     """Resumo mensal do caixa (12 meses) para o Fechamento Mensal."""
 
@@ -471,7 +521,13 @@ class MonthlyClosingsView(APIView):
     def get(self, request):
         year = _int_param(request, 'year', datetime.now().year)
         church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Usuário sem igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
+        closings = _monthly_closing_rows(church, year)
         months = []
         grand = {
             'previous_balance': Decimal('0.00'),
@@ -479,14 +535,11 @@ class MonthlyClosingsView(APIView):
             'total_exits': Decimal('0.00'),
             'final_balance': Decimal('0.00'),
         }
-        for month in range(1, 13):
-            closing, _ = services.get_or_create_monthly_closing(
-                church, year, month
-            )
+        for closing in closings:
             months.append(
                 {
                     'year': year,
-                    'month': month,
+                    'month': closing.month,
                     'is_closed': closing.is_closed,
                     'previous_balance': str(closing.previous_balance),
                     'total_entries': str(closing.total_entries),
@@ -528,6 +581,11 @@ class MonthlyClosingsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Usuário sem igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         closing, _ = services.get_or_create_monthly_closing(church, year, month)
         closing.is_closed = closed
         closing.save(update_fields=['is_closed'])
@@ -905,6 +963,11 @@ class MonthlyValidationView(APIView):
         if invalid:
             return invalid
         church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Usuário sem igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         record = MonthlyValidation.objects.filter(
             church=church, year=year, month=month,
         ).first()
@@ -922,6 +985,11 @@ class MonthlyValidationView(APIView):
         if invalid:
             return invalid
         church = request.user.church
+        if church is None:
+            return Response(
+                {'detail': 'Usuário sem igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         action = request.data.get('action')
         note = str(request.data.get('note') or '').strip()
         checks = services.build_validation_checks(church, year, month)
@@ -1184,6 +1252,7 @@ class AdminChurchMonthlyClosingsView(APIView):
         year = _int_param(request, 'year', datetime.now().year)
         church = _get_admin_church(church_pk)
 
+        closings = _monthly_closing_rows(church, year)
         months = []
         grand = {
             'previous_balance': Decimal('0.00'),
@@ -1191,14 +1260,11 @@ class AdminChurchMonthlyClosingsView(APIView):
             'total_exits': Decimal('0.00'),
             'final_balance': Decimal('0.00'),
         }
-        for month in range(1, 13):
-            closing, _ = services.get_or_create_monthly_closing(
-                church, year, month
-            )
+        for closing in closings:
             months.append(
                 {
                     'year': year,
-                    'month': month,
+                    'month': closing.month,
                     'is_closed': closing.is_closed,
                     'previous_balance': str(closing.previous_balance),
                     'total_entries': str(closing.total_entries),
@@ -1579,6 +1645,11 @@ class ExportClosingsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        if request.user.church is None:
+            return Response(
+                {'detail': 'Usuário sem igreja ativa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         mode = request.query_params.get('mode', 'annual')
         year = _int_param(request, 'year', datetime.now().year)
         month = None
@@ -1810,6 +1881,9 @@ class BaseFinancialReceiptViewSet(viewsets.ModelViewSet):
         year = params.get('year')
         if year and str(year).isdigit():
             qs = qs.filter(year=int(str(year)))
+        month = params.get('month')
+        if month and str(month).isdigit() and 1 <= int(str(month)) <= 12:
+            qs = qs.filter(date__month=int(str(month)))
         rtype = params.get('receipt_type')
         if rtype in FinancialReceipt.Type.values:
             qs = qs.filter(receipt_type=rtype)
@@ -1921,7 +1995,7 @@ class BaseFinancialReceiptViewSet(viewsets.ModelViewSet):
         instance.delete()
 
     @action(detail=True, methods=['get'], url_path='pdf')
-    def download_pdf(self, request, pk=None):
+    def download_pdf(self, request, pk=None, church_pk=None):
         """Download/reimpressão do PDF emitido (2 vias)."""
         receipt = self.get_object()
         if not receipt.pdf or not receipt.pdf.name:

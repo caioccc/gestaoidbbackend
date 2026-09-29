@@ -1,0 +1,3082 @@
+{
+  "environment": "tutoriando",
+  "database": "db.sqlite3",
+  "user_email": "caiomarinho8@gmail.com",
+  "runs_per_endpoint": 3,
+  "endpoints": [
+    {
+      "method": "GET",
+      "endpoint": "/healthz/",
+      "average_ms": 6.868,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.016,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/profile/",
+      "average_ms": 4.219,
+      "queries": 2,
+      "query_counts": [
+        2,
+        1,
+        1
+      ],
+      "payload_kb": 0.913,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/me/",
+      "average_ms": 3.556,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.963,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/search-parents/",
+      "average_ms": 9.131,
+      "queries": 10,
+      "query_counts": [
+        10,
+        10,
+        10
+      ],
+      "payload_kb": 2.999,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/20/users/",
+      "average_ms": 2.486,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.203,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/74/members/",
+      "average_ms": 244.603,
+      "queries": 348,
+      "query_counts": [
+        348,
+        348,
+        348
+      ],
+      "payload_kb": 153.304,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/74/members/408/",
+      "average_ms": 3.066,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.046,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/20/ministry-areas/",
+      "average_ms": 2.279,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/20/ministry-areas/17/",
+      "average_ms": 1.988,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.052,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/20/profile/",
+      "average_ms": 4.8,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 0.647,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/pending-congregations/",
+      "average_ms": 1.508,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/accounting-categories/",
+      "average_ms": 1.405,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 1.925,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/273/declaration/",
+      "average_ms": 275.097,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/273/documents/",
+      "average_ms": 2.066,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/documents/273/download/",
+      "average_ms": 1.019,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.054,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/report/",
+      "average_ms": 827.603,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/birthdays/",
+      "average_ms": 2.578,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.79,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/transfers/",
+      "average_ms": 1.428,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/transfers/incoming/",
+      "average_ms": 1.068,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/search-transfers/",
+      "average_ms": 1.93,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 1.271,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/alerts/",
+      "average_ms": 6.588,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 1.983,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/secretary-actions/",
+      "average_ms": 6.963,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.647,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/form/public-link/",
+      "average_ms": 8.303,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.115,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/member-submissions/",
+      "average_ms": 2.844,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 12.54,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/monthly-report/",
+      "average_ms": 27.781,
+      "queries": 31,
+      "query_counts": [
+        31,
+        31,
+        31
+      ],
+      "payload_kb": 52.414,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/monthly-report/pdf/",
+      "average_ms": 1659.519,
+      "queries": 31,
+      "query_counts": [
+        31,
+        31,
+        31
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/calendar/public-link/",
+      "average_ms": 8.011,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.094,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/admin/churches/",
+      "average_ms": 74.452,
+      "queries": 111,
+      "query_counts": [
+        111,
+        111,
+        111
+      ],
+      "payload_kb": 24.105,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/admin/pending-churches/",
+      "average_ms": 1.496,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/admin/churches/20/profile/",
+      "average_ms": 3.803,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.647,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/",
+      "average_ms": 38.379,
+      "queries": 57,
+      "query_counts": [
+        57,
+        57,
+        57
+      ],
+      "payload_kb": 18.852,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/churches/20/",
+      "average_ms": 3.243,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.589,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/",
+      "average_ms": 78.545,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 153.304,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/273/",
+      "average_ms": 5.397,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 1.314,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/members/273/public-link/",
+      "average_ms": 11.073,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 0.096,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/ministry-areas/",
+      "average_ms": 1.555,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.672,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/ministry-areas/17/",
+      "average_ms": 1.215,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.093,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/storage-locations/",
+      "average_ms": 1.434,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.455,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/storage-locations/273/",
+      "average_ms": 1.387,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.055,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/materials/",
+      "average_ms": 5.605,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 8.167,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/materials/273/",
+      "average_ms": 1.66,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.052,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/loans/",
+      "average_ms": 18.58,
+      "queries": 31,
+      "query_counts": [
+        31,
+        31,
+        31
+      ],
+      "payload_kb": 21.044,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/loans/273/",
+      "average_ms": 2.196,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.044,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/cultos/",
+      "average_ms": 16.89,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 55.634,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/cultos/273/",
+      "average_ms": 1.524,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.054,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/minutes/",
+      "average_ms": 6.606,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 68.672,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/minutes/273/",
+      "average_ms": 1.385,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.053,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/minutes/273/pdf/",
+      "average_ms": 1.31,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.053,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/church-links/",
+      "average_ms": 4.595,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 5.355,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/church-links/config/",
+      "average_ms": 1.417,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.157,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/church-links/273/",
+      "average_ms": 1.497,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.056,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/growth-groups/",
+      "average_ms": 9.393,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 12.274,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/growth-groups/stats/",
+      "average_ms": 5.95,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 0.119,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/growth-groups/3/",
+      "average_ms": 3.699,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.686,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/message-templates/",
+      "average_ms": 2.431,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 2.749,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/message-templates/273/",
+      "average_ms": 1.116,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.055,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/certificate-templates/",
+      "average_ms": 4.328,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 5.549,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/certificate-templates/273/",
+      "average_ms": 1.205,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.059,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/certificates/",
+      "average_ms": 8.717,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 24.86,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/certificates/273/",
+      "average_ms": 1.728,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.064,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/certificates/273/pdf/",
+      "average_ms": 2.108,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.064,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/pastoral-visits/",
+      "average_ms": 24.985,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 107.495,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/pastoral-visits/summary/?year=2026",
+      "average_ms": 3.806,
+      "queries": 6,
+      "query_counts": [
+        6,
+        6,
+        6
+      ],
+      "payload_kb": 0.318,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/pastoral-visits/1/",
+      "average_ms": 3.105,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 1.084,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/prayer-requests/",
+      "average_ms": 12.89,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 39.915,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/prayer-requests/assignable-users/",
+      "average_ms": 1.797,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.209,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/prayer-requests/print-sheet/",
+      "average_ms": 308.853,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/prayer-requests/1/",
+      "average_ms": 2.866,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.79,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/classes/",
+      "average_ms": 3.07,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 1.14,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/classes/273/",
+      "average_ms": 2.434,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.057,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/classes/273/students/",
+      "average_ms": 1.727,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.057,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/sessions/",
+      "average_ms": 1315.255,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 2153.518,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/sunday-school/sessions/273/",
+      "average_ms": 2.261,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.059,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/",
+      "average_ms": 12.789,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 1.063,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/accounts/273/",
+      "average_ms": 9.588,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": null,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/dashboard/summary/?year=2026",
+      "average_ms": 3.28,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 1.073,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/dre/summary/?year=2026",
+      "average_ms": 1.988,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 1.234,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/import-availability/",
+      "average_ms": 0.493,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.059,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/tithers/reconciliation/?year=2026&month=9",
+      "average_ms": 1.982,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.178,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/tithers/matrix/",
+      "average_ms": 5.896,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 6.567,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/tithers/repeat-audit/",
+      "average_ms": 0.591,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/validation/?year=2026&month=9",
+      "average_ms": 17.499,
+      "queries": 13,
+      "query_counts": [
+        13,
+        13,
+        13
+      ],
+      "payload_kb": 2.131,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/monthly-closings/",
+      "average_ms": 11.276,
+      "queries": 7,
+      "query_counts": [
+        7,
+        7,
+        7
+      ],
+      "payload_kb": 1.946,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/reports/regional/",
+      "average_ms": 17.168,
+      "queries": 16,
+      "query_counts": [
+        16,
+        16,
+        16
+      ],
+      "payload_kb": 1.295,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/reports/regional/pdf/",
+      "average_ms": 80.31,
+      "queries": 11,
+      "query_counts": [
+        11,
+        11,
+        11
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/reports/regional/xls/",
+      "average_ms": 33.205,
+      "queries": 10,
+      "query_counts": [
+        10,
+        10,
+        10
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/reports/national/xlsx/",
+      "average_ms": 248.603,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/reports/caixa/download/",
+      "average_ms": 24.619,
+      "queries": 11,
+      "query_counts": [
+        11,
+        11,
+        11
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/templates/273/download/",
+      "average_ms": 1.76,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.034,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/categories/",
+      "average_ms": 0.602,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.54,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/dashboard/summary/?year=2026",
+      "average_ms": 4.854,
+      "queries": 6,
+      "query_counts": [
+        6,
+        6,
+        6
+      ],
+      "payload_kb": 0.979,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/dre/summary/?year=2026",
+      "average_ms": 3.465,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 0.412,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/import-availability/",
+      "average_ms": 1.5,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.059,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/tithers/reconciliation/?year=2026&month=9",
+      "average_ms": 3.832,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 0.178,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/tithers/matrix/",
+      "average_ms": 8.02,
+      "queries": 5,
+      "query_counts": [
+        5,
+        5,
+        5
+      ],
+      "payload_kb": 6.567,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/tithers/repeat-audit/",
+      "average_ms": 1.796,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/validation/?year=2026&month=9",
+      "average_ms": 20.579,
+      "queries": 15,
+      "query_counts": [
+        15,
+        15,
+        15
+      ],
+      "payload_kb": 0.771,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/monthly-closings/",
+      "average_ms": 10.893,
+      "queries": 9,
+      "query_counts": [
+        9,
+        9,
+        9
+      ],
+      "payload_kb": 1.715,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/reports/regional/",
+      "average_ms": 17.827,
+      "queries": 19,
+      "query_counts": [
+        19,
+        19,
+        19
+      ],
+      "payload_kb": 1.275,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/reports/regional/pdf/",
+      "average_ms": 86.956,
+      "queries": 13,
+      "query_counts": [
+        13,
+        13,
+        13
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/reports/national/xlsx/",
+      "average_ms": 322.641,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/reports/caixa/download/",
+      "average_ms": 1.843,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/categories/",
+      "average_ms": 1.325,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.54,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/export/entries/",
+      "average_ms": 0.48,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/export/exits/",
+      "average_ms": 0.585,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/export/closings/",
+      "average_ms": 108.01,
+      "queries": 60,
+      "query_counts": [
+        60,
+        60,
+        60
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/export/entries/",
+      "average_ms": 2.0,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/export/exits/",
+      "average_ms": 1.887,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.042,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/export/closings/",
+      "average_ms": 106.013,
+      "queries": 74,
+      "query_counts": [
+        74,
+        74,
+        74
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/entries/",
+      "average_ms": 4.399,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 4.211,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/entries/3247/",
+      "average_ms": 1.557,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.196,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/exits/",
+      "average_ms": 4.187,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 4.22,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/exits/580/",
+      "average_ms": 1.706,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.196,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/tithers/",
+      "average_ms": 2.624,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 2.341,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/tithers/442/",
+      "average_ms": 1.141,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.108,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/receipts/",
+      "average_ms": 7.508,
+      "queries": 6,
+      "query_counts": [
+        6,
+        6,
+        6
+      ],
+      "payload_kb": 1.562,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/receipts/1/",
+      "average_ms": 4.122,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.712,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/receipts/1/pdf/",
+      "average_ms": 97.059,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/calendar/events/?start_date=2026-09-01&end_date=2026-09-30",
+      "average_ms": 31.138,
+      "queries": 41,
+      "query_counts": [
+        41,
+        41,
+        41
+      ],
+      "payload_kb": 11.506,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/calendar/events/74/?start_date=2026-09-01&end_date=2026-09-30",
+      "average_ms": 1.568,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.053,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/",
+      "average_ms": 0.696,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.264,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/273/",
+      "average_ms": 7.228,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": null,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/entries/",
+      "average_ms": 5.009,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 4.229,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/entries/",
+      "average_ms": 2.538,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.051,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/entries/3247/",
+      "average_ms": 2.692,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.196,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/receipts/",
+      "average_ms": 7.549,
+      "queries": 8,
+      "query_counts": [
+        8,
+        8,
+        8
+      ],
+      "payload_kb": 1.562,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/receipts/",
+      "average_ms": 3.288,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.051,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/receipts/1/",
+      "average_ms": 5.31,
+      "queries": 5,
+      "query_counts": [
+        5,
+        5,
+        5
+      ],
+      "payload_kb": 0.712,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/receipts/1/pdf/",
+      "average_ms": 71.552,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": null,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/exits/",
+      "average_ms": 5.776,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 4.237,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/exits/",
+      "average_ms": 2.533,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.051,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/exits/580/",
+      "average_ms": 3.038,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.196,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/tithers/",
+      "average_ms": 4.476,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 2.358,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/tithers/",
+      "average_ms": 2.743,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.051,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/74/tithers/442/",
+      "average_ms": 2.775,
+      "queries": 3,
+      "query_counts": [
+        3,
+        3,
+        3
+      ],
+      "payload_kb": 0.108,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/calendar/events/?start_date=2026-09-01&end_date=2026-09-30",
+      "average_ms": 9.994,
+      "queries": 11,
+      "query_counts": [
+        11,
+        11,
+        11
+      ],
+      "payload_kb": 2.133,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/finance/admin/churches/20/calendar/events/74/?start_date=2026-09-01&end_date=2026-09-30",
+      "average_ms": 5.454,
+      "queries": 5,
+      "query_counts": [
+        5,
+        5,
+        5
+      ],
+      "payload_kb": 0.52,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/youtube-search/",
+      "average_ms": 0.572,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.044,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/chordify/",
+      "average_ms": 0.459,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.055,
+      "status": 400,
+      "status_codes": [
+        400,
+        400,
+        400
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/bands/",
+      "average_ms": 1.89,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.356,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/bands/1/",
+      "average_ms": 1.56,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.18,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/setlists/?month=2026-09",
+      "average_ms": 13.451,
+      "queries": 5,
+      "query_counts": [
+        5,
+        5,
+        5
+      ],
+      "payload_kb": 2.903,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/setlists/1/?month=2026-09",
+      "average_ms": 8.901,
+      "queries": 4,
+      "query_counts": [
+        4,
+        4,
+        4
+      ],
+      "payload_kb": 1.481,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/ministries/",
+      "average_ms": 2.382,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.28,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/ministries/273/",
+      "average_ms": 1.138,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.048,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/",
+      "average_ms": 5.466,
+      "queries": 6,
+      "query_counts": [
+        6,
+        6,
+        6
+      ],
+      "payload_kb": 0.736,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/my_rosters/",
+      "average_ms": 1.531,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/volunteers/",
+      "average_ms": 0.967,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.455,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/273/",
+      "average_ms": 1.228,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.055,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/273/board/",
+      "average_ms": 1.157,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.055,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/273/export_text/",
+      "average_ms": 1.284,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.055,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/rosters/273/my_assignments/",
+      "average_ms": 0.983,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.055,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/assignments/",
+      "average_ms": 2.024,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.002,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/assignments/273/",
+      "average_ms": 1.703,
+      "queries": 1,
+      "query_counts": [
+        1,
+        1,
+        1
+      ],
+      "payload_kb": 0.056,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/songs/",
+      "average_ms": 27.024,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 734.923,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/songs/check-youtube/",
+      "average_ms": 0.716,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.026,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/songs/1/",
+      "average_ms": 7.139,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 68.822,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/songs/1/history/",
+      "average_ms": 4.742,
+      "queries": 2,
+      "query_counts": [
+        2,
+        2,
+        2
+      ],
+      "payload_kb": 0.094,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/",
+      "average_ms": 0.787,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": 0.296,
+      "status": 200,
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "error": null
+    },
+    {
+      "method": "GET",
+      "endpoint": "/api/music/273/",
+      "average_ms": 6.544,
+      "queries": 0,
+      "query_counts": [
+        0,
+        0,
+        0
+      ],
+      "payload_kb": null,
+      "status": 404,
+      "status_codes": [
+        404,
+        404,
+        404
+      ],
+      "error": null
+    }
+  ],
+  "skipped": [
+    {
+      "declared_path": "api/accounts/public/card/<str:hash>/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/accounts/public/forms/<str:hash>/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/accounts/public/profile/<str:hash>/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/accounts/public/minutes/<str:hash>/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/accounts/public/minutes/<str:hash>/pdf/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/accounts/public/churches/<str:slug>/links/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/accounts/public/churches/<str:slug>/growth-groups/",
+      "reason": "parâmetro sem amostra local"
+    },
+    {
+      "declared_path": "api/finance/public/calendar/<str:hash>/",
+      "reason": "parâmetro sem amostra local"
+    }
+  ]
+}

@@ -622,7 +622,16 @@ class MaterialItemSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'church', 'created_at', 'updated_at']
 
     def get_current_loan(self, obj):
-        loan = obj.current_open_loan()
+        """Empréstimo aberto do item.
+
+        Usa o `open_loans_cache` populado pelo prefetch do viewset quando ele
+        existe; senão cai na consulta (uso fora das listagens paginadas).
+        """
+        cached = getattr(obj, 'open_loans_cache', None)
+        if cached is not None:
+            loan = cached[0] if cached else None
+        else:
+            loan = obj.current_open_loan()
         if loan is None:
             return None
         return {
@@ -2316,6 +2325,8 @@ class SundaySchoolClassSerializer(serializers.ModelSerializer):
         ]
 
     def get_enrollment_count(self, obj):
+        if hasattr(obj, 'enrollment_count'):
+            return obj.enrollment_count
         return obj.enrollments.filter(is_active=True).count()
 
     def validate(self, attrs):
@@ -2405,6 +2416,9 @@ class SundaySchoolAttendanceSerializer(serializers.ModelSerializer):
                 obj.enrollment,
                 church,
                 topic=obj.session.topic,
+                template_content=self.context.get('sunday_school_templates', {}).get(
+                    MessageTemplate.Category.EBD_ABSENCE_RESCUE,
+                ),
             )
             if url:
                 return url
@@ -2442,4 +2456,6 @@ class SundaySchoolSessionSerializer(serializers.ModelSerializer):
         return obj.registered_by.name if obj.registered_by_id else ''
 
     def get_present_count(self, obj):
+        if hasattr(obj, 'present_count'):
+            return obj.present_count
         return obj.attendances.filter(is_present=True).count()

@@ -58,6 +58,10 @@ class FinancialEntry(models.Model):
         verbose_name = 'Entrada'
         verbose_name_plural = 'Entradas'
         ordering = ['-date', '-created_at']
+        indexes = [
+            models.Index(fields=['church', 'date'], name='fin_entry_church_date_idx'),
+            models.Index(fields=['church', 'created_at'], name='fin_entry_church_created_idx'),
+        ]
 
     def __str__(self):
         return f'{self.date} - {self.get_category_display()} - R$ {self.amount}'
@@ -95,6 +99,10 @@ class FinancialExit(models.Model):
         verbose_name = 'Saída'
         verbose_name_plural = 'Saídas'
         ordering = ['-date', '-created_at']
+        indexes = [
+            models.Index(fields=['church', 'date'], name='fin_exit_church_date_idx'),
+            models.Index(fields=['church', 'created_at'], name='fin_exit_church_created_idx'),
+        ]
 
     def __str__(self):
         return f'{self.date} - {self.description} - R$ {self.amount}'
@@ -302,6 +310,9 @@ class MonthlyClosing(models.Model):
         verbose_name = 'Fechamento Mensal'
         verbose_name_plural = 'Fechamentos Mensais'
         unique_together = ('church', 'year', 'month')
+        indexes = [
+            models.Index(fields=['church', 'year'], name='fin_close_church_year_idx'),
+        ]
 
     def __str__(self):
         return f'Caixa {self.church} - {self.month}/{self.year}'
@@ -393,6 +404,10 @@ class MonthlyValidation(models.Model):
         verbose_name = 'Validação Mensal'
         verbose_name_plural = 'Validações Mensais'
         unique_together = ('church', 'year', 'month')
+        indexes = [
+            models.Index(fields=['church', 'year'], name='fin_valid_church_year_idx'),
+            models.Index(fields=['church', 'status'], name='fin_valid_church_status_idx'),
+        ]
 
     def __str__(self):
         return f'Validação {self.church} - {self.month}/{self.year}'
@@ -539,6 +554,10 @@ class FinancialReceipt(models.Model):
         verbose_name_plural = 'Recibos Financeiros'
         ordering = ['-year', '-number']
         unique_together = ('church', 'year', 'number')
+        indexes = [
+            models.Index(fields=['church', 'date'], name='fin_receipt_church_date_idx'),
+            models.Index(fields=['church', 'receipt_type'], name='fin_receipt_church_type_idx'),
+        ]
 
     def __str__(self):
         return (

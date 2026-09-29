@@ -1466,7 +1466,9 @@ def default_sunday_school_content(kind) -> str:
     return ''
 
 
-def build_sunday_school_whatsapp_url(kind, enrollment, church, topic='') -> str | None:
+def build_sunday_school_whatsapp_url(
+    kind, enrollment, church, topic='', template_content=None,
+) -> str | None:
     """Monta a URL `wa.me` com o template EBD renderizado para um aluno.
 
     `kind` deve ser uma categoria de `MessageTemplate` EBD (ex.:
@@ -1477,12 +1479,14 @@ def build_sunday_school_whatsapp_url(kind, enrollment, church, topic='') -> str 
     phone = normalize_whatsapp_phone(enrollment.phone)
     if not phone:
         return None
-    template = MessageTemplate.objects.filter(
-        church=church,
-        category=kind,
-        is_active=True,
-    ).first()
-    content = (template.content if template else None) or default_sunday_school_content(kind) or ''
+    if template_content is None:
+        template = MessageTemplate.objects.filter(
+            church=church,
+            category=kind,
+            is_active=True,
+        ).first()
+        template_content = template.content if template else None
+    content = template_content or default_sunday_school_content(kind) or ''
     extra = {
         'CLASSE': enrollment.sunday_school_class.name,
         'TEMA': topic or '',

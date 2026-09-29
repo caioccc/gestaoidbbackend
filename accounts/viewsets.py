@@ -6,7 +6,18 @@ import uuid
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F, Q
+from django.db.models import (
+    Case,
+    Count,
+    DateField,
+    DateTimeField,
+    F,
+    IntegerField,
+    Prefetch,
+    Q,
+    Value,
+    When,
+)
 from django.http import FileResponse, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -745,6 +756,38 @@ class WorshipServicePagination(PageNumberPagination):
     max_page_size = 200
 
 
+class DocumentListPagination(PageNumberPagination):
+    """Paginação das listagens de documentos/registros (inventário, atas,
+    certificados). Ativa com `?paginate=1`.
+
+    O default de 10 casa com a primeira opção do seletor "por página" do
+    frontend, para a troca de paginação cliente→servidor não mudar o que o
+    usuário vê ao abrir a tela.
+    """
+
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class OptionalPaginationMixin:
+    """Paginação por demanda nas listagens.
+
+    Sem `?paginate=1` a resposta continua sendo o array completo —essencial
+    para os pickers (seleção de material em empréstimo) e para os consumidores
+    que já esperam lista plana. Com `?paginate=1` vira `{count, results}` e o
+    frontend pagina no servidor.
+    """
+
+    pagination_class = None
+    paginated_pagination_class = DocumentListPagination
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get('paginate') == '1':
+            self.pagination_class = self.paginated_pagination_class
+        return super().list(request, *args, **kwargs)
+
+
 class MemberSelfViewSet(viewsets.ModelViewSet):
     """CRUD de membros da igreja ativa (Secretaria/Pastor/Admin). Sem dados
     financeiros.
@@ -788,7 +831,10 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
         if church is None:
             return Member.objects.none()
         return apply_member_filters(
-            Member.objects.filter(church=church).order_by('name'),
+            Member.objects.filter(church=church)
+            .select_related('church')
+            .prefetch_related('ministry_areas', 'relatives')
+            .order_by('name'),
             self.request.query_params,
         )
 
@@ -998,7 +1044,7 @@ class MinistryAreaViewSet(viewsets.ModelViewSet):
         serializer.save(church=self.request.user.church)
 
 
-class StorageLocationViewSet(viewsets.ModelViewSet):
+class StorageLocationViewSet(OptionalPaginationMixin, viewsets.ModelViewSet):
     """CRUD dos locais de armazenamento da igreja ativa."""
 
     serializer_class = StorageLocationSerializer
@@ -1020,8 +1066,13 @@ class StorageLocationViewSet(viewsets.ModelViewSet):
         serializer.save(church=self.request.user.church)
 
 
-class MaterialItemViewSet(viewsets.ModelViewSet):
-    """CRUD dos materiais/equipamentos do inventário da igreja ativa."""
+class MaterialItemViewSet(OptionalPaginationMixin, viewsets.ModelViewSet):
+    """CRUD dos materiais/equipamentos do inventário da igreja ativa.
+
+    Filtros:
+    - `?search=<texto>` (nome ou descrição).
+    - `?location=<id>` (local de armazenamento).
+    """
 
     serializer_class = MaterialItemSerializer
     permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
@@ -1036,7 +1087,29 @@ class MaterialItemViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return MaterialItem.objects.none()
-        return MaterialItem.objects.filter(church=church).order_by('name')
+        qs = MaterialItem.objects.filter(church=church).select_related('location')
+        params = self.request.query_params
+        location = params.get('location')
+        if location and location.isdigit():
+            qs = qs.filter(location_id=int(location))
+        search = (params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search)
+                | Q(description__icontains=search)
+                | Q(location__name__icontains=search)
+            )
+        # `current_loan` é serializado item a item; sem o prefetch a página
+        # inteira viraria uma query por linha.
+        return qs.prefetch_related(
+            Prefetch(
+                'loans',
+                queryset=Loan.objects.filter(returned_at__isnull=True)
+                .select_related('member')
+                .order_by('-borrowed_at', '-id'),
+                to_attr='open_loans_cache',
+            )
+        ).order_by('name')
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church)
@@ -1049,8 +1122,15 @@ class MaterialItemViewSet(viewsets.ModelViewSet):
         instance.delete()
 
 
-class LoanViewSet(viewsets.ModelViewSet):
-    """CRUD dos empréstimos de materiais/equipamentos da igreja ativa."""
+class LoanViewSet(OptionalPaginationMixin, viewsets.ModelViewSet):
+    """CRUD dos empréstimos de materiais/equipamentos da igreja ativa.
+
+    Filtros:
+    - `?status=open|overdue|returned` (situação calculada; ausente = todas).
+      `open` = ainda não devolvido (inclui atrasados, como a aba "Abertos");
+      `overdue` = não devolvido com prazo vencido.
+    - `?item=<id>` (material emprestado).
+    """
 
     serializer_class = LoanSerializer
     permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
@@ -1065,7 +1145,41 @@ class LoanViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return Loan.objects.none()
-        return Loan.objects.filter(church=church).order_by('-borrowed_at', '-id')
+        params = self.request.query_params
+        qs = Loan.objects.filter(church=church).select_related('item', 'member')
+
+        status_filter = (params.get('status') or '').strip()
+        today = timezone.localdate()
+        if status_filter == 'open':
+            qs = qs.filter(returned_at__isnull=True)
+        elif status_filter == 'overdue':
+            qs = qs.filter(returned_at__isnull=True, expected_return__lt=today)
+        elif status_filter == 'returned':
+            qs = qs.filter(returned_at__isnull=False)
+
+        item = params.get('item')
+        if item and item.isdigit():
+            qs = qs.filter(item_id=int(item))
+
+        # Mesma ordem da tela: em aberto por prazo (vencendo primeiro) e,
+        # depois, devolvidos do mais recente para o mais antigo.
+        return qs.annotate(
+            open_group=Case(
+                When(returned_at__isnull=True, then=0),
+                default=1,
+                output_field=IntegerField(),
+            ),
+            open_due=Case(
+                When(returned_at__isnull=True, then=F('expected_return')),
+                default=Value(None),
+                output_field=DateField(),
+            ),
+            closed_at=Case(
+                When(returned_at__isnull=False, then=F('returned_at')),
+                default=Value(None),
+                output_field=DateTimeField(),
+            ),
+        ).order_by('open_group', 'open_due', '-closed_at', '-id')
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church, created_by=self.request.user)
@@ -1160,7 +1274,9 @@ class GrowthGroupViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return GrowthGroup.objects.none()
-        qs = GrowthGroup.objects.filter(church=church)
+        qs = GrowthGroup.objects.filter(church=church).select_related(
+            'church', 'leader', 'host', 'created_by',
+        )
         search = self.request.query_params.get('search', '').strip()
         if search:
             qs = qs.filter(
@@ -1239,7 +1355,7 @@ class GrowthGroupViewSet(viewsets.ModelViewSet):
         )
 
 
-class ChurchMinutesViewSet(viewsets.ModelViewSet):
+class ChurchMinutesViewSet(OptionalPaginationMixin, viewsets.ModelViewSet):
     """Gestão de atas da igreja ativa, com PDF opcional e link público.
 
     Disponível a todos os perfis com igreja ativa (sem restrição de papel).
@@ -2625,7 +2741,7 @@ class AdminChurchClearDataView(APIView):
         )
 
 
-class CertificateTemplateViewSet(viewsets.ModelViewSet):
+class CertificateTemplateViewSet(OptionalPaginationMixin, viewsets.ModelViewSet):
     """CRUD de modelos de certificados da igreja ativa (PASTOR / SECRETARIA).
 
     A igreja pode cadastrar molduras em imagem (media_storage) ou documentos
@@ -2655,7 +2771,7 @@ class CertificateTemplateViewSet(viewsets.ModelViewSet):
         super().perform_destroy(instance)
 
 
-class EcclesiasticalCertificateViewSet(viewsets.ModelViewSet):
+class EcclesiasticalCertificateViewSet(OptionalPaginationMixin, viewsets.ModelViewSet):
     """Registro e emissão de certificados eclesiais (PASTOR / SECRETARIA).
 
     Recebe o PDF gerado no frontend (modos standard/moldura) via multipart ou
@@ -3089,7 +3205,11 @@ class SundaySchoolClassViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return SundaySchoolClass.objects.none()
-        return SundaySchoolClass.objects.filter(church=church).order_by('name')
+        return SundaySchoolClass.objects.filter(church=church).annotate(
+            enrollment_count=Count(
+                'enrollments', filter=Q(enrollments__is_active=True),
+            ),
+        ).order_by('name')
 
     def perform_create(self, serializer):
         serializer.save(church=self.request.user.church)
@@ -3186,13 +3306,39 @@ class SundaySchoolSessionViewSet(viewsets.ModelViewSet):
     permission_classes = [IsChurchRole('SECRETARIA', 'PASTOR', 'PROFESSOR_EBD')]
     pagination_class = None
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        church = self.request.user.church
+        context['sunday_school_templates'] = dict(
+            MessageTemplate.objects.filter(
+                church=church,
+                is_active=True,
+                category=MessageTemplate.Category.EBD_ABSENCE_RESCUE,
+            ).values_list('category', 'content')
+        ) if church is not None else {}
+        return context
+
     def get_queryset(self):
         church = self.request.user.church
         if church is None:
             return SundaySchoolSession.objects.none()
         qs = SundaySchoolSession.objects.filter(
             sunday_school_class__church=church,
-        ).select_related('sunday_school_class', 'registered_by')
+        ).select_related(
+            'sunday_school_class', 'registered_by',
+        ).annotate(
+            present_count=Count(
+                'attendances', filter=Q(attendances__is_present=True),
+            ),
+        ).prefetch_related(
+            Prefetch(
+                'attendances',
+                queryset=SundaySchoolAttendance.objects.select_related(
+                    'enrollment__sunday_school_class',
+                    'session__sunday_school_class__church',
+                ),
+            ),
+        )
         class_id = self.request.query_params.get('class_id')
         if class_id:
             qs = qs.filter(sunday_school_class_id=class_id)
@@ -3219,26 +3365,39 @@ class SundaySchoolSessionViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def _prepare_or_get(self, sunday_class, session_date):
-        """Busca a aula; se ainda não existir, prepara a folha de chamada."""
-        session = SundaySchoolSession.objects.filter(
-            sunday_school_class=sunday_class,
-            date=session_date,
-        ).first()
-        if session is not None:
-            return session, False
+        """Busca a aula e garante que a folha de chamada cubra as matrículas ativas.
+
+        A folha é *reconciliada* em toda abertura, não só na criação: matrículas
+        feitas depois de a aula ter sido aberta pela primeira vez não existiriam
+        em `SundaySchoolAttendance` e ficariam invisíveis na chamada. Linhas já
+        existentes nunca são removidas, para preservar presenças de matrículas
+        desativadas depois da aula.
+        """
         with transaction.atomic():
-            session = SundaySchoolSession.objects.create(
+            session, created = SundaySchoolSession.objects.get_or_create(
                 sunday_school_class=sunday_class,
                 date=session_date,
-                registered_by=self.request.user,
+                defaults={'registered_by': self.request.user},
             )
-            rows = [
-                SundaySchoolAttendance(session=session, enrollment=enrollment)
-                for enrollment in sunday_class.enrollments.filter(is_active=True)
-            ]
-            if rows:
-                SundaySchoolAttendance.objects.bulk_create(rows)
-        return session, True
+            active_ids = set(
+                sunday_class.enrollments.filter(is_active=True).values_list('id', flat=True)
+            )
+            if active_ids:
+                existing_ids = set(
+                    session.attendances.filter(
+                        enrollment_id__in=active_ids,
+                    ).values_list('enrollment_id', flat=True)
+                )
+                missing = active_ids - existing_ids
+                if missing:
+                    SundaySchoolAttendance.objects.bulk_create(
+                        [
+                            SundaySchoolAttendance(session=session, enrollment_id=enrollment_id)
+                            for enrollment_id in missing
+                        ],
+                        ignore_conflicts=True,
+                    )
+        return session, created
 
     def create(self, request, *args, **kwargs):
         """Consolida a aula: salva resumo + presenças em transação atômica."""
@@ -3274,10 +3433,19 @@ class SundaySchoolSessionViewSet(viewsets.ModelViewSet):
                 },
             )
             active_enrollments = sunday_class.enrollments.filter(is_active=True)
+            class_enrollment_ids = set(
+                sunday_class.enrollments.values_list('id', flat=True)
+            )
             for row in payload.get('attendance') or []:
                 enrollment_id = row.get('enrollment_id')
                 enrollment = active_enrollments.filter(pk=enrollment_id).first()
                 if enrollment is None:
+                    # Matrícula de outra classe é erro de payload. Matrícula da
+                    # própria classe que ficou inativa depois da aula só mantém a
+                    # presença já registrada, então a linha é ignorada em vez de
+                    # derrubar o salvamento inteiro da folha.
+                    if enrollment_id in class_enrollment_ids:
+                        continue
                     raise ValidationError({
                         'attendance': f'Matrícula inválida ou inativa: {enrollment_id}',
                     })

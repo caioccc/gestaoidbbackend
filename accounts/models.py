@@ -524,6 +524,10 @@ class Member(models.Model):
         verbose_name = 'Membro'
         verbose_name_plural = 'Membros'
         ordering = ['name']
+        indexes = [
+            models.Index(fields=['church', 'status'], name='acct_member_church_status_idx'),
+            models.Index(fields=['church', 'created_at'], name='acct_member_church_created_idx'),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=['church', 'card_number'],
@@ -808,6 +812,10 @@ class PastoralVisit(models.Model):
         verbose_name = 'Visita Pastoral'
         verbose_name_plural = 'Visitas Pastorais'
         ordering = ['-scheduled_date', '-created_at']
+        indexes = [
+            models.Index(fields=['church', 'competence_year', 'competence_month'], name='acct_visit_church_comp_idx'),
+            models.Index(fields=['church', 'status', 'scheduled_date'], name='acct_visit_church_status_idx'),
+        ]
 
     def __str__(self):
         return f'{self.get_visit_type_display()} - {self.target_name or getattr(self.member, "name", "")} ({self.competence_month}/{self.competence_year})'
@@ -896,6 +904,9 @@ class PrayerRequest(models.Model):
         verbose_name = 'Pedido de Oração'
         verbose_name_plural = 'Pedidos de Oração'
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['church', 'status', 'created_at'], name='acct_prayer_church_status_idx'),
+        ]
 
     @property
     def requester_display(self) -> str:
@@ -1233,6 +1244,9 @@ class GrowthGroup(models.Model):
         verbose_name = 'Grupo de Crescimento'
         verbose_name_plural = 'Grupos de Crescimento'
         ordering = ['weekday', 'name']
+        indexes = [
+            models.Index(fields=['church', 'weekday'], name='acct_growth_church_weekday_idx'),
+        ]
 
     def __str__(self):
         return f'{self.name} — {self.get_weekday_display()} {self.time}'
@@ -1936,6 +1950,9 @@ class WorshipService(models.Model):
         verbose_name = 'Registro de Culto'
         verbose_name_plural = 'Registros de Cultos'
         ordering = ['-date', '-id']
+        indexes = [
+            models.Index(fields=['church', 'date'], name='acct_worship_church_date_idx'),
+        ]
 
     def __str__(self):
         return f'{self.get_service_type_display()} — {self.date.isoformat()}'

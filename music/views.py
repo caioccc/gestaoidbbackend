@@ -8,6 +8,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets
@@ -46,6 +47,9 @@ from .serializers import (
     SongHistorySerializer,
     SongSerializer,
     WorshipSetlistSerializer,
+    apply_visibility,
+    band_stats_map,
+    visible_songs,
 )
 from .services import chordify as chordify_service
 from .services import exports as exports_service
@@ -63,8 +67,8 @@ SETLIST_GOVERNANCE_ROLES = ('PASTOR',)
 # via `?ordering=` pelo frontend; o valor é o alvo do `order_by`.
 SONG_ORDERING_MAP = {
     'random': '?',
-    'times_played': '-total_plays',
-    '-times_played': 'total_plays',
+    'times_played': '-total_band_plays',
+    '-times_played': 'total_band_plays',
     'band': 'band__name',
     '-band': '-band__name',
     'artist': 'artist',
@@ -157,9 +161,11 @@ class BandSetlistViewSet(viewsets.ModelViewSet):
         church = self.request.user.church
         if church is None:
             return BandSetlist.objects.none()
-        qs = BandSetlist.objects.filter(church=church).prefetch_related(
-            'items__song', 'band'
-        )
+        qs = apply_visibility(
+            BandSetlist.objects.filter(church=church),
+            self.request.user,
+            self.request.query_params.get('visibility'),
+        ).prefetch_related('items__song', 'band')
         month = self.request.query_params.get('month')
         if month and len(month) == 7 and month[4] == '-':
             year, _, month_num = month.partition('-')
@@ -189,14 +195,15 @@ class BandSetlistViewSet(viewsets.ModelViewSet):
         )
         self._save_items(setlist, items_data)
         return Response(
-            BandSetlistSerializer(setlist).data, status=status.HTTP_201_CREATED
+            BandSetlistSerializer(setlist, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
         )
 
     def update(self, request, *args, **kwargs):
         setlist = self.get_object()
-        payload = BandSetlistPayloadSerializer(
-            data=request.data, context=self.get_serializer_context()
-        )
+        context = self.get_serializer_context()
+        context['setlist'] = setlist
+        payload = BandSetlistPayloadSerializer(data=request.data, context=context)
         payload.is_valid(raise_exception=True)
         data = payload.validated_data.copy()
         items_data = data.pop('items', None)
@@ -206,7 +213,7 @@ class BandSetlistViewSet(viewsets.ModelViewSet):
         if items_data is not None:
             BandSetlistItem.objects.filter(setlist=setlist).delete()
             self._save_items(setlist, items_data)
-        return Response(BandSetlistSerializer(setlist).data)
+        return Response(BandSetlistSerializer(setlist, context=context).data)
 
 
 class MinistryViewSet(viewsets.ModelViewSet):
@@ -385,16 +392,29 @@ class VolunteerRosterViewSet(viewsets.ModelViewSet):
             roster=roster, defaults={'created_by': request.user},
         )
         song_ids = [item['song'] for item in items_data]
-        valid_ids = set(
-            Song.objects.filter(
-                church=request.user.church, id__in=song_ids,
-            ).values_list('id', flat=True)
-        )
+        # O setlist do culto é um contêiner público (a escala é publicada e tem
+        # link público), então ele segue a mesma regra das setlists de banda:
+        # só entram músicas visíveis ao autor e nunca uma música privada.
+        visible = {
+            song.pk: song for song in
+            visible_songs(request.user, church=request.user.church)
+            .filter(pk__in=song_ids)
+            .only('pk', 'is_private', 'title')
+        }
         for item in items_data:
-            if item['song'] not in valid_ids:
+            if item['song'] not in visible:
                 raise ValidationError(
-                    {'items': f'Música {item["song"]} não pertence à sua igreja.'}
+                    {'items': f'Música {item["song"]} não pertence à sua igreja ou não está disponível.'}
                 )
+        private = [s for s in visible.values() if s.is_private]
+        if private:
+            raise ValidationError({
+                'items': (
+                    'Não é possível adicionar música privada ao setlist do culto: '
+                    + ', '.join(song.title for song in private[:5])
+                    + '.'
+                )
+            })
 
         with transaction.atomic():
             SetlistItem.objects.filter(setlist=setlist).delete()
@@ -442,37 +462,26 @@ class SongViewSet(viewsets.ModelViewSet):
         if church is None:
             return Song.objects.none()
         today = timezone.localdate()
-        qs = Song.objects.filter(church=church).select_related(
-            'band', 'created_by'
-        ).annotate(
-            worship_plays=django_models.Count(
-                'setlist_items',
-                filter=django_models.Q(
-                    setlist_items__setlist__roster__date__lte=today
-                ),
-                distinct=True,
-            ),
-            band_plays=django_models.Count(
+        qs = apply_visibility(
+            Song.objects.filter(church=church), self.request.user,
+            self.request.query_params.get('visibility'),
+        ).select_related('band', 'created_by').annotate(
+            # Mesmo recorte de `band_stats_map`: setlists visíveis apenas, senão
+            # a contagem usada na ordenação revelaria setlists privados alheios.
+            total_band_plays=django_models.Count(
                 'band_setlist_items',
                 filter=django_models.Q(
                     band_setlist_items__setlist__date__lte=today
+                ) & (
+                    django_models.Q(
+                        band_setlist_items__setlist__is_private=False
+                    )
+                    | django_models.Q(
+                        band_setlist_items__setlist__created_by=self.request.user
+                    )
                 ),
                 distinct=True,
             ),
-            worship_last=django_models.Max(
-                'setlist_items__setlist__roster__date',
-                filter=django_models.Q(
-                    setlist_items__setlist__roster__date__lte=today
-                ),
-            ),
-            band_last=django_models.Max(
-                'band_setlist_items__setlist__date',
-                filter=django_models.Q(
-                    band_setlist_items__setlist__date__lte=today
-                ),
-            ),
-            total_plays=django_models.F('worship_plays')
-            + django_models.F('band_plays'),
         )
         band = self.request.query_params.get('band')
         if band:
@@ -494,6 +503,22 @@ class SongViewSet(viewsets.ModelViewSet):
         order_target = SONG_ORDERING_MAP.get(ordering, '?')
         return qs.order_by(order_target)
 
+    def _attach_band_stats(self, songs):
+        """Preenche `band_stats` de toda a página com UMA consulta agrupada
+        (evita N+1 no list). Músicas privadas ficam sem contagem."""
+        songs = list(songs)
+        if not songs:
+            return songs
+        stats = band_stats_map(
+            [song.pk for song in songs],
+            timezone.localdate(),
+            user=self.request.user,
+            church=self.request.user.church,
+        )
+        for song in songs:
+            song._band_stats_cache = [] if song.is_private else stats.get(song.pk, [])
+        return songs
+
     def list(self, request, *args, **kwargs):
         """Lista paginada quando `?page=`/`?page_size=` é informado; caso
         contrário devolve o array completo (compatibilidade com os pickers
@@ -502,9 +527,11 @@ class SongViewSet(viewsets.ModelViewSet):
         if request.query_params.get('page') or request.query_params.get('page_size'):
             page = self.paginate_queryset(queryset)
             if page is not None:
+                page = self._attach_band_stats(page)
                 serializer = self.get_serializer(page, many=True)
                 return self.get_paginated_response(serializer.data)
-        serializer = self.get_serializer(queryset, many=True)
+        rows = self._attach_band_stats(queryset)
+        serializer = self.get_serializer(rows, many=True)
         return Response(serializer.data)
 
     def perform_create(self, serializer):
@@ -570,6 +597,11 @@ class SongViewSet(viewsets.ModelViewSet):
 
         Se um vídeo já foi cadastrado por qualquer igreja, devolve os dados para
         preencher o formulário e evitar novo scraping (Selenium/Chordify).
+
+        ATENÇÃO: aqui a visibilidade NÃO é aplicada de propósito — o objetivo é
+        reaproveitar o scraping de qualquer timbre. Consequência aceita: uma
+        música marcada como privada por outra igreja também é devolvida
+        (letra/cifras). Não usar este endpoint para listar o repertório.
         """
         video_id = (request.query_params.get('video_id') or '').strip()
         if not video_id:
@@ -582,41 +614,52 @@ class SongViewSet(viewsets.ModelViewSet):
         )
         if existing is None:
             return Response({'found': False, 'song': None})
-        return Response({'found': True, 'song': SongSerializer(existing).data})
+        existing._band_stats_cache = (
+            [] if existing.is_private
+            else band_stats_map(
+                [existing.pk], timezone.localdate(), church=request.user.church
+            ).get(existing.pk, [])
+        )
+        return Response({
+            'found': True,
+            'song': SongSerializer(existing, context={'request': request}).data,
+        })
 
     @action(detail=True, methods=['get'])
     def history(self, request, pk=None):
+        """Setlists de BANDA em que a música já tocou.
+
+        Regras: só conta setlist de banda (não o do culto), só quando a música
+        é pública, e só setlists que o próprio solicitante pode ver.
+        """
         song = self.get_object()
+        if song.is_private:
+            return Response({'results': []})
+
         fallback_key = song.church_key or song.original_key
-        rows = []
-
-        worship_items = (
-            SetlistItem.objects.filter(song=song)
-            .select_related('setlist__roster')
-        )
-        for item in worship_items:
-            roster = item.setlist.roster
-            rows.append({
-                'date': roster.date,
-                'name': roster.theme or 'Culto',
-                'key': item.custom_key or fallback_key,
-                'kind': 'worship',
-                'setlist_id': item.setlist_id,
-            })
-
         band_items = (
-            BandSetlistItem.objects.filter(song=song)
-            .select_related('setlist')
+            BandSetlistItem.objects
+            .filter(
+                song=song,
+                setlist__church_id=song.church_id,
+                setlist__date__lte=timezone.localdate(),
+            )
+            .filter(
+                django_models.Q(setlist__is_private=False)
+                | django_models.Q(setlist__created_by=request.user)
+            )
+            .select_related('setlist', 'setlist__band')
         )
-        for item in band_items:
-            setlist = item.setlist
-            rows.append({
-                'date': setlist.date,
-                'name': setlist.description or setlist.theme or 'Setlist',
+        rows = [
+            {
+                'date': item.setlist.date,
+                'name': item.setlist.description or item.setlist.theme or 'Setlist',
                 'key': item.custom_key or fallback_key,
                 'kind': 'band',
-                'setlist_id': setlist.id,
-            })
+                'setlist_id': item.setlist_id,
+            }
+            for item in band_items
+        ]
 
         rows.sort(key=lambda row: row['date'], reverse=True)
         serializer = SongHistorySerializer(rows[:60], many=True)
