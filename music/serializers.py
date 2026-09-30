@@ -413,6 +413,39 @@ class SongListSerializer(SongSerializer):
         ]
 
 
+class SongPrefillSerializer(serializers.ModelSerializer):
+    """Dados de pré-cadastro para o fluxo de "Adicionar Múltiplos".
+
+    É o subset do `SongSerializer` que serve para preencher uma linha em
+    branco do modal em lote a partir de um vídeo já cadastrado por outra
+    igreja (reaproveita o scraping e evita novo trabalho no worker).
+
+    Não herda de `SongSerializer` de propósito: os campos derivados
+    (`band_stats`, `created_by_name`, `can_edit`) fariam uma consulta por
+    música — e aqui a resposta traz dezenas de linhas de uma vez.
+    """
+
+    same_church = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Song
+        fields = [
+            'id', 'youtube_id', 'title', 'artist', 'thumbnail_url',
+            'original_key', 'church_key', 'bpm', 'time_signature',
+            'chords_json', 'lyrics', 'tags', 'same_church',
+        ]
+        read_only_fields = fields
+
+    def get_same_church(self, obj):
+        """O vídeo já está no repertório **daquela** igreja? Permite ao
+        modal marcar a linha como repetida (o `bulk-create` vai ignorá-la)
+        em vez de tratá-la como pré-cadastro aproveitável."""
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        church = getattr(user, 'church', None)
+        return bool(church and obj.church_id == church.id)
+
+
 class SongHistorySerializer(serializers.Serializer):
     """Histórico de setlists (cultos e bandas) em que a música foi tocada."""
 

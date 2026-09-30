@@ -18,6 +18,7 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsChurchRole
 from .permissions import (
+    IsSongBulkImporter,
     IsSongOwnerOrAdmin,
     IsSetlistOwnerOrPastor,
 )
@@ -46,6 +47,7 @@ from .serializers import (
     SetlistCreateSerializer,
     SongHistorySerializer,
     SongListSerializer,
+    SongPrefillSerializer,
     SongSerializer,
     WorshipSetlistSerializer,
     apply_visibility,
@@ -77,6 +79,13 @@ SONG_ORDERING_MAP = {
     'title': 'title',
     '-title': '-title',
 }
+
+# "Adicionar Múltiplos": tetos por requisição. O modal acumula linhas de
+# várias buscas, então um teto alto demais deixaria o envio único pesar
+# (validação + insert) sem ganho prático — 50 itens por lote já é 5x a
+# tela de resultados do YouTube (limite 30).
+BULK_SONGS_MAX = 100
+BULK_PREFILL_MAX = 50
 
 
 class SongPagination(PageNumberPagination):
@@ -461,6 +470,8 @@ class SongViewSet(viewsets.ModelViewSet):
             'list', 'retrieve', 'history', 'check_youtube', 'reprocess',
         ):
             return [IsChurchRole(*VIEW_ROLES)()]
+        if self.action in ('bulk_create', 'check_youtube_bulk'):
+            return [IsSongBulkImporter()]
         return [IsSongOwnerOrAdmin()]
 
     def get_queryset(self):
@@ -629,6 +640,186 @@ class SongViewSet(viewsets.ModelViewSet):
             'found': True,
             'song': SongSerializer(existing, context={'request': request}).data,
         })
+
+    @action(detail=False, methods=['post'], url_path='check-youtube-bulk')
+    def check_youtube_bulk(self, request):
+        """Versão em lote do `check-youtube`, para o modal de múltiplos.
+
+        O "Adicionar Múltiplos" acumula linhas de várias buscas antes de
+        salvar; consultar item a item faria uma requisição por música.
+        Aqui recebe todos os `video_ids` pendentes de uma vez e responde
+        apenas os que existem, já preenchidos.
+
+        Mesmas regras (e o mesmo aceite) de `check_youtube`: busca GLOBAL,
+        sem aplicar visibilidade, para reaproveitar o scraping de qualquer
+        timbre. Não usar este endpoint para listar o repertório.
+        """
+        raw_ids = request.data.get('video_ids') or []
+        if not isinstance(raw_ids, list):
+            raise ValidationError({
+                'video_ids': 'Envie uma lista de youtube_id.',
+            })
+        video_ids = []
+        for value in raw_ids:
+            video_id = str(value or '').strip()
+            if video_id and video_id not in video_ids:
+                video_ids.append(video_id)
+        if not video_ids:
+            return Response({'found': {}})
+        if len(video_ids) > BULK_PREFILL_MAX:
+            raise ValidationError({
+                'video_ids': (
+                    f'No máximo {BULK_PREFILL_MAX} youtube_id por requisição '
+                    f'(recebido: {len(video_ids)}).'
+                ),
+            })
+        existing = (
+            Song.objects.filter(youtube_id__in=video_ids)
+            .select_related('band')
+            .order_by('-updated_at')
+        )
+        # Vários registros podem ter o mesmo youtube_id (o model não é
+        # único): vence o mais recente, como no `check-youtube` unitário.
+        prefill = {}
+        for song in existing:
+            prefill.setdefault(
+                song.youtube_id,
+                SongPrefillSerializer(song, context={'request': request}).data,
+            )
+        return Response({'found': prefill})
+
+    @action(detail=False, methods=['post'], url_path='bulk-create')
+    def bulk_create(self, request):
+        """Cadastra várias músicas de uma vez ("Adicionar Múltiplos").
+
+        O modal deixa acumular linhas de quantas buscas o ADMIN quiser e
+        envia tudo num único pedido. Cada linha é validada e criada de
+        forma independente: uma linha inválida vira `failed` com o erro por
+        campo e **não** derruba as demais.
+
+        Regras:
+        - `youtube_id` já cadastrado na igreja ativa → `skipped` (evita
+          duplicar o repertório);
+        - `church`/`created_by` vêm do usuário, nunca do payload;
+        - sem `chords`/`chords_json` no payload, a música entra em PENDING e
+          o worker local (`process_chordify_queue`) faz a extração no
+          Chordify em background, como no cadastro unitário.
+        """
+        rows = request.data.get('songs')
+        if not isinstance(rows, list) or not rows:
+            raise ValidationError({
+                'songs': 'Envie uma lista de músicas em "songs".',
+            })
+        if len(rows) > BULK_SONGS_MAX:
+            raise ValidationError({
+                'songs': (
+                    f'No máximo {BULK_SONGS_MAX} músicas por requisição '
+                    f'(recebido: {len(rows)}).'
+                ),
+            })
+        church = request.user.church
+
+        # Uma consulta só para descobrir os repetidos: o item 2 do laço
+        # abaixo não pode virar query por linha.
+        claimed_ids = {
+            str(row.get('youtube_id') or '').strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get('youtube_id') or '').strip()
+        }
+        duplicated = set(
+            Song.objects.filter(church=church, youtube_id__in=claimed_ids)
+            .values_list('youtube_id', flat=True)
+        )
+
+        results = []
+        created_songs = []
+        skipped = failed = 0
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                failed += 1
+                results.append({
+                    'index': index,
+                    'status': 'failed',
+                    'errors': {'detail': 'Item inválido: envie um objeto.'},
+                })
+                continue
+            youtube_id = str(row.get('youtube_id') or '').strip()
+            if youtube_id and youtube_id in duplicated:
+                skipped += 1
+                results.append({
+                    'index': index,
+                    'status': 'skipped',
+                    'youtube_id': youtube_id,
+                    'reason': 'already_registered',
+                    'title': row.get('title') or '',
+                })
+                continue
+            serializer = SongSerializer(data=row, context={'request': request})
+            if not serializer.is_valid():
+                failed += 1
+                results.append({
+                    'index': index,
+                    'status': 'failed',
+                    'youtube_id': youtube_id,
+                    'title': row.get('title') or '',
+                    'errors': serializer.errors,
+                })
+                continue
+            try:
+                # Savepoint por linha: se o insert falhar no banco, as
+                # linhas já criadas permanecem.
+                with transaction.atomic():
+                    saved = serializer.save(church=church, created_by=request.user)
+            except ProtectedError as exc:
+                failed += 1
+                results.append({
+                    'index': index,
+                    'status': 'failed',
+                    'youtube_id': youtube_id,
+                    'title': str(row.get('title') or ''),
+                    'errors': {'detail': str(exc)},
+                })
+                logger.warning(
+                    'Songs[bulk-create] linha #%s recusada pelo banco: %s',
+                    index,
+                    exc,
+                )
+                continue
+            if youtube_id:
+                # Repetido dentro do próprio pedido: a primeira ocorrência
+                # vence, as seguintes caem como `skipped`.
+                duplicated.add(youtube_id)
+            created_songs.append(saved)
+            results.append({
+                'index': index,
+                'status': 'created',
+                'id': saved.pk,
+                'youtube_id': saved.youtube_id,
+                'title': saved.title,
+            })
+            logger.info(
+                'Songs[bulk-create] linha #%s "%s" (youtube_id=%s) salva por '
+                'usuário #%s com chord_status=%s',
+                index,
+                saved.title,
+                saved.youtube_id or '-',
+                request.user.pk,
+                saved.chord_status,
+            )
+        logger.info(
+            'Songs[bulk-create] pedido do usuário #%s: %d criadas, %d '
+            'ignoradas (já cadastradas), %d com erro',
+            request.user.pk, len(created_songs), skipped, failed,
+        )
+        return Response({
+            'created': len(created_songs),
+            'skipped': skipped,
+            'failed': failed,
+            'results': results,
+            'songs': SongSerializer(
+                created_songs, many=True, context={'request': request},
+            ).data,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['get'])
     def history(self, request, pk=None):

@@ -23,6 +23,11 @@ _FORBIDDEN_MESSAGE = (
     'da congregação podem alterá-la ou excluí-la.'
 )
 
+_BULK_IMPORT_MESSAGE = (
+    'Somente administradores podem adicionar múltiplas '
+    'músicas de uma vez no repertório.'
+)
+
 
 def can_govern_setlist(user) -> bool:
     """Governança global de setlists (todas, de qualquer criador):
@@ -90,6 +95,28 @@ class IsSongOwnerOrAdmin(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             return True
         return can_edit_song(request.user, obj)
+
+
+class IsSongBulkImporter(permissions.BasePermission):
+    """Importação em lote do repertório ("Adicionar Múltiplos").
+
+    Restrito ao ADMIN (staff/superuser) com igreja ativa: a rota acumula
+    várias músicas de várias buscas no mesmo envio, o que é uma operação
+    de curadoria/admin e não de gestão do dia a dia. Diferente do
+    `IsSongOwnerOrAdmin` (cadastro unitário, aberto a qualquer membro).
+    """
+
+    message = _BULK_IMPORT_MESSAGE
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return is_admin(user) and user.church is not None
+
+    def has_object_permission(self, request, view, obj):
+        # Só age em coleções (detail=False): mantém a leitura da regra acima.
+        return False
 
 
 def can_edit_setlist(user, setlist) -> bool:
