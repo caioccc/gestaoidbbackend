@@ -398,6 +398,21 @@ class SongSerializer(serializers.ModelSerializer):
         return bool(user and can_edit_song(user, obj))
 
 
+class SongListSerializer(SongSerializer):
+    """Representação leve do repertório; cifras e letra ficam no detalhe."""
+
+    class Meta(SongSerializer.Meta):
+        fields = [
+            'id', 'church', 'band', 'band_name', 'band_color',
+            'title', 'artist', 'youtube_id', 'youtube_title',
+            'thumbnail_url', 'duration_seconds', 'original_key', 'church_key',
+            'bpm', 'time_signature', 'tags', 'band_stats', 'is_active',
+            'is_private', 'created_at', 'chord_status', 'chord_error',
+            'chord_retries', 'chord_processed_at', 'created_by',
+            'created_by_name', 'can_edit',
+        ]
+
+
 class SongHistorySerializer(serializers.Serializer):
     """Histórico de setlists (cultos e bandas) em que a música foi tocada."""
 

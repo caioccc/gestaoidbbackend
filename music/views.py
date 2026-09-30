@@ -45,6 +45,7 @@ from .serializers import (
     RosterSerializer,
     SetlistCreateSerializer,
     SongHistorySerializer,
+    SongListSerializer,
     SongSerializer,
     WorshipSetlistSerializer,
     apply_visibility,
@@ -450,6 +451,11 @@ class SongViewSet(viewsets.ModelViewSet):
     serializer_class = SongSerializer
     pagination_class = SongPagination
 
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return SongListSerializer
+        return super().get_serializer_class()
+
     def get_permissions(self):
         if self.action in (
             'list', 'retrieve', 'history', 'check_youtube', 'reprocess',
@@ -483,6 +489,8 @@ class SongViewSet(viewsets.ModelViewSet):
                 distinct=True,
             ),
         )
+        if self.action == 'list':
+            qs = qs.defer('chords', 'chords_json', 'lyrics')
         band = self.request.query_params.get('band')
         if band:
             qs = qs.filter(band_id=band)
@@ -520,16 +528,13 @@ class SongViewSet(viewsets.ModelViewSet):
         return songs
 
     def list(self, request, *args, **kwargs):
-        """Lista paginada quando `?page=`/`?page_size=` é informado; caso
-        contrário devolve o array completo (compatibilidade com os pickers
-        de setlists, que precisam de todo o repertório)."""
+        """Lista leve; pagina quando o cliente envia `page` ou `page_size`."""
         queryset = self.filter_queryset(self.get_queryset())
         if request.query_params.get('page') or request.query_params.get('page_size'):
             page = self.paginate_queryset(queryset)
-            if page is not None:
-                page = self._attach_band_stats(page)
-                serializer = self.get_serializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
+            page = self._attach_band_stats(page)
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
         rows = self._attach_band_stats(queryset)
         serializer = self.get_serializer(rows, many=True)
         return Response(serializer.data)

@@ -54,6 +54,18 @@ class SongListPaginationTest(MusicFixturesMixin, TestCase):
         self.assertIsInstance(resp.data, list)
         self.assertEqual(len(resp.data), 5)
 
+    def test_list_omits_player_payload_fields(self):
+        Song.objects.filter(pk=self.songs[0].pk).update(
+            chords='C\nG\nAm',
+            chords_json=[{'start': 0, 'end': 2, 'note': 'C'}],
+            lyrics='Letra completa da música',
+        )
+        _, resp = self._list_request('/api/music/songs/?page=1&page_size=2')
+        row = resp.data['results'][0]
+        self.assertNotIn('chords', row)
+        self.assertNotIn('chords_json', row)
+        self.assertNotIn('lyrics', row)
+
     def test_ordering_by_title(self):
         _, resp = self._list_request('/api/music/songs/?page=1&page_size=10&ordering=title')
         titles = [s['title'] for s in resp.data['results']]
