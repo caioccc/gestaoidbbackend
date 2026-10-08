@@ -9,6 +9,7 @@ from django.conf import settings
 from django.core.files.storage import FileSystemStorage
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
+from django.utils import timezone
 from django.utils.text import slugify
 
 from core.storage import raw_storage, media_storage, church_upload_to, church_logo_upload_to
@@ -286,6 +287,7 @@ class ChurchMembership(models.Model):
     """
 
     class Role(models.TextChoices):
+        MEMBRO = 'MEMBRO', 'Membro / Discipulador'
         PASTOR = 'PASTOR', 'Pastor(a)'
         SECRETARIA = 'SECRETARIA', 'Secretário(a)'
         TESOUREIRO = 'TESOUREIRO', 'Tesoureiro(a)'
@@ -498,6 +500,12 @@ class Member(models.Model):
         choices=LifecycleStage.choices,
         default=LifecycleStage.ACTIVE,
     )
+    # Marca o início da etapa atual: é a base do SLA de acompanhamento do
+    # visitante. Registros anteriores à Fase 2 ficam nulos e o serviço usa
+    # `created_at` como referência, para não perder sinal retroativamente.
+    stage_entered_at = models.DateTimeField(
+        'Entrou na etapa em', null=True, blank=True,
+    )
     last_contact_at = models.DateTimeField(
         'Último contato (WhatsApp)', null=True, blank=True,
     )
@@ -517,6 +525,50 @@ class Member(models.Model):
     state = models.CharField('UF', max_length=2, blank=True)
     cep = models.CharField('CEP', max_length=9, blank=True)
 
+    # Cuidado pastoral: quem responde por este membro no funil de visitantes.
+    user = models.OneToOneField(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='member_profile',
+        verbose_name='Conta de acesso',
+        help_text='Conta logada que corresponde a este membro do diretório.',
+    )
+    discipler = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='disciplados',
+        verbose_name='Discipulador / Responsável',
+        help_text=(
+            'Membro ativo da mesma igreja responsável pelo acompanhamento. '
+            'Obrigatório para Visitante e Em Integração.'
+        ),
+    )
+    discipler_assigned_at = models.DateTimeField(
+        'Responsável definido em', null=True, blank=True,
+    )
+    discipler_assigned_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Responsável definido por',
+    )
+    source_hash = models.CharField(
+        'Hash de origem (convite)', max_length=44, blank=True, default='',
+        help_text='Convite público que originou o cadastro do visitante.',
+    )
+    is_sentinel = models.BooleanField(
+        'Registro sentinela da igreja',
+        default=False,
+        editable=False,
+        help_text='Responsável padrão usado quando o membro não tem atribuição.',
+    )
+
     created_at = models.DateTimeField('Criado em', auto_now_add=True)
     updated_at = models.DateTimeField('Atualizado em', auto_now=True)
 
@@ -527,13 +579,23 @@ class Member(models.Model):
         indexes = [
             models.Index(fields=['church', 'status'], name='acct_member_church_status_idx'),
             models.Index(fields=['church', 'created_at'], name='acct_member_church_created_idx'),
+            models.Index(fields=['church', 'discipler'], name='acct_member_discipler_idx'),
+            models.Index(
+                fields=['church', 'lifecycle_stage', 'status'],
+                name='acct_member_church_stage_idx',
+            ),
         ]
         constraints = [
             models.UniqueConstraint(
                 fields=['church', 'card_number'],
                 name='unique_church_member_card_number',
                 condition=models.Q(card_number__isnull=False),
-            )
+            ),
+            models.UniqueConstraint(
+                fields=['church'],
+                name='unique_sentinel_per_church',
+                condition=models.Q(is_sentinel=True),
+            ),
         ]
 
     def __str__(self):
@@ -542,7 +604,48 @@ class Member(models.Model):
     def save(self, *args, **kwargs):
         if not self.public_hash:
             self.public_hash = secrets.token_urlsafe(32)
+        if self._needs_sentinel():
+            self.discipler = Member.get_church_sentinel(self.church, create=True)
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'discipler' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['discipler']
+        if self._stage_changed():
+            # O relógio do SLA só corre a partir da criação ou da troca de etapa.
+            from django.utils import timezone  # noqa: PLC0415
+
+            self.stage_entered_at = timezone.now()
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'stage_entered_at' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['stage_entered_at']
         super().save(*args, **kwargs)
+
+    def _stage_changed(self) -> bool:
+        """Se esta gravação deve (re)iniciar o relógio do SLA.
+
+        Só quando a etapa realmente muda: edições de telefone, notas ou
+        responsável não podem zerar a contagem de dias do visitante.
+        """
+        if not self.church_id:
+            return False
+        if self._state.adding:
+            return self.stage_entered_at is None
+        previous = (
+            Member.objects.filter(pk=self.pk)
+            .values_list('lifecycle_stage', flat=True)
+            .first()
+        )
+        return previous is not None and previous != self.lifecycle_stage
+
+    def _needs_sentinel(self) -> bool:
+        """Se o cadastro deve nascer no sentinela da igreja.
+
+        `discipler` é NOT NULL, mas o sentinela é o default semântico: um
+        cadastro novo sem responsável explícito pertence à igreja. O próprio
+        sentinela é ignorado para não se auto-atribuir (recursão).
+        """
+        if self.is_sentinel or self.discipler_id is not None or not self.church_id:
+            return False
+        return True
 
     def ensure_public_hash(self) -> str:
         """Retorna (gerando se preciso) o hash público do cartão."""
@@ -553,6 +656,100 @@ class Member(models.Model):
     def regenerate_public_hash(self):
         self.public_hash = secrets.token_urlsafe(32)
         self.save(update_fields=['public_hash', 'updated_at'])
+
+    SENTINEL_NAME = 'Responsável pela Igreja (sem atribuição)'
+
+    @classmethod
+    def get_church_sentinel(cls, church, create: bool = False):
+        """Retorna o registro sentinela da igreja, criando-o quando `create`.
+
+        O sentinela representa a "responsabilidade da igreja" e substitui o NULL
+        em `discipler`, que é NOT NULL. Nunca aparece em listas, relatórios ou no
+        seletor de responsáveis.
+        """
+        sentinel = cls.objects.filter(church=church, is_sentinel=True).first()
+        if sentinel is None and create:
+            sentinel = cls.objects.create(
+                church=church,
+                name=cls.SENTINEL_NAME,
+                status=cls.Status.ACTIVE,
+                lifecycle_stage=cls.LifecycleStage.ACTIVE,
+                is_sentinel=True,
+            )
+        return sentinel
+
+    def _check_discipler_link(self) -> dict:
+        """Invariantes estruturais do vínculo. Devolve `{campo: erro}`."""
+        errors = {}
+        if self.discipler_id is None:
+            return errors
+        if self.pk and self.discipler_id == self.pk:
+            errors['discipler'] = 'O membro não pode ser responsável por si mesmo.'
+            return errors
+        if self.discipler.church_id != self.church_id:
+            errors['discipler'] = 'O responsável deve pertencer à mesma igreja.'
+        return errors
+
+    def clean(self):
+        """Invariantes do vínculo válidas em qualquer salvamento.
+
+        A elegibilidade do responsável (membro ativo) NÃO é verificada aqui:
+        desativar um discipulador não pode falhar por causa dos visitantes já
+        atribuídos a ele. Isso vive em `validate_discipler_assignment`.
+        """
+        super().clean()
+        errors = self._check_discipler_link()
+        if errors:
+            raise ValidationError(errors)
+
+    def validate_discipler_assignment(self):
+        """Valida a atribuição de um responsável. Usado na criação/troca."""
+        self.check_discipler_eligible(self.discipler, self.church)
+
+    @classmethod
+    def check_discipler_eligible(cls, discipler, church=None):
+        """Valida se `discipler` pode assumir a responsabilidade em `church`.
+
+        O sentinela é aceito como "responsabilidade da igreja" e pula a
+        checagem de elegibilidade, por já ser um membro ativo da própria igreja.
+        """
+        if discipler is None:
+            return
+        if church is not None and discipler.church_id != church.id:
+            raise ValidationError(
+                {'discipler': 'O responsável deve pertencer à mesma igreja.'}
+            )
+        if discipler.is_sentinel:
+            return
+        if discipler.status != cls.Status.ACTIVE:
+            raise ValidationError(
+                {'discipler': 'O responsável precisa estar com status Ativo.'}
+            )
+        if discipler.lifecycle_stage != cls.LifecycleStage.ACTIVE:
+            raise ValidationError(
+                {'discipler': 'O responsável precisa estar no estágio "Membro Ativo".'}
+            )
+
+    def delete(self, *args, **kwargs):
+        """Reaponta os discipulados para o sentinela antes de excluir.
+
+        `discipler` é NOT NULL com `on_delete=PROTECT`; sem este reapontamento a
+        exclusão seria bloqueada pelo banco e o visitante ficaria sem
+        responsável. O sentinela em si é preservado.
+        """
+        from django.utils import timezone  # noqa: PLC0415
+
+        if self.is_sentinel:
+            raise ValidationError(
+                'O registro sentinela da igreja não pode ser excluído.'
+            )
+        sentinel = Member.get_church_sentinel(self.church, create=True)
+        Member.objects.filter(discipler_id=self.pk).exclude(pk=self.pk).update(
+            discipler=sentinel,
+            discipler_assigned_at=timezone.now(),
+            updated_at=timezone.now(),
+        )
+        return super().delete(*args, **kwargs)
 
 
 class SundaySchoolClass(models.Model):
@@ -1073,6 +1270,7 @@ class MessageTemplate(models.Model):
         CARE = 'CARE', 'Cuidado / Ausência'
         VERSE = 'VERSE', 'Versículo'
         CARD_EXPIRING = 'CARD_EXPIRING', 'Carteirinha a Vencer'
+        DISCIPLER_REMINDER = 'DISCIPLER_REMINDER', 'Lembrete ao Discipulador'
         EBD_CLASS_ANNOUNCEMENT = 'EBD_CLASS_ANNOUNCEMENT', 'Aviso de Aula (EBD)'
         EBD_ABSENCE_RESCUE = 'EBD_ABSENCE_RESCUE', 'Resgate de Ausência (EBD)'
         EBD_BIRTHDAY = 'EBD_BIRTHDAY', 'Aniversariante da Semana (EBD)'
@@ -1114,7 +1312,16 @@ class MessageTemplate(models.Model):
 
 
 class MemberContactLog(models.Model):
-    """Registro de contato semiautomático enviado a um membro via WhatsApp."""
+    """Registro de contato com um membro.
+
+    `kind` separa a origem do registro (envio automático via WhatsApp ou
+    anotação manual), enquanto `category` guarda o assunto usado pelo modelo de
+    mensagem. `category` continua em uso para preservar o histórico já gravado.
+    """
+
+    class Kind(models.TextChoices):
+        WHATSAPP_AUTO = 'WHATSAPP_AUTO', 'Envio automático (WhatsApp)'
+        MANUAL = 'MANUAL', 'Registro manual'
 
     member = models.ForeignKey(
         Member,
@@ -1136,6 +1343,10 @@ class MemberContactLog(models.Model):
         related_name='+' ,
         verbose_name='Contatado por',
     )
+    kind = models.CharField(
+        'Origem', max_length=20, choices=Kind.choices,
+        default=Kind.WHATSAPP_AUTO,
+    )
     category = models.CharField(
         'Categoria', max_length=30, choices=MessageTemplate.Category.choices,
         default=MessageTemplate.Category.CUSTOM,
@@ -1153,6 +1364,107 @@ class MemberContactLog(models.Model):
 
     def __str__(self):
         return f'{self.member.name} - {self.created_at:%d/%m/%Y %H:%M}'
+
+
+class MemberInvite(models.Model):
+    """Convite público gerado por um membro da igreja.
+
+    O token abre a página `/convite/{token}`, onde o visitante se cadastra e já
+    nasce atribuído a quem convidou. Um convite pode ter validade e limite de
+    usos; ao ser revogado ou esgotado, o link deixa de aceitar cadastros.
+    """
+
+    church = models.ForeignKey(
+        Church,
+        on_delete=models.CASCADE,
+        related_name='member_invites',
+        verbose_name='Igreja',
+    )
+    inviter = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name='sent_invites',
+        verbose_name='Convidante',
+    )
+    token = models.CharField(
+        'Token', max_length=44, unique=True, editable=False,
+        help_text='Segmento público do link de convite.',
+    )
+    label = models.CharField('Nome do convite', max_length=120, blank=True, default='')
+    is_active = models.BooleanField('Ativo', default=True)
+    max_uses = models.PositiveIntegerField(
+        'Limite de usos', null=True, blank=True,
+        help_text='Em branco = usos ilimitados.',
+    )
+    uses_count = models.PositiveIntegerField('Usos', default=0)
+    expires_at = models.DateTimeField(
+        'Válido até', null=True, blank=True,
+        help_text='Em branco = sem prazo de validade.',
+    )
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Criado por',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Convite de visitante'
+        verbose_name_plural = 'Convites de visitantes'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['church', 'is_active'], name='acct_invite_church_active_idx'),
+            models.Index(fields=['inviter'], name='acct_invite_inviter_idx'),
+        ]
+
+    def __str__(self):
+        return f'Convite de {self.inviter.name} ({self.uses_count} usos)'
+
+    def save(self, *args, **kwargs):
+        if not self.token:
+            self.token = secrets.token_urlsafe(32)
+        super().save(*args, **kwargs)
+
+    @property
+    def remaining_uses(self) -> int | None:
+        """Usos restantes, ou `None` quando o convite é ilimitado."""
+        if self.max_uses is None:
+            return None
+        return max(self.max_uses - self.uses_count, 0)
+
+    @property
+    def is_expired(self) -> bool:
+        return bool(self.expires_at and timezone.now() >= self.expires_at)
+
+    @property
+    def is_usable(self) -> bool:
+        """`True` enquanto o link ainda aceita novos cadastros."""
+        if not self.is_active or self.is_expired:
+            return False
+        if self.max_uses is not None and self.uses_count >= self.max_uses:
+            return False
+        return True
+
+    @property
+    def status(self) -> str:
+        """Situação sintética do convite, para exibição na tela do membro."""
+        if not self.is_active:
+            return 'DISABLED'
+        if self.is_expired:
+            return 'EXPIRED'
+        if self.max_uses is not None and self.uses_count >= self.max_uses:
+            return 'EXHAUSTED'
+        return 'ACTIVE'
+
+    def regenerate_token(self) -> str:
+        """Emite um novo token, invalidando o link anterior."""
+        self.token = secrets.token_urlsafe(32)
+        self.save(update_fields=['token', 'updated_at'])
+        return self.token
 
 
 class GrowthGroup(models.Model):
@@ -1282,6 +1594,81 @@ class GrowthGroup(models.Model):
             raise ValidationError(
                 'Informe latitude e longitude juntas para o endereço do GC.'
             )
+
+
+class GrowthGroupMembership(models.Model):
+    """Inscrição de um membro em um Grupo de Crescimento.
+
+    Somente membros internos podem se inscrever (a página pública continua
+    usando o link de WhatsApp do líder). Saiu e voltou é a mesma linha: basta
+    alternar o status, preservando o histórico da inscrição original.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = 'ACTIVE', 'Inscrito'
+        LEFT = 'LEFT', 'Saiu'
+
+    group = models.ForeignKey(
+        GrowthGroup,
+        on_delete=models.CASCADE,
+        related_name='memberships',
+        verbose_name='Grupo',
+    )
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name='growth_group_memberships',
+        verbose_name='Membro',
+    )
+    status = models.CharField(
+        'Situação', max_length=10, choices=Status.choices, default=Status.ACTIVE,
+    )
+    joined_at = models.DateTimeField('Inscrito em', auto_now_add=True)
+    left_at = models.DateTimeField('Saiu em', null=True, blank=True)
+    created_by = models.ForeignKey(
+        'User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+        verbose_name='Registrado por',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+    updated_at = models.DateTimeField('Atualizado em', auto_now=True)
+
+    class Meta:
+        verbose_name = 'Inscrição em Grupo de Crescimento'
+        verbose_name_plural = 'Inscrições em Grupos de Crescimento'
+        ordering = ['-joined_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['group', 'member'],
+                name='uniq_growth_group_member',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['group', 'status'], name='acct_ggm_group_status_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.member.name} → {self.group.name} ({self.status})'
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == self.Status.ACTIVE
+
+    def join(self):
+        """(Re)ativa a inscrição zerando o relógio de entrada."""
+        self.status = self.Status.ACTIVE
+        self.left_at = None
+        self.save(update_fields=['status', 'left_at', 'updated_at'])
+
+    def leave(self):
+        if self.status == self.Status.LEFT:
+            return
+        self.status = self.Status.LEFT
+        self.left_at = timezone.now()
+        self.save(update_fields=['status', 'left_at', 'updated_at'])
 
 
 class ChurchPublicLink(models.Model):
@@ -1928,7 +2315,6 @@ class WorshipService(models.Model):
     )
     theme = models.CharField('Tema', max_length=200, blank=True)
     scripture = models.CharField('Texto bíblico', max_length=200, blank=True)
-    attendees = models.PositiveIntegerField('Presentes', default=0)
     visitors = models.PositiveIntegerField('Visitantes', default=0)
     conversions = models.PositiveIntegerField('Conversões', default=0)
     offering = models.DecimalField(

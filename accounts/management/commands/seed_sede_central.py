@@ -394,7 +394,6 @@ class Command(BaseCommand):
                     ['Romanos 12.2', 'Mateus 6.33', 'Salmos 23.1', 'João 3.16',
                      'Filipenses 4.6', 'Provérbios 3.5', 'Isaías 41.10']
                 ),
-                'attendees': rng.randint(60, 320),
                 'visitors': rng.randint(0, 25),
                 'conversions': rng.randint(0, 8),
                 'offering': Decimal(str(rng.randint(30, 900) * 10 + rng.randint(0, 9))),

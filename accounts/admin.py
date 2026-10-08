@@ -78,9 +78,16 @@ class MinistryAreaAdmin(admin.ModelAdmin):
 
 @admin.register(Member)
 class MemberAdmin(admin.ModelAdmin):
-    list_display = ['name', 'church', 'phone', 'status', 'church_entry', 'cpf']
-    list_filter = ['church', 'status', 'church_entry']
+    list_display = [
+        'name', 'church', 'discipler', 'lifecycle_stage', 'phone',
+        'status', 'church_entry', 'cpf',
+    ]
+    list_filter = ['church', 'status', 'lifecycle_stage', 'church_entry']
     search_fields = ['name', 'phone', 'email', 'cpf', 'rg']
+
+    def get_queryset(self, request):
+        """O sentinela da igreja é infraestrutura interna, não um cadastro."""
+        return super().get_queryset(request).exclude(is_sentinel=True)
 
 
 @admin.register(User)

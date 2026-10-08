@@ -3,12 +3,57 @@ from rest_framework import permissions
 
 from .models import Church, ChurchMembership
 
+MEMBER_OPS_ROLES = (
+    ChurchMembership.Role.PASTOR,
+    ChurchMembership.Role.SECRETARIA,
+    ChurchMembership.Role.TESOUREIRO,
+    ChurchMembership.Role.INTERCESSAO,
+)
+
 
 def is_admin(user) -> bool:
     """Superadmin nacional (staff/superuser)."""
     return bool(
         user and user.is_authenticated and (user.is_staff or user.is_superuser)
     )
+
+
+def can_view_all_members(user, church=None) -> bool:
+    """Se o usuário enxerga o diretório inteiro da igreja.
+
+    A equipe de operação (pastor, secretaria, tesoureiro e intercessão) vê
+    todos os membros. O `MEMBRO` — fiel com conta, sem cargo — enxerga
+    apenas os visitantes sob sua responsabilidade; o filtro é aplicado no
+    queryset, não aqui.
+    """
+    if is_admin(user):
+        return True
+    if user is None or user.church is None:
+        return False
+    return user.get_role_for(user.church) in MEMBER_OPS_ROLES
+
+
+def resolve_own_member(user):
+    """`Member` correspondente à conta logada, ou None.
+
+    Ponte entre identidade e diretório: `User` -> `member_profile` -> `Member`.
+    """
+    if not (user and user.is_authenticated):
+        return None
+    profile = getattr(user, 'member_profile', None)
+    if profile is None:
+        return None
+    return profile
+
+
+def is_own_member(user, member) -> bool:
+    """Se `member` é um visitante atribuído a este usuário."""
+    if member is None:
+        return False
+    own = resolve_own_member(user)
+    if own is None:
+        return False
+    return member.discipler_id == own.id
 
 
 def can_manage_church(user, church) -> bool:

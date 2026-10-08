@@ -199,17 +199,13 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 20,
-}
-
-SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),   # Sessão de 7 dias
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
-    'AUTH_HEADER_TYPES': ('Bearer',),
-    'USER_AUTHENTICATION_RULE': (
-        'accounts.authentication.custom_user_authentication_rule'
-    ),
+    # Só as taxas ficam declaradas aqui; os endpoints optam pelo throttle
+    # individualmente (`throttle_classes`) para não afetar a API autenticada.
+    'DEFAULT_THROTTLE_RATES': {
+        'public_invite': '10/min',
+        'public_invite_form': '60/min',
+        'growth_group_join': '30/min',
+    },
 }
 
 # Observabilidade: emite logs de INFO+ para o stderr (capturado pelo Heroku/log.

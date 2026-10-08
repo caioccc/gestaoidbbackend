@@ -708,15 +708,116 @@ def _month_day(date):
     return (date.month, date.day)
 
 
-def compute_church_alerts(church, today=None, include_loans=False):
+SLA_VISITOR_GREEN_DAYS = 2
+SLA_VISITOR_RED_DAYS = 6
+SLA_VISITOR_STAGES = ('VISITOR', 'INTEGRATION')
+
+
+def visitor_sla_state(days_waiting):
+    """Classifica a espera de um visitante em verde / amarelo / vermelho.
+
+    <= 48h verde, 2 a 5 dias amarelo, >= 6 dias vermelho. `days_waiting` é o
+    número inteiro de dias desde a entrada na etapa. Retorna None para
+    valores negativos (data futura, ex.: backfill importado).
+    """
+    if days_waiting is None or days_waiting < 0:
+        return None
+    if days_waiting >= SLA_VISITOR_RED_DAYS:
+        return 'red'
+    if days_waiting >= SLA_VISITOR_GREEN_DAYS:
+        return 'yellow'
+    return 'green'
+
+
+def compute_visitor_alerts(church, today=None):
+    """Alertas de SLA dos visitantes da igreja, já filtrados do sentinela.
+
+    Dois tipos, ambos consumidos pelo sino e pelo painel da secretaria:
+      - visitor_sla_critical: visitante esperando >= 6 dias;
+      - visitor_unassigned: visitante sem responsável real, para redistribuição.
+
+    O payload carrega `discipler_id` para que a view recorte a lista final
+    conforme o papel de quem consulta.
+    """
+    from django.utils import timezone  # noqa: PLC0415
+
+    from .models import Member  # noqa: PLC0415
+
+    if today is None:
+        today = timezone.localdate()
+
+    visitors = (
+        Member.objects.filter(church=church, lifecycle_stage__in=SLA_VISITOR_STAGES)
+        .exclude(is_sentinel=True)
+        .exclude(status=Member.Status.INACTIVE)
+        .select_related('discipler')
+        .order_by('name')
+    )
+
+    alerts = []
+    for visitor in visitors:
+        # Sem responsável real inclui tanto o sentinela quanto vínculo vazio.
+        unassigned = visitor.discipler_id is None or visitor.discipler.is_sentinel
+        if unassigned:
+            alerts.append({
+                'type': 'visitor_unassigned',
+                'member_id': visitor.id,
+                'member_name': visitor.name,
+                'lifecycle_stage': visitor.lifecycle_stage,
+                'waiting_days': visitor_waiting_days(visitor, today),
+                'discipler_id': None,
+                'discipler_name': '',
+                'discipler_phone': '',
+            })
+            continue
+
+        waiting = visitor_waiting_days(visitor, today)
+        if visitor_sla_state(waiting) == 'red':
+            alerts.append({
+                'type': 'visitor_sla_critical',
+                'member_id': visitor.id,
+                'member_name': visitor.name,
+                'lifecycle_stage': visitor.lifecycle_stage,
+                'waiting_days': waiting,
+                'discipler_id': visitor.discipler_id,
+                'discipler_name': visitor.discipler.name,
+                'discipler_phone': visitor.discipler.phone or '',
+            })
+
+    return alerts
+
+
+def visitor_waiting_days(visitor, today=None):
+    """Dias inteiros desde que o visitante entrou na etapa atual.
+
+    Usa `stage_entered_at` quando disponível e cai para `created_at`, para que
+    registros antigos sem o marcador continuem gerando sinal em vez de sumirem.
+    """
+    from django.utils import timezone  # noqa: PLC0415
+
+    if today is None:
+        today = timezone.localdate()
+    reference = visitor.stage_entered_at or visitor.created_at
+    if reference is None:
+        return 0
+    entered = timezone.localtime(reference).date() if timezone.is_aware(reference) else reference
+    return max((today - entered).days, 0)
+
+
+def compute_church_alerts(church, today=None, include_loans=False, visitor_scope=None):
     """Alerta computado da igreja ativa: aniversários e validade da carteirinha.
 
     Devolve lista de dicionários (já serializáveis):
       - birthday_today / birthday_upcoming: um por membro;
       - card_validity_soon / card_validity_expired: um por igreja;
       - loan_return_today / loan_return_soon / loan_return_overdue: um por
-        empréstimo aberto (somente quando `include_loans` é True).
+        empréstimo aberto (somente quando `include_loans` é True);
+      - visitor_sla_critical / visitor_unassigned: um por visitante em SLA
+        crítico ou sem responsável (somente quando `visitor_scope` é True).
+
     `today` pode ser passado (date) para testes determinísticos.
+    `visitor_scope` habilita os alertas de visitante: a secretaria precisa ver
+    todos da igreja, enquanto o membro comum só vê os seus.
     """
     import datetime  # noqa: PLC0415
     from django.utils import timezone  # noqa: PLC0415
@@ -771,6 +872,9 @@ def compute_church_alerts(church, today=None, include_loans=False):
                 'type': 'card_validity_soon',
                 'date': expiry.isoformat(),
             })
+
+    if visitor_scope and church is not None:
+        alerts.extend(compute_visitor_alerts(church, today=today))
 
     if include_loans and church is not None:
         open_loans = (
@@ -830,6 +934,42 @@ DEFAULT_MESSAGE_TEMPLATES = [
             '💙 Oi, {{PRIMEIRO_NOME}}! Sentimos a sua falta por aqui e queremos saber '
             'como você está. Se precisar conversar, orar ou de qualquer ajuda, estamos '
             'bem pertinho. Um abraço da {{IGREJA}}.'
+        ),
+    },
+    {
+        'title': 'Lembrete de Acompanhamento',
+        'category': 'DISCIPLER_REMINDER',
+        'content': (
+            '🙏 Olá, {{PRIMEIRO_NOME}}! Um visitante sob seu acompanhamento está em '
+            'atendimento crítico. Se possível, entre em contato e registre o '
+            'acompanhamento em breve. Gratidão da equipe da {{IGREJA}}.'
+        ),
+    },
+    {
+        'title': 'Aviso de Aula (EBD)',
+        'category': 'EBD_CLASS_ANNOUNCEMENT',
+        'content': (
+            '📖 {{PRIMEIRO_NOME}}, neste domingo a {{IGREJA}} realizará a Escola '
+            'Bíblica Dominical! Teremos turmas para todas as idades e uma palavra '
+            'abençoada para você. Venha participar! 🙌'
+        ),
+    },
+    {
+        'title': 'Resgate de Ausência (EBD)',
+        'category': 'EBD_ABSENCE_RESCUE',
+        'content': (
+            '👋 Oi, {{PRIMEIRO_NOME}}! Sentimos a sua falta na Escola Bíblica '
+            'Dominical da {{IGREJA}}. Queremos saber como você está e te esperamos '
+            'de braços abertos na próxima aula. 📖😊'
+        ),
+    },
+    {
+        'title': 'Aniversariante da Semana (EBD)',
+        'category': 'EBD_BIRTHDAY',
+        'content': (
+            '🎉 Aniversariante da semana, parabéns, {{PRIMEIRO_NOME}}! Que Deus '
+            'abençoe o seu novo ano de vida. Te esperamos na Escola Bíblica '
+            'Dominical da {{IGREJA}}! 📖🙏'
         ),
     },
 ]

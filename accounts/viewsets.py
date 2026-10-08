@@ -29,6 +29,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import SAFE_METHODS
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -48,6 +49,7 @@ from .models import (
     Member,
     MemberContactLog,
     MemberDocument,
+    MemberInvite,
     MemberRelative,
     MemberSubmission,
     MemberTransfer,
@@ -56,6 +58,7 @@ from .models import (
     StorageLocation,
     WorshipService,
     GrowthGroup,
+    GrowthGroupMembership,
     PastoralVisit,
     PrayerRequest,
     SundaySchoolAttendance,
@@ -70,9 +73,12 @@ from .permissions import (
     IsChurchRole,
     IsSedeManager,
     IsStaffPermission,
+    MEMBER_OPS_ROLES,
     accessible_churches,
     can_manage_church,
+    can_view_all_members,
     is_admin,
+    resolve_own_member,
 )
 from .serializers import (
     PUBLIC_SUBMISSION_FIELDS,
@@ -86,6 +92,7 @@ from .serializers import (
     ChurchSerializer,
     ChurchUpdateSerializer,
     CertificateTemplateSerializer,
+    DiscipleOptionSerializer,
     EcclesiasticalCertificateSerializer,
     LoanSerializer,
     MaterialItemSerializer,
@@ -109,6 +116,10 @@ from .serializers import (
     WorshipServiceSerializer,
     GrowthGroupSerializer,
     GrowthGroupPublicSerializer,
+    GrowthGroupMembershipSerializer,
+    MemberInviteSerializer,
+    PublicInviteCreateSerializer,
+    PublicInviteMetaSerializer,
     PrayerRequestSerializer,
     PublicPrayerRequestSerializer,
     SundaySchoolClassSerializer,
@@ -689,10 +700,12 @@ class ChurchUserDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-def apply_member_filters(qs, params):
+def apply_member_filters(qs, params, request=None):
     """Filtros combinados para o diretório de membros (query params):
     search, status, area, education, marital_status, church_entry, age_min,
-    age_max. Parâmetros inválidos/desconhecidos são ignorados com segurança."""
+    age_max, lifecycle_stage, discipler, unassigned.
+    `discipler=me` resolve o membro da sessão, por isso `request` é usado.
+    Parâmetros inválidos/desconhecidos são ignorados com segurança."""
     from datetime import date
 
     search = params.get('search', '').strip()
@@ -726,6 +739,41 @@ def apply_member_filters(qs, params):
     church_entry = params.get('church_entry')
     if church_entry in Member.ChurchEntry.values:
         qs = qs.filter(church_entry=church_entry)
+
+    lifecycle_stage = params.get('lifecycle_stage')
+    if lifecycle_stage in Member.LifecycleStage.values:
+        qs = qs.filter(lifecycle_stage=lifecycle_stage)
+
+    # O rol de membros (`member_scope=1`) não inclui visitantes nem quem está
+    # em integração — essas pessoas pertencem ao funil de /visitors e só
+    # aparecem aqui quando a busca/filtro explícito pedir.
+    if str(params.get('member_scope', '')).strip() == '1':
+        qs = qs.exclude(
+            lifecycle_stage__in=[
+                Member.LifecycleStage.VISITOR,
+                Member.LifecycleStage.INTEGRATION,
+            ],
+        )
+
+    # `unassigned=1` lista os visitantes sem responsável real: tanto os que
+    # apontam para o sentinela da igreja quanto os que ficaram sem vínculo.
+    if str(params.get('unassigned', '')).strip() in ('1', 'true', 'True'):
+        qs = qs.filter(
+            Q(discipler__isnull=True) | Q(discipler__is_sentinel=True),
+        )
+
+    raw_discipler = str(params.get('discipler', '')).strip()
+    if raw_discipler and raw_discipler.lower() not in ('none', 'null'):
+        if raw_discipler.lower() == 'me':
+            # "Meus visitantes": o filtro é resolvido no servidor para que a
+            # interface não precise expor o id do membro da sessão.
+            own = resolve_own_member(request.user) if request is not None else None
+            qs = qs.filter(discipler_id=own.id) if own is not None else Member.objects.none()
+        else:
+            try:
+                qs = qs.filter(discipler_id=int(raw_discipler))
+            except (TypeError, ValueError):
+                pass
 
     today = date.today()
     try:
@@ -803,17 +851,24 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
     pagination_class = None
 
     def get_permissions(self):
-        """INTERCESSAO tem consulta somente-leitura (contato pastoral).
+        """INTERCESSAO e MEMBRO têm acesso de acolhimento (funil pastoral).
 
-        Ações com `permission_classes` explícitas no decorator mantêm suas
-        regras originais (ex.: `prepare-whatsapp` e `stage` são
-        PASTOR/SECRETARIA).
+        O MEMBRO atua somente sobre os visitantes sob sua responsabilidade —
+        o recorte é aplicado em `get_queryset` e nas actions, não aqui.
+
+        As actions com `permission_classes` no decorator (ex.: `stage`,
+        `disciplers`, `prepare-whatsapp`) mantêm as prórpias regras; o MEMBRO
+        é liberado nelas de forma pontual nos respectivos decorators.
         """
-        if self.action in ('prepare_whatsapp', 'stage'):
-            return super().get_permissions()
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsChurchRole(
+                'PASTOR', 'SECRETARIA', 'TESOUREIRO', 'MEMBRO',
+            )()]
         if self.request and self.request.method in SAFE_METHODS:
-            return [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO', 'INTERCESSAO')()]
-        return [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')()]
+            return [IsChurchRole(
+                'PASTOR', 'SECRETARIA', 'TESOUREIRO', 'INTERCESSAO', 'MEMBRO',
+            )()]
+        return super().get_permissions()
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -827,19 +882,149 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def get_queryset(self):
-        church = self.request.user.church
+        user = self.request.user
+        church = user.church
         if church is None:
             return Member.objects.none()
-        return apply_member_filters(
+        # O sentinela da igreja é infraestrutura interna e nunca aparece na lista.
+        qs = (
             Member.objects.filter(church=church)
-            .select_related('church')
+            .exclude(is_sentinel=True)
+            .select_related('church', 'discipler')
             .prefetch_related('ministry_areas', 'relatives')
-            .order_by('name'),
-            self.request.query_params,
+            .order_by('name')
         )
+        if not can_view_all_members(user, church):
+            # Membro comum: somente os visitantes sob sua responsabilidade.
+            own = resolve_own_member(user)
+            if own is None:
+                return Member.objects.none()
+            unassigned_intake = (
+                Q(
+                    lifecycle_stage__in=[
+                        Member.LifecycleStage.VISITOR,
+                        Member.LifecycleStage.INTEGRATION,
+                    ]
+                )
+                & (Q(discipler__isnull=True) | Q(discipler__is_sentinel=True))
+            )
+            if self.action == 'list':
+                unassigned = str(
+                    self.request.query_params.get('unassigned', '')
+                ).strip() in ('1', 'true', 'True')
+                if unassigned:
+                    # Filtro explícito "sem responsável": o membro também
+                    # consegue acompanhar visitantes ainda não assumidos por
+                    # ninguém (somente as etapas de acolhimento do funil).
+                    qs = qs.filter(unassigned_intake)
+                else:
+                    qs = qs.filter(discipler_id=own.id)
+            else:
+                # Detalhe/actions (PATCH, DELETE, stage, WhatsApp): o acesso
+                # por pk não carrega a query string do filtro `unassigned`, e
+                # o funil já lista esses visitantes ao MEMBRO — o escopo
+                # portanto cobre o próprio recorte + os sem responsável.
+                qs = qs.filter(Q(discipler_id=own.id) | unassigned_intake)
+        return apply_member_filters(qs, self.request.query_params, self.request)
+
+    def create(self, request, *args, **kwargs):
+        if not can_view_all_members(request.user, request.user.church):
+            own = resolve_own_member(request.user)
+            if own is None:
+                raise PermissionDenied('Vínculo de membro não encontrado.')
+            data = request.data.copy()
+            data['discipler'] = own.pk
+            data.setdefault('lifecycle_stage', Member.LifecycleStage.VISITOR)
+            serializer = self.get_serializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response(
+                serializer.data, status=status.HTTP_201_CREATED, headers=headers,
+            )
+        return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        serializer.save(church=self.request.user.church)
+        church = self.request.user.church
+        if not can_view_all_members(self.request.user, church):
+            # Membro comum registra apenas visitantes e assume a
+            # responsabilidade por eles no ato da criação.
+            own = resolve_own_member(self.request.user)
+            if own is None:
+                raise PermissionDenied('Vínculo de membro não encontrado.')
+            stage = serializer.validated_data.get('lifecycle_stage')
+            if stage not in (
+                Member.LifecycleStage.VISITOR,
+                Member.LifecycleStage.INTEGRATION,
+            ):
+                raise PermissionDenied(
+                    'Membros só podem registrar visitantes no funil de acolhimento.'
+                )
+            serializer.validated_data['discipler'] = own
+        serializer.save(church=church)
+
+    def perform_update(self, serializer):
+        if not can_view_all_members(
+            self.request.user, self.request.user.church,
+        ):
+            if serializer.instance.lifecycle_stage not in (
+                Member.LifecycleStage.VISITOR,
+                Member.LifecycleStage.INTEGRATION,
+            ):
+                raise PermissionDenied(
+                    'Você só pode editar visitantes sob seu acompanhamento.'
+                )
+            # O membro não transfere a responsabilidade nem promove o estágio
+            # direto pelo formulário — quem faz isso é a equipe de operação.
+            serializer.validated_data.pop('discipler', None)
+            serializer.validated_data.pop('lifecycle_stage', None)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if not can_view_all_members(
+            self.request.user, self.request.user.church,
+        ):
+            if instance.lifecycle_stage not in (
+                Member.LifecycleStage.VISITOR,
+                Member.LifecycleStage.INTEGRATION,
+            ):
+                raise PermissionDenied(
+                    'Você só pode remover visitantes sob seu acompanhamento.'
+                )
+        instance.delete()
+
+    @action(
+        detail=False, methods=['get'], url_path='disciplers',
+        permission_classes=[IsChurchRole(
+            'PASTOR', 'SECRETARIA', 'TESOUREIRO', 'INTERCESSAO', 'MEMBRO',
+        )],
+    )
+    def disciplers(self, request):
+        """Membros elegíveis a receber a responsabilidade de um visitante.
+
+        Elegível = mesma igreja, `status` Ativo e estágio Membro Ativo. Não
+        exige conta de acesso: um responsável ainda sem `Member.user` pode ser
+        designado, apenas não receberá os alertas da Fase 2 até ser vinculado.
+        Um `MEMBRO` sem cargo vê apenas a si mesmo.
+        """
+        church = request.user.church
+        if church is None:
+            return Response([])
+        members = (
+            Member.objects.filter(
+                church=church,
+                status=Member.Status.ACTIVE,
+                lifecycle_stage=Member.LifecycleStage.ACTIVE,
+            )
+            .exclude(is_sentinel=True)
+            .order_by('name')
+        )
+        if not can_view_all_members(request.user, church):
+            own = resolve_own_member(request.user)
+            if own is None:
+                return Response([])
+            members = members.filter(pk=own.pk)
+        return Response(DiscipleOptionSerializer(members, many=True).data)
 
     @action(detail=True, methods=['get'], url_path='public-link')
     def public_link(self, request, pk=None):
@@ -862,7 +1047,7 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
 
     @action(
         detail=True, methods=['post'], url_path='prepare-whatsapp',
-        permission_classes=[IsChurchRole('PASTOR', 'SECRETARIA')],
+        permission_classes=[IsChurchRole('PASTOR', 'SECRETARIA', 'MEMBRO')],
     )
     def prepare_whatsapp(self, request, pk=None):
         """Prepara uma mensagem semiautomática de WhatsApp para o membro.
@@ -879,9 +1064,12 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
         template_id = payload.get('template_id')
         custom_text = (payload.get('custom_text') or '').strip()
         category = (payload.get('category') or '').upper()
+        kind = (payload.get('kind') or MemberContactLog.Kind.WHATSAPP_AUTO).upper()
 
         if category and category not in MessageTemplate.Category.values:
             raise ValidationError({'category': 'Categoria inválida.'})
+        if kind not in MemberContactLog.Kind.values:
+            raise ValidationError({'kind': 'Origem inválida.'})
 
         if template_id is not None:
             template = get_object_or_404(
@@ -913,6 +1101,7 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
             member=member,
             church=church,
             contacted_by=request.user,
+            kind=kind,
             category=category,
             message_content=message,
         )
@@ -927,7 +1116,7 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
 
     @action(
         detail=True, methods=['patch'], url_path='stage',
-        permission_classes=[IsChurchRole('PASTOR', 'SECRETARIA')],
+        permission_classes=[IsChurchRole('PASTOR', 'SECRETARIA', 'MEMBRO')],
     )
     def stage(self, request, pk=None):
         """Move o membro entre os estágios do funil pastoral."""
@@ -938,6 +1127,15 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
         )
         if not stage_value or stage_value not in Member.LifecycleStage.values:
             raise ValidationError({'lifecycle_stage': 'Estágio inválido.'})
+        if not can_view_all_members(request.user, request.user.church) and stage_value not in (
+            Member.LifecycleStage.VISITOR,
+            Member.LifecycleStage.INTEGRATION,
+        ):
+            # MEMBRO sem cargo acompanha o visitante apenas nas etapas de
+            # acolhimento; integrar à membresia é função da equipe.
+            raise PermissionDenied(
+                'Membros só podem mover entre as etapas de acolhimento.'
+            )
         member.lifecycle_stage = stage_value
         member.save(update_fields=['lifecycle_stage', 'updated_at'])
         return Response({
@@ -1007,6 +1205,13 @@ class MessageTemplateViewSet(viewsets.ModelViewSet):
     serializer_class = MessageTemplateSerializer
     permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA')]
     pagination_class = None
+
+    def get_permissions(self):
+        # MEMBRO sem cargo consulta os modelos ativos para usar o fluxo de
+        # WhatsApp do funil; a gestão (criar/editar/apagar) segue da equipe.
+        if self.request and self.request.method in SAFE_METHODS:
+            return [IsChurchRole('PASTOR', 'SECRETARIA', 'MEMBRO')()]
+        return super().get_permissions()
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -1269,6 +1474,8 @@ class GrowthGroupViewSet(viewsets.ModelViewSet):
     serializer_class = GrowthGroupSerializer
     permission_classes = [GrowthGroupPermission]
     pagination_class = None
+    # Usado só pela action `join` (ver `get_throttles`).
+    throttle_scope = 'growth_group_join'
 
     def get_queryset(self):
         church = self.request.user.church
@@ -1305,6 +1512,77 @@ class GrowthGroupViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         serializer.save()
+
+    def get_permissions(self):
+        # Inscrição e saída são ação do próprio membro, não da equipe que
+        # gere os GCs; o resto segue `GrowthGroupPermission`.
+        if self.action in ('join', 'leave', 'mine'):
+            return [permissions.IsAuthenticated()]
+        return super().get_permissions()
+
+    def get_throttles(self):
+        if self.action == 'join':
+            return [ScopedRateThrottle()]
+        return []
+
+    @action(detail=True, methods=['post'])
+    def join(self, request, pk=None):
+        """O membro logado se inscreve no GC (ou reativa a inscrição)."""
+        group = self.get_object()
+        own = resolve_own_member(request.user)
+        if own is None:
+            raise PermissionDenied(
+                'Sua conta não está vinculada a um membro desta igreja.'
+            )
+        if not group.is_active:
+            raise ValidationError({'group': 'Este grupo está inativo.'})
+        if group.is_full:
+            raise ValidationError({'group': 'Este grupo não tem vagas disponíveis.'})
+
+        membership, created = GrowthGroupMembership.objects.get_or_create(
+            group=group,
+            member=own,
+            defaults={
+                'status': GrowthGroupMembership.Status.ACTIVE,
+                'created_by': request.user,
+            },
+        )
+        if not created:
+            if membership.is_active:
+                return Response(GrowthGroupMembershipSerializer(membership).data)
+            membership.join()
+        return Response(
+            GrowthGroupMembershipSerializer(membership).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=True, methods=['post'])
+    def leave(self, request, pk=None):
+        """O membro logado sai do GC mantendo o histórico da inscrição."""
+        group = self.get_object()
+        own = resolve_own_member(request.user)
+        if own is None:
+            raise PermissionDenied(
+                'Sua conta não está vinculada a um membro desta igreja.'
+            )
+        membership = GrowthGroupMembership.objects.filter(
+            group=group, member=own,
+        ).first()
+        if membership is None:
+            raise NotFound('Inscrição não encontrada.')
+        membership.leave()
+        return Response(GrowthGroupMembershipSerializer(membership).data)
+
+    @action(detail=False, methods=['get'])
+    def mine(self, request):
+        """GCs em que o membro logado está inscrito."""
+        own = resolve_own_member(request.user)
+        if own is None:
+            return Response([])
+        qs = GrowthGroupMembership.objects.filter(member=own).select_related(
+            'group', 'member',
+        )
+        return Response(GrowthGroupMembershipSerializer(qs, many=True).data)
 
     @action(detail=False, methods=['get'])
     def stats(self, request):
@@ -1603,6 +1881,7 @@ class ChurchMembersViewSet(viewsets.ModelViewSet):
         return apply_member_filters(
             Member.objects.filter(church=self._church()).order_by('name'),
             self.request.query_params,
+            self.request,
         )
 
     def perform_create(self, serializer):
@@ -2387,9 +2666,12 @@ class AlertsView(APIView):
 
     Disponível para qualquer usuário autenticado com igreja ativa: aniversariantes
     (hoje e próximos 7 dias), validade da carteirinha (vence em <=30 dias ou já
-    vencida) e devoluções de empréstimos (hoje, próximos 7 dias ou atrasadas —
-    estes últimos somente para PASTOR/SECRETARIA/ADMIN, que acessam o inventário).
-    Usuários sem igreja recebem lista vazia.
+    vencida), devoluções de empréstimos (hoje, próximos 7 dias ou atrasadas —
+    estes últimos somente para PASTOR/SECRETARIA/ADMIN, que acessam o inventário)
+    e acompanhamento de visitantes (SLA crítico >= 6 dias e visitantes sem
+    responsável). Os alertas de visitante vão para toda a equipe da igreja e,
+    quando o usuário é MEMBRO, são restritos aos visitantes sob sua
+    responsabilidade. Usuários sem igreja recebem lista vazia.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -2399,18 +2681,49 @@ class AlertsView(APIView):
 
         church = request.user.church
         if church is None:
-            alerts = []
-        else:
-            role = request.user.get_role_for(church)
-            include_loans = request.user.is_staff or role in ('PASTOR', 'SECRETARIA')
-            alerts = services.compute_church_alerts(
-                church,
-                include_loans=include_loans,
-            )
+            return Response({
+                'alerts': [],
+                'generated_at': timezone.now().isoformat(),
+            })
+
+        role = request.user.get_role_for(church)
+        include_loans = request.user.is_staff or role in ('PASTOR', 'SECRETARIA')
+        # A secretaria acompanha todos os visitantes da igreja; o membro comum
+        # recebe SLA crítico e "sem responsável" só dos próprios visitantes,
+        # para não ser inundado por redistribuições alheias.
+        sees_all_visitors = (
+            request.user.is_staff or role in MEMBER_OPS_ROLES
+        )
+
+        alerts = services.compute_church_alerts(
+            church,
+            include_loans=include_loans,
+            visitor_scope=True,
+        )
+        alerts = self._scope_visitor_alerts(alerts, request, sees_all_visitors)
         return Response({
             'alerts': alerts,
             'generated_at': timezone.now().isoformat(),
         })
+
+    def _scope_visitor_alerts(self, alerts, request, sees_all_visitors):
+        """Filtra os alertas de visitante conforme o papel de quem consulta.
+
+        Aniversariantes, carteirinha e empréstimos seguem o escopo já existente
+        e não são tocados aqui.
+        """
+        if sees_all_visitors:
+            return alerts
+
+        own = resolve_own_member(request.user)
+        if own is None:
+            return [a for a in alerts if not a['type'].startswith('visitor_')]
+
+        return [
+            alert for alert in alerts
+            if not alert['type'].startswith('visitor_')
+            or alert.get('discipler_id') == own.id
+        ]
 
 
 # --------------------------------------------------------------------------- #
@@ -3503,3 +3816,134 @@ class SundaySchoolMonthlyReportPdfView(SundaySchoolMonthlyReportView):
         response = HttpResponse(pdf, content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
+
+
+class MemberInviteViewSet(viewsets.ModelViewSet):
+    """Convites de visitante gerados pelo membro logado.
+
+    Cada membro enxerga e gerencia apenas os próprios convites; `?all=1` abre a
+    lista da igreja inteira para quem já pode ver todos os membros.
+    """
+
+    serializer_class = MemberInviteSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        church = self.request.user.church
+        if church is None:
+            return MemberInvite.objects.none()
+        qs = MemberInvite.objects.filter(church=church).select_related(
+            'church', 'inviter',
+        )
+        if self.request.query_params.get('all') and can_view_all_members(
+            self.request.user
+        ):
+            return qs.order_by('-created_at')
+        own = resolve_own_member(self.request.user)
+        if own is None:
+            return MemberInvite.objects.none()
+        return qs.filter(inviter=own).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        own = resolve_own_member(self.request.user)
+        church = self.request.user.church
+        if own is None or church is None:
+            raise PermissionDenied(
+                'Sua conta não está vinculada a um membro desta igreja.'
+            )
+        serializer.save(church=church, inviter=own, created_by=self.request.user)
+
+    @action(detail=True, methods=['post'])
+    def regenerate(self, request, pk=None):
+        """Emite um novo token; o link anterior deixa de funcionar."""
+        invite = self.get_object()
+        invite.regenerate_token()
+        return Response(self.get_serializer(invite).data)
+
+    @action(detail=True, methods=['post'])
+    def toggle(self, request, pk=None):
+        """Ativa ou pausa o convite sem apagar o histórico de usos."""
+        invite = self.get_object()
+        invite.is_active = not invite.is_active
+        invite.save(update_fields=['is_active', 'updated_at'])
+        return Response(self.get_serializer(invite).data)
+
+
+class PublicInviteView(APIView):
+    """Página pública de convite (`/convite/{token}`).
+
+    Sem autenticação. GET devolve os dados de apresentação; POST cria o
+    visitante já atribuído a quem convidou. O throttle é por IP para conter
+    spam de cadastro.
+    """
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'public_invite'
+
+    def _resolve(self, token):
+        return (
+            MemberInvite.objects.select_related('church', 'inviter')
+            .filter(token=token)
+            .first()
+        )
+
+    def get(self, request, token):
+        invite = self._resolve(token)
+        if invite is None:
+            raise NotFound('Convite não encontrado.')
+        meta = {
+            'church_name': invite.church.name,
+            'church_city': invite.church.city or '',
+            'church_state': invite.church.state or '',
+            'church_phone': invite.church.phone or '',
+            'inviter_name': invite.inviter.name,
+            'inviter_photo': services.cloudinary_url(invite.inviter.photo),
+            'status': invite.status,
+        }
+        return Response(PublicInviteMetaSerializer(meta).data)
+
+    def post(self, request, token):
+        invite = self._resolve(token)
+        if invite is None:
+            raise NotFound('Convite não encontrado.')
+        if not invite.is_usable:
+            raise ValidationError({'token': 'Este convite não está mais ativo.'})
+
+        serializer = PublicInviteCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # A reserva de vaga é atômica: o update condicional garante que
+        # requisições simultâneas não ultrapassem `max_uses`.
+        with transaction.atomic():
+            reserved = (
+                MemberInvite.objects.filter(pk=invite.pk, is_active=True)
+                .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+                .filter(Q(max_uses__isnull=True) | Q(uses_count__lt=F('max_uses')))
+                .update(uses_count=F('uses_count') + 1)
+            )
+            if not reserved:
+                raise ValidationError({'token': 'Este convite não está mais ativo.'})
+
+            member = Member.objects.create(
+                church=invite.church,
+                name=data['name'],
+                phone=data['phone'],
+                birth_date=data.get('birth_date'),
+                notes=data.get('notes') or '',
+                lifecycle_stage=Member.LifecycleStage.VISITOR,
+                discipler=invite.inviter,
+                source_hash=invite.token,
+            )
+
+        return Response(
+            {
+                'member_id': member.id,
+                'inviter_name': invite.inviter.name,
+                'church_name': invite.church.name,
+            },
+            status=status.HTTP_201_CREATED,
+        )

@@ -15,6 +15,7 @@ router.register('cultos', viewsets.WorshipServiceViewSet, basename='worship')
 router.register('minutes', viewsets.ChurchMinutesViewSet, basename='minutes')
 router.register('church-links', viewsets.ChurchPublicLinkViewSet, basename='church-link')
 router.register('growth-groups', viewsets.GrowthGroupViewSet, basename='growth-group')
+router.register('member-invites', viewsets.MemberInviteViewSet, basename='member-invite')
 router.register('message-templates', viewsets.MessageTemplateViewSet, basename='message-template')
 router.register('certificate-templates', viewsets.CertificateTemplateViewSet, basename='certificate-template')
 router.register('certificates', viewsets.EcclesiasticalCertificateViewSet, basename='certificate')
@@ -232,6 +233,11 @@ urlpatterns = [
         'public/churches/<str:slug>/growth-groups/',
         viewsets.GrowthGroupPublicView.as_view(),
         name='public-church-growth-groups',
+    ),
+    path(
+        'public/invite/<str:token>/',
+        viewsets.PublicInviteView.as_view(),
+        name='public-invite',
     ),
     path(
         'sunday-school/monthly-report/',

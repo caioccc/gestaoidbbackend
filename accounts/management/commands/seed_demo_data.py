@@ -438,7 +438,6 @@ class Command(BaseCommand):
                     preacher=preacher,
                     theme=rng.choice(SERMON_THEMES),
                     scripture=rng.choice(SCRIPTURES),
-                    attendees=rng.randint(120, 280),
                     visitors=rng.randint(3, 25),
                     conversions=rng.randint(0, 4),
                     offering=Decimal(str(rng.randint(350, 1400))),

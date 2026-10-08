@@ -22,16 +22,18 @@ from .models import (
     EcclesiasticalCertificate,
     Loan,
     MaterialItem,
-    Member,
-    MemberDocument,
-    MemberRelative,
-    MemberSubmission,
-    MemberTransfer,
-    MessageTemplate,
-    MinistryArea,
-    StorageLocation,
-    WorshipService,
-    GrowthGroup,
+      Member,
+      MemberDocument,
+      MemberInvite,
+      MemberRelative,
+      MemberSubmission,
+      MemberTransfer,
+      MessageTemplate,
+      MinistryArea,
+      StorageLocation,
+      WorshipService,
+      GrowthGroup,
+      GrowthGroupMembership,
     PastoralVisit,
     PrayerRequest,
     SundaySchoolClass,
@@ -809,6 +811,25 @@ class MemberSerializer(serializers.ModelSerializer):
     )
     ministry_areas_display = serializers.SerializerMethodField()
     relatives = MemberRelativeSerializer(many=True, required=False)
+    discipler = serializers.PrimaryKeyRelatedField(
+        queryset=Member.objects.all(),
+        required=False,
+        allow_null=True,
+        label='Responsável',
+    )
+    discipler_name = serializers.SerializerMethodField()
+    discipler_phone = serializers.SerializerMethodField()
+    discipler_photo = serializers.SerializerMethodField()
+    discipler_is_sentinel = serializers.SerializerMethodField()
+    user = serializers.PrimaryKeyRelatedField(
+        queryset=get_user_model().objects.all(),
+        required=False,
+        allow_null=True,
+        label='Conta de acesso',
+    )
+    user_email = serializers.SerializerMethodField()
+    sla_state = serializers.SerializerMethodField()
+    sla_days_waiting = serializers.SerializerMethodField()
 
     class Meta:
         model = Member
@@ -825,12 +846,65 @@ class MemberSerializer(serializers.ModelSerializer):
             'lifecycle_stage', 'lifecycle_stage_display', 'last_contact_at',
             'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
             'public_hash',
+            'discipler', 'discipler_name', 'discipler_phone', 'discipler_photo',
+            'discipler_is_sentinel',
+            'discipler_assigned_at', 'source_hash',
+            'user', 'user_email',
+            'stage_entered_at', 'sla_state', 'sla_days_waiting',
             'created_at', 'updated_at',
         ]
         read_only_fields = [
             'id', 'church', 'created_at', 'updated_at', 'card_number',
             'public_hash', 'last_contact_at',
+            'discipler_assigned_at', 'discipler_assigned_by', 'source_hash',
+            'stage_entered_at', 'sla_state', 'sla_days_waiting',
         ]
+
+    def get_sla_days_waiting(self, obj):
+        return services.visitor_waiting_days(obj)
+
+    def get_sla_state(self, obj):
+        return services.visitor_sla_state(services.visitor_waiting_days(obj))
+
+    def get_user_email(self, obj):
+        return obj.user.email if obj.user_id else ''
+
+    def validate_user(self, value):
+        """A conta de acesso deve ser da mesma igreja e ainda não vinculada.
+
+        `Member.user` é OneToOne (related_name='member_profile'): reutilizar uma
+        conta já ligada a outro cadastro violaria a unicidade do modelo, então a
+        recusa vira erro de validação legível em vez de IntegrityError.
+        """
+        if value is None:
+            return None
+        church = self.context.get('church')
+        if church is not None and value.church_id != church.id:
+            raise serializers.ValidationError(
+                'Conta de acesso de outra igreja.',
+            )
+        linked = Member.objects.filter(user=value)
+        if self.instance is not None:
+            linked = linked.exclude(pk=self.instance.pk)
+        if linked.exists():
+            raise serializers.ValidationError(
+                'Esta conta de acesso já está vinculada a outro cadastro.',
+            )
+        return value
+
+    def get_discipler_name(self, obj):
+        return obj.discipler.name if obj.discipler_id else ''
+
+    def get_discipler_phone(self, obj):
+        return obj.discipler.phone or '' if obj.discipler_id else ''
+
+    def get_discipler_photo(self, obj):
+        if not obj.discipler_id:
+            return None
+        return services.cloudinary_url(obj.discipler.photo)
+
+    def get_discipler_is_sentinel(self, obj):
+        return bool(obj.discipler_id and obj.discipler.is_sentinel)
 
     def get_ministry_areas_display(self, obj):
         return MinistryAreaSerializer(obj.ministry_areas.all(), many=True).data
@@ -878,7 +952,28 @@ class MemberSerializer(serializers.ModelSerializer):
             attrs['church_entry_other'] = other
         else:
             attrs['church_entry_other'] = ''
+        self._validate_pastoral_care(attrs)
         return attrs
+
+    def _validate_pastoral_care(self, attrs):
+        """Valida a atribuição de responsável quando um membro é indicado.
+
+        O responsável é opcional: o visitante sem responsável assume o
+        sentinela da igreja (default em `Member.save()`). Quando um
+        responsável de verdade é informado, ele precisa ser elegível
+        (mesma igreja e membro ativo).
+        """
+        church = self.context.get('church')
+        if church is None:
+            request = self.context.get('request')
+            church = getattr(getattr(request, 'user', None), 'church', None)
+
+        new_discipler = attrs.get('discipler')
+        if new_discipler is not None:
+            Member.check_discipler_eligible(new_discipler, church)
+            self._discipler_reassigned = True
+        else:
+            self._discipler_reassigned = False
 
     def _sync_relatives(self, instance, relatives):
         """Sincroniza a lista de parentes: cria, atualiza (por id) e remove os ausentes."""
@@ -906,6 +1001,14 @@ class MemberSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         relatives = validated_data.pop('relatives', [])
+        # O default sentinela fica em `Member.save()`; aqui só carimbamos a
+        # atribuição quando veio um responsável de verdade.
+        if validated_data.get('discipler') is not None:
+            validated_data.setdefault('discipler_assigned_at', timezone.now())
+            request = self.context.get('request')
+            user = getattr(request, 'user', None)
+            if getattr(user, 'is_authenticated', False):
+                validated_data.setdefault('discipler_assigned_by', user)
         member = super().create(validated_data)
         with transaction.atomic():
             if relatives:
@@ -917,10 +1020,26 @@ class MemberSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         relatives = validated_data.pop('relatives', None)
+        if getattr(self, '_discipler_reassigned', False):
+            validated_data['discipler_assigned_at'] = timezone.now()
+            request = self.context.get('request')
+            user = getattr(request, 'user', None)
+            if getattr(user, 'is_authenticated', False):
+                validated_data['discipler_assigned_by'] = user
         member = super().update(instance, validated_data)
         if relatives is not None:
             self._sync_relatives(member, list(relatives))
         return member
+
+
+class DiscipleOptionSerializer(serializers.ModelSerializer):
+    """Opção enxuta para o seletor de responsável (visitantes)."""
+
+    photo = MemberPhotoField(read_only=True)
+
+    class Meta:
+        model = Member
+        fields = ['id', 'name', 'photo']
 
 
 class MessageTemplateSerializer(serializers.ModelSerializer):
@@ -1017,7 +1136,7 @@ class WorshipServiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'church', 'date', 'time', 'service_type', 'service_type_display',
             'presider', 'preacher', 'theme', 'scripture',
-            'attendees', 'visitors', 'conversions', 'offering',
+            'visitors', 'conversions', 'offering',
             'notes', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'church', 'created_at', 'updated_at']
@@ -1026,7 +1145,7 @@ class WorshipServiceSerializer(serializers.ModelSerializer):
         for field in ('presider', 'preacher', 'theme', 'scripture', 'notes'):
             if field in attrs and isinstance(attrs.get(field), str):
                 attrs[field] = (attrs.get(field) or '').strip()
-        for field in ('attendees', 'visitors', 'conversions'):
+        for field in ('visitors', 'conversions'):
             value = attrs.get(field)
             if value is not None and value < 0:
                 raise serializers.ValidationError(
@@ -1197,6 +1316,106 @@ class GrowthGroupPublicSerializer(serializers.ModelSerializer):
             f'https://www.google.com/maps/dir/?api=1'
             f'&destination={obj.latitude},{obj.longitude}'
         )
+
+
+class MemberInviteSerializer(serializers.ModelSerializer):
+    """Convite de visitante gerado pelo próprio membro.
+
+    `path` devolve o caminho relativo (`/convite/{token}`) para o frontend
+    montar a URL absoluta a partir da origem da página — assim o mesmo payload
+    serve para link copiado e para o QR Code.
+    """
+
+    inviter_name = serializers.CharField(source='inviter.name', read_only=True, default='')
+    status = serializers.CharField(read_only=True)
+    remaining_uses = serializers.IntegerField(read_only=True)
+    path = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MemberInvite
+        fields = [
+            'id', 'church', 'inviter', 'inviter_name', 'token', 'path', 'label',
+            'is_active', 'status', 'max_uses', 'remaining_uses', 'uses_count',
+            'expires_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'church', 'inviter', 'token', 'path', 'status',
+            'remaining_uses', 'uses_count', 'created_at', 'updated_at',
+        ]
+
+    def get_path(self, obj):
+        return f'/convite/{obj.token}'
+
+    def validate_max_uses(self, value):
+        if value is not None and value < 1:
+            raise serializers.ValidationError('O limite de usos deve ser pelo menos 1.')
+        return value
+
+    def validate_expires_at(self, value):
+        if value is not None and value <= timezone.now():
+            raise serializers.ValidationError('A data de validade precisa estar no futuro.')
+        return value
+
+
+class PublicInviteMetaSerializer(serializers.Serializer):
+    """Dados exibidos na página pública de convite antes do cadastro."""
+
+    church_name = serializers.CharField()
+    church_city = serializers.CharField(allow_blank=True, default='')
+    church_state = serializers.CharField(allow_blank=True, default='')
+    church_phone = serializers.CharField(allow_blank=True, default='')
+    inviter_name = serializers.CharField(allow_blank=True, default='')
+    inviter_photo = serializers.CharField(allow_null=True, required=False, default='')
+    status = serializers.CharField(read_only=True)
+
+
+class PublicInviteCreateSerializer(serializers.Serializer):
+    """Cadastro do visitante a partir de um convite público."""
+
+    name = serializers.CharField(max_length=150)
+    phone = serializers.CharField(max_length=32)
+    birth_date = serializers.DateField(required=False, allow_null=True, default=None)
+    notes = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate_name(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Informe o nome do visitante.')
+        return value
+
+    def validate_phone(self, value):
+        digits = re.sub(r'\D', '', value or '')
+        if len(digits) < 10 or len(digits) > 13:
+            raise serializers.ValidationError('Informe um telefone válido com DDD.')
+        return value.strip()
+
+    def validate_birth_date(self, value):
+        if value is not None and value > timezone.localdate():
+            raise serializers.ValidationError('A data de nascimento não pode estar no futuro.')
+        return value
+
+
+class GrowthGroupMembershipSerializer(serializers.ModelSerializer):
+    """Inscrição de um membro no GC, com nome do grupo para a listagem."""
+
+    member_name = serializers.CharField(source='member.name', read_only=True, default='')
+    group_name = serializers.CharField(source='group.name', read_only=True, default='')
+    status_display = serializers.CharField(
+        source='get_status_display', read_only=True,
+    )
+
+    class Meta:
+        model = GrowthGroupMembership
+        fields = [
+            'id', 'group', 'group_name', 'member', 'member_name',
+            'status', 'status_display', 'joined_at', 'left_at',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'group_name', 'member', 'member_name',
+            'status', 'status_display', 'joined_at', 'left_at',
+            'created_at', 'updated_at',
+        ]
 
 
 class ChurchMinutesSerializer(serializers.ModelSerializer):

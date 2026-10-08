@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -7,8 +8,13 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 import decimal
+from datetime import date, timedelta
+
+from django.utils import timezone
 
 from finance.models import CalendarEvent
+
+from . import services
 
 from .models import (
     AccountingCategory,
@@ -19,20 +25,22 @@ from .models import (
     ChurchPublicLink,
     EcclesiasticalCertificate,
     GrowthGroup,
+    GrowthGroupMembership,
     Loan,
     MaterialItem,
     Member,
     MemberContactLog,
     MemberDocument,
+    MemberInvite,
     MemberRelative,
     MemberSubmission,
     MessageTemplate,
     MinistryArea,
     StorageLocation,
     WorshipService,
-    PastoralVisit,
-    PrayerRequest,
-    SundaySchoolAttendance,
+      PastoralVisit,
+      PrayerRequest,
+      SundaySchoolAttendance,
     SundaySchoolClass,
     SundaySchoolEnrollment,
     SundaySchoolSession,
@@ -2106,6 +2114,34 @@ class MemberFilterTests(BaseChurchTestCase):
         self.assertEqual(self._names({'status': 'ETC'}), ['Ana Lima', 'Bruno Reis', 'Carla Dias'])
         self.assertEqual(self._names({'age_min': 'abc'}), ['Ana Lima', 'Bruno Reis', 'Carla Dias'])
 
+    def test_member_scope_excludes_visitors_and_integration(self):
+        Member.objects.create(
+            church=self.sede, name='Visitante Novo',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        Member.objects.create(
+            church=self.sede, name='Em Integracao',
+            lifecycle_stage=Member.LifecycleStage.INTEGRATION,
+        )
+        rol = self._names({'member_scope': '1'})
+        self.assertEqual(
+            sorted(rol), ['Ana Lima', 'Bruno Reis', 'Carla Dias'],
+        )
+        self.assertNotIn('Visitante Novo', rol)
+        self.assertNotIn('Em Integracao', rol)
+        # Sem o escopo (funil de visitantes), o visitante continua visível.
+        self.assertEqual(
+            sorted(self._names({})),
+            ['Ana Lima', 'Bruno Reis', 'Carla Dias', 'Em Integracao', 'Visitante Novo'],
+        )
+        # A busca explícita no rol também não encontra visitantes.
+        self.assertEqual(self._names({'member_scope': '1', 'search': 'Visitante'}), [])
+        # O filtro de estágio ativo ainda funciona dentro do escopo.
+        self.assertEqual(
+            self._names({'member_scope': '1', 'lifecycle_stage': 'ABSENT_CARE'}),
+            [],
+        )
+
     def test_without_paginate_returns_plain_list(self):
         client = self._client(self._pastor())
         resp = client.get(reverse('member-self-list'), {})
@@ -2208,7 +2244,7 @@ class MemberImportTests(BaseChurchTestCase):
         resp = self._import(csv, {'name': 'Nome', 'cpf': 'CPF', 'phone': 'Telefone'}, dry_run=False)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['imported'], 2)
-        members = Member.objects.filter(church=self.sede).order_by('card_number')
+        members = Member.objects.filter(church=self.sede, is_sentinel=False).order_by('card_number')
         self.assertEqual(list(members.values_list('name', flat=True)), ['Ana Lima', 'Bruno Reis'])
         self.assertEqual(members[0].card_number, '0001')
         self.assertEqual(members[1].card_number, '0002')
@@ -2223,7 +2259,7 @@ class MemberImportTests(BaseChurchTestCase):
         resp = self._import(csv, {'name': 'Nome', 'cpf': 'CPF'}, dry_run=False)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('CPF', resp.data['errors'][0])
-        self.assertEqual(Member.objects.filter(church=self.sede).count(), 1)
+        self.assertEqual(Member.objects.filter(church=self.sede, is_sentinel=False).count(), 1)
 
     def test_missing_name_reports_line_error(self):
         csv = self._csv(
@@ -3650,7 +3686,6 @@ class WorshipServiceTests(BaseChurchTestCase):
             'preacher': 'Pb. Maria',
             'theme': 'A palavra que transforma',
             'scripture': 'Romanos 12.2',
-            'attendees': 120,
             'visitors': 8,
             'conversions': 3,
             'offering': '125.50',
@@ -3677,11 +3712,11 @@ class WorshipServiceTests(BaseChurchTestCase):
 
         resp = self.client.patch(
             reverse('worship-detail', args=[sid]),
-            {'attendees': 140, 'offering': '180.00'},
+            {'visitors': 14, 'offering': '180.00'},
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data['attendees'], 140)
+        self.assertEqual(resp.data['visitors'], 14)
 
         resp = self.client.delete(reverse('worship-detail', args=[sid]))
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
@@ -3778,11 +3813,11 @@ class WorshipServiceTests(BaseChurchTestCase):
     def test_negative_counts_rejected(self):
         resp = self.client.post(
             reverse('worship-list'),
-            self._payload(attendees=-1),
+            self._payload(visitors=-1),
             format='json',
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('attendees', resp.data)
+        self.assertIn('visitors', resp.data)
 
     def test_negative_offering_rejected(self):
         resp = self.client.post(
@@ -5431,6 +5466,53 @@ class CommunicationWhatsAppTests(BaseChurchTestCase):
         resp = client.delete(reverse('message-template-detail', args=[pk]))
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
 
+    def test_template_create_with_ebd_category(self):
+        client = self._client(self.secretaria)
+        resp = client.post(
+            reverse('message-template-list'),
+            {
+                'title': 'Aviso de Aula (EBD)',
+                'category': 'EBD_CLASS_ANNOUNCEMENT',
+                'content': '{{PRIMEIRO_NOME}}, participe da aula deste domingo!',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data['category_display'], 'Aviso de Aula (EBD)')
+
+    def test_get_or_create_default_message_templates_seeds_ebd(self):
+        from accounts.services import get_or_create_default_message_templates
+
+        get_or_create_default_message_templates(self.sede)
+        by_cat = {
+            t.category: t
+            for t in MessageTemplate.objects.filter(church=self.sede)
+        }
+        for category in (
+            'EBD_CLASS_ANNOUNCEMENT',
+            'EBD_ABSENCE_RESCUE',
+            'EBD_BIRTHDAY',
+        ):
+            self.assertIn(category, by_cat)
+            self.assertTrue(by_cat[category].title)
+            self.assertIn('{{PRIMEIRO_NOME}}', by_cat[category].content)
+
+    def test_prepare_whatsapp_ebd_category(self):
+        member = self._member(name='Cláudia EBD')
+        template = self._template(
+            category='EBD_CLASS_ANNOUNCEMENT', title='Aviso de Aula (EBD)'
+        )
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id, 'category': 'EBD_CLASS_ANNOUNCEMENT'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('{{', resp.data['formatted_message'])
+        log = MemberContactLog.objects.get(member=member)
+        self.assertEqual(log.category, 'EBD_CLASS_ANNOUNCEMENT')
+        self.assertEqual(log.kind, MemberContactLog.Kind.WHATSAPP_AUTO)
+
     # --- prepare-whatsapp ---
     def test_prepare_whatsapp_with_template(self):
         member = self._member(name='Maria Silva')
@@ -5450,9 +5532,49 @@ class CommunicationWhatsAppTests(BaseChurchTestCase):
 
         log = MemberContactLog.objects.get(member=member)
         self.assertEqual(log.category, 'WELCOME')
+        self.assertEqual(log.kind, MemberContactLog.Kind.WHATSAPP_AUTO)
         self.assertEqual(log.contacted_by, self.secretaria)
         member.refresh_from_db()
         self.assertIsNotNone(member.last_contact_at)
+
+    def test_prepare_whatsapp_discipler_reminder_category(self):
+        member = self._member(name='João Discipulador')
+        template = self._template(category='DISCIPLER_REMINDER')
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id, 'category': 'DISCIPLER_REMINDER'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('{{', resp.data['formatted_message'])
+        log = MemberContactLog.objects.get(member=member)
+        self.assertEqual(log.category, 'DISCIPLER_REMINDER')
+        self.assertEqual(log.kind, MemberContactLog.Kind.WHATSAPP_AUTO)
+
+    def test_prepare_whatsapp_accepts_manual_kind(self):
+        member = self._member(name='Ana Manual')
+        template = self._template(category='CARE')
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id, 'kind': 'MANUAL'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        log = MemberContactLog.objects.get(member=member)
+        self.assertEqual(log.kind, MemberContactLog.Kind.MANUAL)
+        self.assertEqual(log.category, 'CARE')
+
+    def test_prepare_whatsapp_rejects_invalid_kind(self):
+        member = self._member(name='Bruno Invalido')
+        template = self._template(category='CARE')
+        resp = self._client(self.secretaria).post(
+            reverse('member-self-prepare-whatsapp', args=[member.id]),
+            {'template_id': template.id, 'kind': 'NAO_EXISTE'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('kind', resp.data)
+        self.assertFalse(MemberContactLog.objects.filter(member=member).exists())
 
     def test_prepare_whatsapp_with_custom_text(self):
         member = self._member(name='João Pedro', phone='83 99800-9999')
@@ -5532,6 +5654,13 @@ class CommunicationWhatsAppTests(BaseChurchTestCase):
     # --- stage (funil) ---
     def test_stage_update_valid(self):
         member = self._member()
+        # Visitor/Integração exigem responsável real definido.
+        member.discipler = Member.objects.create(
+            church=self.sede, name='Responsavel Definido',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        member.save(update_fields=['discipler'])
         for stage in ('VISITOR', 'INTEGRATION', 'ACTIVE', 'ABSENT_CARE', 'TRANSITION'):
             resp = self._client(self.secretaria).patch(
                 reverse('member-self-stage', args=[member.id]),
@@ -5539,6 +5668,17 @@ class CommunicationWhatsAppTests(BaseChurchTestCase):
             )
             self.assertEqual(resp.status_code, status.HTTP_200_OK, msg=stage)
             self.assertEqual(resp.data['lifecycle_stage'], stage)
+
+    def test_stage_to_visitor_without_discipler_allowed(self):
+        member = self._member()
+        resp = self._client(self.secretaria).patch(
+            reverse('member-self-stage', args=[member.id]),
+            {'lifecycle_stage': 'VISITOR'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['lifecycle_stage'], 'VISITOR')
+        member.refresh_from_db()
+        self.assertEqual(member.lifecycle_stage, 'VISITOR')
 
     def test_stage_update_invalid(self):
         member = self._member()
@@ -6910,3 +7050,1338 @@ class SundaySchoolTests(BaseChurchTestCase):
         attendance = resp.data['attendances'][0]
         self.assertIsNotNone(attendance['whatsapp_url'])
         self.assertIn('wa.me/55', attendance['whatsapp_url'])
+
+
+class VisitorPastoralCareTests(BaseChurchTestCase):
+    """Fase 1 - vinculo User<->Member, sentinela e escopo do responsavel."""
+
+    def setUp(self):
+        super().setUp()
+        self.sentinel = Member.get_church_sentinel(self.sede, create=True)
+        self.secretary = self._user(
+            'sec@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.disciple = Member.objects.create(
+            church=self.sede, name='Discipulado Responsavel',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+
+    def _member_user(self, email, member):
+        user = self._user(email, church=self.sede, role=ChurchMembership.Role.MEMBRO)
+        member.user = user
+        member.save(update_fields=['user'])
+        return user
+
+    # ---------------------------------------------------------------- sentinela
+
+    def test_sentinel_created_once_per_church(self):
+        again = Member.get_church_sentinel(self.sede, create=True)
+        self.assertEqual(again.pk, self.sentinel.pk)
+        self.assertEqual(
+            Member.objects.filter(church=self.sede, is_sentinel=True).count(), 1,
+        )
+        self.assertEqual(
+            Member.get_church_sentinel(self.congregation, create=True).church_id,
+            self.congregation.pk,
+        )
+
+    def test_new_member_without_discipler_lands_on_sentinel(self):
+        member = Member.objects.create(church=self.sede, name='Sem Responsavel')
+        member.refresh_from_db()
+        self.assertEqual(member.discipler_id, self.sentinel.pk)
+
+    def test_sentinel_is_hidden_from_directory(self):
+        client = self._client(self.secretary)
+        resp = client.get(reverse('member-self-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn(
+            self.sentinel.pk, [m['id'] for m in resp.data],
+        )
+
+    def test_unassigned_filter_returns_sentinel_rows(self):
+        unassigned = Member.objects.create(church=self.sede, name='Visitante Solto')
+        assigned = Member.objects.create(
+            church=self.sede, name='Visitante Com Responsavel',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        client = self._client(self.secretary)
+        resp = client.get(reverse('member-self-list'), {'unassigned': '1'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        names = [m['name'] for m in resp.data]
+        self.assertIn(unassigned.name, names)
+        self.assertNotIn(assigned.name, names)
+
+    def test_sentinel_does_not_consume_card_number(self):
+        self.assertIsNone(self.sentinel.card_number)
+
+    # ------------------------------------------------------------- atribuicao
+
+    def test_create_visitor_without_discipler_lands_on_sentinel(self):
+        client = self._client(self.secretary)
+        resp = client.post(
+            reverse('member-self-list'),
+            {
+                'name': 'Visitante Novo',
+                'lifecycle_stage': Member.LifecycleStage.VISITOR,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['discipler'], self.sentinel.pk)
+        self.assertTrue(resp.data['discipler_is_sentinel'])
+        self.assertIsNone(resp.data['discipler_assigned_at'])
+
+    def test_create_visitor_with_active_discipler_is_accepted(self):
+        client = self._client(self.secretary)
+        resp = client.post(
+            reverse('member-self-list'),
+            {
+                'name': 'Visitante Novo',
+                'lifecycle_stage': Member.LifecycleStage.VISITOR,
+                'discipler': self.disciple.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['discipler'], self.disciple.pk)
+        self.assertEqual(resp.data['discipler_name'], self.disciple.name)
+        self.assertFalse(resp.data['discipler_is_sentinel'])
+        self.assertIsNotNone(resp.data['discipler_assigned_at'])
+
+    def test_sentinel_is_accepted_as_chosen_discipler(self):
+        client = self._client(self.secretary)
+        resp = client.post(
+            reverse('member-self-list'),
+            {
+                'name': 'Visitante Novo',
+                'lifecycle_stage': Member.LifecycleStage.VISITOR,
+                'discipler': self.sentinel.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['discipler'], self.sentinel.pk)
+        self.assertTrue(resp.data['discipler_is_sentinel'])
+
+    def test_discipler_from_another_church_is_rejected(self):
+        other = Member.objects.create(
+            church=self.congregation, name='De Outra Igreja',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        client = self._client(self.secretary)
+        resp = client.post(
+            reverse('member-self-list'),
+            {
+                'name': 'Visitante Novo',
+                'lifecycle_stage': Member.LifecycleStage.VISITOR,
+                'discipler': other.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_inactive_discipler_is_rejected(self):
+        self.disciple.status = Member.Status.INACTIVE
+        self.disciple.save(update_fields=['status'])
+        client = self._client(self.secretary)
+        resp = client.post(
+            reverse('member-self-list'),
+            {
+                'name': 'Visitante Novo',
+                'lifecycle_stage': Member.LifecycleStage.VISITOR,
+                'discipler': self.disciple.pk,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    def test_non_visitor_stage_does_not_require_discipler(self):
+        client = self._client(self.secretary)
+        resp = client.post(
+            reverse('member-self-list'),
+            {
+                'name': 'Membro Consolidado',
+                'lifecycle_stage': Member.LifecycleStage.ACTIVE,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_patching_unrelated_field_on_legacy_sentinel_visitor(self):
+        legacy = Member.objects.create(
+            church=self.sede, name='Visitante Legado',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        self.assertEqual(legacy.discipler_id, self.sentinel.pk)
+        client = self._client(self.secretary)
+        resp = client.patch(
+            reverse('member-self-detail', args=[legacy.pk]),
+            {'notes': 'ajuste de rotina'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['discipler'], self.sentinel.pk)
+
+    def test_stage_change_to_visitor_without_discipler_allowed(self):
+        client = self._client(self.secretary)
+        resp = client.patch(
+            reverse('member-self-stage', args=[self.disciple.pk]),
+            {'lifecycle_stage': Member.LifecycleStage.VISITOR},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            resp.data['lifecycle_stage'], Member.LifecycleStage.VISITOR,
+        )
+
+    # ------------------------------------------------------------------ delete
+
+    def test_deleting_discipler_repoints_visitors_to_sentinel(self):
+        visitor = Member.objects.create(
+            church=self.sede, name='Visitante linked',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        self.disciple.delete()
+        visitor.refresh_from_db()
+        self.assertEqual(visitor.discipler_id, self.sentinel.pk)
+
+    def test_sentinel_cannot_be_deleted(self):
+        with self.assertRaises(ValidationError):
+            self.sentinel.delete()
+
+    # ------------------------------------------------------------------- escopo
+
+    def test_disciplers_endpoint_lists_only_eligible(self):
+        Member.objects.create(church=self.sede, name='Visitor Etapa')
+        inactive = Member.objects.create(church=self.sede, name='Fora De Pre')
+        inactive.status = Member.Status.INACTIVE
+        inactive.save(update_fields=['status'])
+        client = self._client(self.secretary)
+        resp = client.get(reverse('member-self-disciplers'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ids = [d['id'] for d in resp.data]
+        self.assertIn(self.disciple.pk, ids)
+        self.assertNotIn(inactive.pk, ids)
+        self.assertNotIn(self.sentinel.pk, ids)
+
+    def test_member_role_sees_only_own_visitors(self):
+        mine = Member.objects.create(
+            church=self.sede, name='Meu Visitante',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        Member.objects.create(
+            church=self.sede, name='Visitante de Outro',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        user = self._member_user('membro@teste.com', self.disciple)
+        client = self._client(user)
+        resp = client.get(reverse('member-self-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ids = [m['id'] for m in resp.data]
+        self.assertEqual(ids, [mine.pk])
+
+    def test_member_role_cannot_read_another_visitor_by_id(self):
+        Member.objects.create(
+            church=self.sede, name='Visitante de Outro',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        intruder = Member.objects.create(church=self.sede, name='Intruso')
+        user = self._member_user('membro2@teste.com', self.disciple)
+        client = self._client(user)
+        resp = client.get(reverse('member-self-detail', args=[intruder.pk]))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_member_can_edit_own_visitor_notes(self):
+        visitor = Member.objects.create(
+            church=self.sede, name='Meu Visitante',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        user = self._member_user('membro3@teste.com', self.disciple)
+        client = self._client(user)
+        resp = client.patch(
+            reverse('member-self-detail', args=[visitor.pk]),
+            {'notes': 'anotacao do discipulador'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['notes'], 'anotacao do discipulador')
+        self.assertEqual(resp.data['discipler'], self.disciple.pk)
+
+    def test_member_cannot_edit_other_visitor(self):
+        other_discipler = Member.objects.create(
+            church=self.sede, name='Outro Responsavel',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        other = Member.objects.create(
+            church=self.sede, name='Visitante Alheio',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=other_discipler,
+        )
+        user = self._member_user('membro4@teste.com', self.disciple)
+        client = self._client(user)
+        resp = client.patch(
+            reverse('member-self-detail', args=[other.pk]),
+            {'notes': 'nao deveria'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_member_without_profile_sees_nothing(self):
+        user = self._user('semperfil@teste.com', church=self.sede,
+                          role=ChurchMembership.Role.MEMBRO)
+        client = self._client(user)
+        resp = client.get(reverse('member-self-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data), 0)
+    # ------------------------------------------------------------ discipler=me
+
+    def test_discipler_me_filter_resolves_session_member(self):
+        mine = Member.objects.create(
+            church=self.sede, name='Meu Visitante',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        other = Member.objects.create(
+            church=self.sede, name='Outro Responsavel',
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        user = self._member_user('membro@teste.com', self.disciple)
+        resp = self._client(user).get(reverse('member-self-list'), {'discipler': 'me'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([m['id'] for m in resp.data], [mine.pk])
+        self.assertNotIn(other.pk, [m['id'] for m in resp.data])
+
+    def test_discipler_me_returns_nothing_without_linked_member(self):
+        self._user('semvinculo@teste.com', church=self.sede, role=ChurchMembership.Role.MEMBRO)
+        resp = self._client(self._user('outro@teste.com', church=self.sede, role=ChurchMembership.Role.MEMBRO)).get(
+            reverse('member-self-list'), {'discipler': 'me'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(list(resp.data), [])
+
+    def test_discipler_filter_selects_single_responsible(self):
+        mine = Member.objects.create(
+            church=self.sede, name='Meu Visitante',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        Member.objects.create(
+            church=self.sede, name='Outro Responsavel',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.sentinel,
+        )
+        resp = self._client(self.secretary).get(
+            reverse('member-self-list'), {'discipler': str(self.disciple.pk)},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([m['id'] for m in resp.data], [mine.pk])
+
+    def test_invalid_discipler_is_ignored_not_an_error(self):
+        Member.objects.create(church=self.sede, name='Visitante Comum')
+        resp = self._client(self.secretary).get(
+            reverse('member-self-list'), {'discipler': 'nao-e-numero'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(
+            {m['name'] for m in resp.data},
+            {'Visitante Comum', 'Discipulado Responsavel'},
+        )
+# ---------------------------------------------------------------------------
+# Fase 2 - SLA de visitante e escopo dos alertas
+# ---------------------------------------------------------------------------
+
+
+class VisitorSlaAlertTests(BaseChurchTestCase):
+    """SLA: <=48h verde, 2-5 dias amarelo, >=6 dias vermelho."""
+
+    def setUp(self):
+        super().setUp()
+        self.sentinel = Member.get_church_sentinel(self.sede, create=True)
+        self.secretary = self._user(
+            'sec@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.disciple = Member.objects.create(
+            church=self.sede, name='Responsavel',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+
+    def _visitor(self, name, days_waiting, stage=Member.LifecycleStage.VISITOR):
+        visitor = Member.objects.create(
+            church=self.sede, name=name,
+            lifecycle_stage=stage,
+            discipler=self.disciple,
+        )
+        entered = timezone.now() - timedelta(days=days_waiting)
+        Member.objects.filter(pk=visitor.pk).update(stage_entered_at=entered)
+        visitor.refresh_from_db()
+        return visitor
+
+    def _alerts(self, **kwargs):
+        return services.compute_church_alerts(
+            self.sede, today=date.today(), visitor_scope=True, **kwargs,
+        )
+
+    def _types(self, alerts):
+        return [a['type'] for a in alerts]
+
+    # ------------------------------------------------------------------ cortes
+
+    def test_sla_thresholds(self):
+        self.assertEqual(services.visitor_sla_state(0), 'green')
+        self.assertEqual(services.visitor_sla_state(1), 'green')
+        self.assertEqual(services.visitor_sla_state(2), 'yellow')
+        self.assertEqual(services.visitor_sla_state(5), 'yellow')
+        self.assertEqual(services.visitor_sla_state(6), 'red')
+        self.assertEqual(services.visitor_sla_state(30), 'red')
+
+    def test_sla_ignores_none_and_negative(self):
+        self.assertIsNone(services.visitor_sla_state(None))
+        self.assertIsNone(services.visitor_sla_state(-1))
+
+    def test_only_red_produces_alert(self):
+        v_verde = self._visitor('Verde', 1)
+        v_amarelo = self._visitor('Amarelo', 3)
+        critico = self._visitor('Critico', 7)
+        alerts = self._alerts()
+        criticos_eles = []
+        for a in alerts:
+            if a['type'] == 'visitor_sla_critical' and a['member_id'] in (v_verde.pk, v_amarelo.pk):
+                criticos_eles.append(a)
+        self.assertEqual(criticos_eles, [])
+        red = [a for a in alerts if a['type'] == 'visitor_sla_critical']
+        self.assertTrue(any(a['member_id'] == critico.pk for a in red))
+
+    def test_unassigned_always_alerts_even_when_new(self):
+        novo = Member.objects.create(
+            church=self.sede, name='Sem Responsavel Novo',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        alerts = self._alerts()
+        unassigned = [a for a in alerts if a['type'] == 'visitor_unassigned']
+        self.assertEqual([a['member_id'] for a in unassigned], [novo.pk])
+        entry = unassigned[0]
+        self.assertIsNone(entry['discipler_id'])
+        self.assertEqual(entry['member_name'], 'Sem Responsavel Novo')
+
+    def test_alert_carries_discipler_for_scoping(self):
+        critico = self._visitor('Critico', 8)
+        alert = [a for a in self._alerts() if a['type'] == 'visitor_sla_critical'][0]
+        self.assertEqual(alert['discipler_id'], self.disciple.pk)
+        self.assertEqual(alert['discipler_name'], self.disciple.name)
+        self.assertEqual(alert['discipler_phone'], self.disciple.phone or '')
+        self.assertEqual(alert['member_id'], critico.pk)
+        self.assertEqual(alert['waiting_days'], 8)
+
+    def test_unassigned_alert_has_empty_discipler_info(self):
+        Member.objects.create(
+            church=self.sede, name='Sem Telefone Vista',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        alert = [
+            a for a in self._alerts()
+            if a['type'] == 'visitor_unassigned' and a['member_name'] == 'Sem Telefone Vista'
+        ][0]
+        self.assertIsNone(alert['discipler_id'])
+        self.assertEqual(alert['discipler_name'], '')
+        self.assertEqual(alert['discipler_phone'], '')
+
+    def test_integration_stage_is_also_covered(self):
+        Member.objects.create(
+            church=self.sede, name='Integracao Critica',
+            lifecycle_stage=Member.LifecycleStage.INTEGRATION,
+            discipler=self.disciple,
+        )
+        Member.objects.filter(name='Integracao Critica').update(
+            stage_entered_at=timezone.now() - timedelta(days=9),
+        )
+        names = [a['member_name'] for a in self._alerts()
+                 if a['type'] == 'visitor_sla_critical']
+        self.assertIn('Integracao Critica', names)
+
+    def test_member_stages_are_not_visitors(self):
+        Member.objects.create(
+            church=self.sede, name='Membro Ativo',
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+            discipler=self.disciple,
+        )
+        Member.objects.filter(name='Membro Ativo').update(
+            stage_entered_at=timezone.now() - timedelta(days=40),
+        )
+        self.assertEqual(
+            [a for a in self._alerts() if a['type'].startswith('visitor_')], [],
+        )
+
+    def test_inactive_visitor_is_ignored(self):
+        visitor = self._visitor('Inativo', 10)
+        Member.objects.filter(pk=visitor.pk).update(status=Member.Status.INACTIVE)
+        self.assertEqual(
+            [a for a in self._alerts() if a['type'].startswith('visitor_')], [],
+        )
+
+    def test_sentinel_never_produces_visitor_alert(self):
+        self._visitor('Critico', 10)
+        names = [a['member_name'] for a in self._alerts()
+                 if a['type'].startswith('visitor_')]
+        self.assertNotIn(Member.SENTINEL_NAME, names)
+
+    def test_falls_back_to_created_at_when_stage_entered_is_null(self):
+        d = Member.objects.create(
+            church=self.sede, name='Disc Teste',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        visitor = Member.objects.create(
+            church=self.sede, name='Legado',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=d,
+        )
+        Member.objects.filter(pk=visitor.pk).update(stage_entered_at=None)
+        # created_at recente → não é crítico
+        alert = [
+            a for a in self._alerts()
+            if a['type'] == 'visitor_sla_critical' and a['member_id'] == visitor.pk
+        ]
+        self.assertEqual(len(alert), 0)
+
+    def test_visitor_scope_off_keeps_alerts_unchanged(self):
+        self._visitor('Critico', 10)
+        sem = services.compute_church_alerts(self.sede, today=date.today())
+        self.assertEqual([a for a in sem if a['type'].startswith('visitor_')], [])
+
+    # -------------------------------------------------------------- relogio
+
+    def test_stage_entered_at_set_on_creation(self):
+        visitor = Member.objects.create(
+            church=self.sede, name='Novo',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=self.disciple,
+        )
+        self.assertIsNotNone(visitor.stage_entered_at)
+
+    def test_stage_entered_at_resets_on_stage_change(self):
+        visitor = self._visitor('Reiniciado', 10)
+        original = visitor.stage_entered_at
+        visitor.lifecycle_stage = Member.LifecycleStage.INTEGRATION
+        visitor.save()
+        visitor.refresh_from_db()
+        self.assertGreater(visitor.stage_entered_at, original)
+
+    def test_editing_other_fields_does_not_reset_clock(self):
+        visitor = self._visitor('Estavel', 10)
+        original = visitor.stage_entered_at
+        visitor.phone = '(83) 99999-0000'
+        visitor.save(update_fields=['phone', 'updated_at'])
+        visitor.refresh_from_db()
+        self.assertEqual(visitor.stage_entered_at, original)
+
+    # ------------------------------------------------------- escopo na view
+
+    def test_alerts_endpoint_secretary_sees_all_visitors(self):
+        meu = self._visitor('Meu', 10)
+        Member.objects.create(
+            church=self.sede, name='De Outro',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=Member.objects.create(
+                church=self.sede, name='Outro Responsavel',
+                lifecycle_stage=Member.LifecycleStage.ACTIVE,
+            ),
+        )
+        Member.objects.filter(name='De Outro').update(
+            stage_entered_at=timezone.now() - timedelta(days=12),
+        )
+        resp = self._client(self.secretary).get(reverse('alerts'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        names = [a['member_name'] for a in resp.data['alerts']
+                 if a['type'] == 'visitor_sla_critical']
+        self.assertIn(meu.name, names)
+        self.assertIn('De Outro', names)
+
+    def test_alerts_endpoint_member_sees_only_own_visitors(self):
+        meu = self._visitor('Meu Visitante', 10)
+        outro = Member.objects.create(
+            church=self.sede, name='Visitante Alheio',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=Member.objects.create(
+                church=self.sede, name='Outro Responsavel',
+                lifecycle_stage=Member.LifecycleStage.ACTIVE,
+            ),
+        )
+        Member.objects.filter(pk=outro.pk).update(
+            stage_entered_at=timezone.now() - timedelta(days=12),
+        )
+        user = self._user('membro@teste.com', church=self.sede, role=ChurchMembership.Role.MEMBRO)
+        self.disciple.user = user
+        self.disciple.save(update_fields=['user'])
+        resp = self._client(user).get(reverse('alerts'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        visitor_alerts = [a for a in resp.data['alerts'] if a['type'].startswith('visitor_')]
+        self.assertTrue(visitor_alerts)
+        self.assertEqual([a['member_id'] for a in visitor_alerts], [meu.pk])
+        self.assertNotIn(outro.pk, [a['member_id'] for a in visitor_alerts])
+
+    def test_alerts_endpoint_member_without_link_keeps_birthdays(self):
+        member = Member.objects.create(
+            church=self.sede, name='Carla Nacim',
+            birth_date=date.today(),
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+            discipler=self.sentinel,
+        )
+        user = self._user('sem@teste.com', church=self.sede, role=ChurchMembership.Role.MEMBRO)
+        resp = self._client(user).get(reverse('alerts'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        types = [a['type'] for a in resp.data['alerts']]
+        self.assertIn('birthday_today', types)
+
+    def test_alerts_without_church_returns_empty(self):
+        sem = self._user('sem-igreja@teste.com')
+        resp = self._client(sem).get(reverse('alerts'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['alerts'], [])
+
+
+# --------------------------------------------------------------- Fase 3
+
+
+class MemberInviteTests(BaseChurchTestCase):
+    """Convite público: token dedicado, validade, limite de usos e cadastro."""
+
+    def setUp(self):
+        super().setUp()
+        # O throttle do convite é guardado em cache; zerar evita vazamento
+        # entre os testes desta classe.
+        cache.clear()
+        self.inviter_member = Member.objects.create(
+            church=self.sede, name='Joao Convidante',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        self.inviter = self._member_user('convite@teste.com', self.inviter_member)
+        self.other_member = Member.objects.create(
+            church=self.sede, name='Outro Membro',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        self.other = self._member_user('outro-convite@teste.com', self.other_member)
+        self.secretaria = self._user(
+            'secretaria-convite@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+
+    def _member_user(self, email, member):
+        user = self._user(email, church=self.sede, role=ChurchMembership.Role.MEMBRO)
+        member.user = user
+        member.save(update_fields=['user'])
+        return user
+
+    def _invite(self, **kwargs):
+        defaults = dict(church=self.sede, inviter=self.inviter_member)
+        defaults.update(kwargs)
+        return MemberInvite.objects.create(**defaults)
+
+    def _public(self):
+        return APIClient()
+
+    # ------------------------------------------------------------ CRUD
+
+    def test_create_invite_generates_token_and_path(self):
+        resp = self._client(self.inviter).post(
+            reverse('member-invite-list'),
+            {'label': 'Convite da campanha'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertTrue(resp.data['token'])
+        self.assertEqual(resp.data['path'], '/convite/' + resp.data['token'])
+        self.assertEqual(resp.data['status'], 'ACTIVE')
+        self.assertIsNone(resp.data['remaining_uses'])
+        self.assertEqual(resp.data['inviter'], self.inviter_member.pk)
+
+    def test_invite_list_is_scoped_to_owner(self):
+        mine = self._invite()
+        theirs = MemberInvite.objects.create(
+            church=self.sede, inviter=self.other_member,
+        )
+        resp = self._client(self.inviter).get(reverse('member-invite-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual([i['id'] for i in resp.data], [mine.pk])
+        self.assertNotIn(theirs.pk, [i['id'] for i in resp.data])
+
+    def test_secretary_can_list_everyone_with_all_flag(self):
+        mine = self._invite()
+        theirs = MemberInvite.objects.create(
+            church=self.sede, inviter=self.other_member,
+        )
+        plain = self._client(self.secretaria).get(reverse('member-invite-list'))
+        self.assertEqual(list(plain.data), [])
+
+        with_all = self._client(self.secretaria).get(
+            reverse('member-invite-list'), {'all': '1'},
+        )
+        self.assertEqual(with_all.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            sorted(i['id'] for i in with_all.data),
+            sorted([mine.pk, theirs.pk]),
+        )
+
+    def test_member_without_profile_cannot_create_invite(self):
+        resp = self._client(self.secretaria).post(
+            reverse('member-invite-list'), {'label': 'X'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_regenerate_invalidates_previous_token(self):
+        invite = self._invite()
+        old = invite.token
+        resp = self._client(self.inviter).post(
+            reverse('member-invite-regenerate', args=[invite.pk]), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertNotEqual(resp.data['token'], old)
+
+        public = self._public()
+        self.assertEqual(
+            public.get(reverse('public-invite', args=[old])).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+        self.assertEqual(
+            public.get(
+                reverse('public-invite', args=[resp.data['token']])
+            ).status_code,
+            status.HTTP_200_OK,
+        )
+
+    def test_toggle_disables_signup_without_hiding_meta(self):
+        invite = self._invite()
+        resp = self._client(self.inviter).post(
+            reverse('member-invite-toggle', args=[invite.pk]), format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertFalse(resp.data['is_active'])
+        self.assertEqual(resp.data['status'], 'DISABLED')
+
+        public = self._public()
+        url = reverse('public-invite', args=[invite.token])
+        self.assertEqual(public.get(url).status_code, status.HTTP_200_OK)
+        post = public.post(
+            url, {'name': 'Ana', 'phone': '83999990001'}, format='json',
+        )
+        self.assertEqual(post.status_code, status.HTTP_400_BAD_REQUEST)
+
+    # ------------------------------------------------------- regras de uso
+
+    def test_max_uses_blocks_second_signup(self):
+        invite = self._invite(max_uses=1)
+        public = self._public()
+        url = reverse('public-invite', args=[invite.token])
+
+        first = public.post(
+            url, {'name': 'Ana', 'phone': '83999990001'}, format='json',
+        )
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+
+        invite.refresh_from_db()
+        self.assertEqual(invite.uses_count, 1)
+        self.assertEqual(invite.status, 'EXHAUSTED')
+        self.assertEqual(invite.remaining_uses, 0)
+
+        second = public.post(
+            url, {'name': 'Bruno', 'phone': '83999990002'}, format='json',
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            Member.objects.filter(church=self.sede, name='Bruno').count(), 0,
+        )
+
+    def test_expired_invite_is_rejected(self):
+        invite = self._invite(expires_at=timezone.now() - timedelta(hours=1))
+        invite.refresh_from_db()
+        self.assertEqual(invite.status, 'EXPIRED')
+
+        public = self._public()
+        url = reverse('public-invite', args=[invite.token])
+        self.assertEqual(public.get(url).status_code, status.HTTP_200_OK)
+        post = public.post(
+            url, {'name': 'Ana', 'phone': '83999990001'}, format='json',
+        )
+        self.assertEqual(post.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_unknown_token_returns_404(self):
+        public = self._public()
+        url = reverse('public-invite', args=['token-que-nao-existe'])
+        self.assertEqual(public.get(url).status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(
+            public.post(url, {'name': 'Ana', 'phone': '83999990001'},
+                        format='json').status_code,
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    def test_signup_rejects_invalid_phone(self):
+        invite = self._invite()
+        public = self._public()
+        resp = public.post(
+            reverse('public-invite', args=[invite.token]),
+            {'name': 'Ana', 'phone': '123'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('phone', resp.data)
+
+    def test_signup_rejects_future_birth_date(self):
+        invite = self._invite()
+        public = self._public()
+        resp = public.post(
+            reverse('public-invite', args=[invite.token]),
+            {'name': 'Ana', 'phone': '83999990001', 'birth_date': '2099-01-01'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('birth_date', resp.data)
+
+    # -------------------------------------------------------- cadastro
+
+    def test_public_signup_creates_visitor_owned_by_inviter(self):
+        invite = self._invite()
+        public = self._public()
+        url = reverse('public-invite', args=[invite.token])
+
+        meta = public.get(url)
+        self.assertEqual(meta.status_code, status.HTTP_200_OK, meta.data)
+        self.assertEqual(meta.data['inviter_name'], 'Joao Convidante')
+        self.assertEqual(meta.data['church_name'], 'Igreja Teste')
+        self.assertEqual(meta.data['status'], 'ACTIVE')
+
+        resp = public.post(
+            url,
+            {
+                'name': 'Maria Visitante',
+                'phone': '(83) 99999-0001',
+                'birth_date': '1998-04-12',
+                'notes': 'Veio pelo convite do João.',
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        member = Member.objects.get(pk=resp.data['member_id'])
+        self.assertEqual(member.church, self.sede)
+        self.assertEqual(member.discipler, self.inviter_member)
+        self.assertEqual(member.lifecycle_stage, Member.LifecycleStage.VISITOR)
+        self.assertEqual(member.status, Member.Status.ACTIVE)
+        self.assertEqual(member.source_hash, invite.token)
+        self.assertEqual(member.phone, '(83) 99999-0001')
+        self.assertEqual(member.birth_date, date(1998, 4, 12))
+        self.assertIsNotNone(member.stage_entered_at)
+        self.assertFalse(member.is_sentinel)
+
+        invite.refresh_from_db()
+        self.assertEqual(invite.uses_count, 1)
+        self.assertEqual(invite.status, 'ACTIVE')
+
+    def test_public_signup_is_throttled_per_ip(self):
+        invite = self._invite()
+        public = self._public()
+        url = reverse('public-invite', args=[invite.token])
+        payload = {'name': 'Spam', 'phone': '83999990001'}
+
+        codes = [
+            public.post(url, payload, format='json').status_code
+            for _ in range(11)
+        ]
+        self.assertEqual(codes.count(status.HTTP_201_CREATED), 10, codes)
+        self.assertEqual(codes[-1], status.HTTP_429_TOO_MANY_REQUESTS, codes)
+
+
+class GrowthGroupMembershipTests(BaseChurchTestCase):
+    """Inscrição interna (membro logado) nos Grupos de Crescimento."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.leader = Member.objects.create(
+            church=self.sede, name='Lider de GC', status=Member.Status.ACTIVE,
+        )
+        self.group = GrowthGroup.objects.create(
+            church=self.sede, name='GC Esperanca',
+            leader=self.leader, weekday=GrowthGroup.DEFAULT_WEEKDAY,
+            time='19:30:00',
+        )
+        self.member = Member.objects.create(
+            church=self.sede, name='Inscrito Teste',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        self.user = self._member_user('inscrito@teste.com', self.member)
+        self.plain_user = self._user(
+            'sem-vinculo@teste.com', church=self.sede,
+            role=ChurchMembership.Role.MEMBRO,
+        )
+
+    def _member_user(self, email, member):
+        user = self._user(email, church=self.sede, role=ChurchMembership.Role.MEMBRO)
+        member.user = user
+        member.save(update_fields=['user'])
+        return user
+
+    def _join(self, user=None, group=None):
+        target = group or self.group
+        return self._client(user or self.user).post(
+            reverse('growth-group-join', args=[target.pk]), {}, format='json',
+        )
+
+    def test_member_can_join_group(self):
+        resp = self._join()
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['status'], GrowthGroupMembership.Status.ACTIVE)
+        self.assertEqual(resp.data['member'], self.member.pk)
+        self.assertEqual(resp.data['group'], self.group.pk)
+        self.assertEqual(
+            GrowthGroupMembership.objects.filter(
+                group=self.group, member=self.member,
+            ).count(),
+            1,
+        )
+
+    def test_joining_twice_keeps_single_row(self):
+        first = self._join()
+        second = self._join()
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED, first.data)
+        self.assertEqual(second.status_code, status.HTTP_200_OK, second.data)
+        self.assertEqual(
+            GrowthGroupMembership.objects.filter(member=self.member).count(), 1,
+        )
+
+    def test_leave_then_rejoin_reuses_the_same_row(self):
+        joined = self._join()
+        membership_pk = joined.data['id']
+
+        left = self._client(self.user).post(
+            reverse('growth-group-leave', args=[self.group.pk]), {}, format='json',
+        )
+        self.assertEqual(left.status_code, status.HTTP_200_OK, left.data)
+        self.assertEqual(left.data['status'], GrowthGroupMembership.Status.LEFT)
+        self.assertIsNotNone(left.data['left_at'])
+
+        rejoined = self._join()
+        self.assertEqual(rejoined.status_code, status.HTTP_201_CREATED, rejoined.data)
+        self.assertEqual(rejoined.data['id'], membership_pk)
+        self.assertEqual(rejoined.data['status'], GrowthGroupMembership.Status.ACTIVE)
+        self.assertIsNone(rejoined.data['left_at'])
+
+    def test_cannot_join_a_full_group(self):
+        self.group.is_full = True
+        self.group.save(update_fields=['is_full'])
+        resp = self._join()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            GrowthGroupMembership.objects.filter(member=self.member).exists(),
+        )
+
+    def test_cannot_join_an_inactive_group(self):
+        self.group.is_active = False
+        self.group.save(update_fields=['is_active'])
+        resp = self._join()
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_join_requires_a_linked_member(self):
+        resp = self._join(user=self.plain_user)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(GrowthGroupMembership.objects.exists())
+
+    def test_cannot_join_group_of_another_church(self):
+        other_church = Church.objects.create(
+            name='Outra Igreja', church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE', is_approved=True,
+        )
+        other_leader = Member.objects.create(church=other_church, name='Lider Fora')
+        foreign = GrowthGroup.objects.create(
+            church=other_church, name='GC Fora', leader=other_leader,
+            weekday=GrowthGroup.DEFAULT_WEEKDAY, time='20:00:00',
+        )
+        resp = self._join(group=foreign)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_leave_without_subscription_returns_404(self):
+        resp = self._client(self.user).post(
+            reverse('growth-group-leave', args=[self.group.pk]), {}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_mine_lists_only_own_memberships(self):
+        self._join()
+        other_member = Member.objects.create(
+            church=self.sede, name='Outro Inscrito',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        self._member_user('outro-inscrito@teste.com', other_member)
+        GrowthGroupMembership.objects.create(
+            group=self.group, member=other_member,
+        )
+
+        resp = self._client(self.user).get(reverse('growth-group-mine'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([m['member'] for m in resp.data], [self.member.pk])
+
+    def test_member_without_profile_gets_empty_mine(self):
+        resp = self._client(self.plain_user).get(reverse('growth-group-mine'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(resp.data), [])
+
+    def test_ordinary_member_cannot_manage_groups(self):
+        resp = self._client(self.user).post(
+            reverse('growth-group-list'),
+            {'name': 'Novo GC', 'leader': self.leader.pk, 'weekday': 1,
+             'time': '19:30'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_member_can_still_read_group_list(self):
+        resp = self._client(self.user).get(reverse('growth-group-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIn('GC Esperanca', [g['name'] for g in resp.data])
+
+
+class MemberUserLinkTests(BaseChurchTestCase):
+    """Conta de acesso (Member.user) e o recorte de alertas do MEMBRO.
+
+    O vínculo é a ponte `User -> member_profile -> Member` que permite ao MEMBRO
+    enxergar os visitantes sob sua responsabilidade e receber o alerta de SLA.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.secretary = self._user(
+            'sec-vinculo@teste.com', church=self.sede,
+            role=ChurchMembership.Role.SECRETARIA,
+        )
+        self.other_church = Church.objects.create(
+            name='Igreja Outra', church_type=Church.ChurchType.INDEPENDENT,
+            status='ACTIVE', is_approved=True, city='Recife', state='PE',
+        )
+        self.responsible = Member.objects.create(
+            church=self.sede, name='Responsavel Vinculo',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        self.profile = Member.objects.create(
+            church=self.sede, name='Membro Demo',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+
+    def _api(self, user=None):
+        return self._client(user or self.secretary)
+
+    def _patch(self, member, payload, user=None):
+        return self._api(user).patch(
+            reverse('member-self-detail', args=[member.pk]),
+            payload, format='json',
+        )
+
+    def _membro(self, email='membro@teste.com'):
+        return self._user(
+            email, church=self.sede, role=ChurchMembership.Role.MEMBRO,
+        )
+
+    def _backdate(self, member, days):
+        Member.objects.filter(pk=member.pk).update(
+            stage_entered_at=timezone.now() - timedelta(days=days),
+        )
+        member.refresh_from_db()
+        return member
+
+    def _visitor(self, name, discipler, days):
+        visitor = Member.objects.create(
+            church=self.sede, name=name,
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            discipler=discipler,
+        )
+        return self._backdate(visitor, days)
+
+    def _visitor_alerts(self, user):
+        resp = self._client(user).get(reverse('alerts'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return [a for a in resp.data['alerts'] if a['type'].startswith('visitor_')]
+
+    # ------------------------------------------------------------- vínculo
+
+    def test_link_returns_id_and_email(self):
+        user = self._membro()
+        resp = self._patch(self.profile, {'user': user.pk})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['user'], user.pk)
+        self.assertEqual(resp.data['user_email'], user.email)
+
+    def test_profile_without_link_reports_empty_email(self):
+        resp = self._api().get(
+            reverse('member-self-detail', args=[self.profile.pk]),
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['user'])
+        self.assertEqual(resp.data['user_email'], '')
+
+    def test_link_from_another_church_is_rejected(self):
+        outsider = self._user('fora@teste.com', church=self.other_church)
+        resp = self._patch(self.profile, {'user': outsider.pk})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('user', resp.data)
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.user_id)
+
+    def test_reusing_an_account_already_linked_is_rejected(self):
+        user = self._membro()
+        linked = self._patch(self.profile, {'user': user.pk})
+        self.assertEqual(linked.status_code, status.HTTP_200_OK, linked.data)
+        other = Member.objects.create(
+            church=self.sede, name='Outro Cadastro',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        resp = self._patch(other, {'user': user.pk})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        other.refresh_from_db()
+        self.assertIsNone(other.user_id)
+
+    def test_relinking_the_same_member_keeps_the_account(self):
+        user = self._membro()
+        self._patch(self.profile, {'user': user.pk})
+        resp = self._patch(
+            self.profile, {'user': user.pk, 'name': 'Membro Demo Editado'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['user'], user.pk)
+
+    def test_clearing_the_link(self):
+        user = self._membro()
+        self._patch(self.profile, {'user': user.pk})
+        resp = self._patch(self.profile, {'user': None})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['user'])
+        self.profile.refresh_from_db()
+        self.assertIsNone(self.profile.user_id)
+
+    def test_membro_cannot_update_promoted_member(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Critico Meu', self.profile, 2)
+        Member.objects.filter(pk=mine.pk).update(
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        mine.refresh_from_db()
+        resp = self._client(membro).patch(
+            reverse('member-self-detail', args=[mine.pk]),
+            {'notes': 'nao deveria'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_membro_can_register_visitor_under_themselves(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        resp = self._client(membro).post(
+            reverse('member-self-list'),
+            {'name': 'Visitante Que Eu Registrei',
+             'lifecycle_stage': Member.LifecycleStage.VISITOR},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['discipler'], self.profile.pk)
+        saved = Member.objects.get(pk=resp.data['id'])
+        self.assertEqual(saved.discipler_id, self.profile.pk)
+
+    def test_membro_cannot_register_direct_active_member(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        resp = self._client(membro).post(
+            reverse('member-self-list'),
+            {'name': 'Membro Direto', 'lifecycle_stage': Member.LifecycleStage.ACTIVE},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_membro_sees_only_self_in_disciplers(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        Member.objects.create(
+            church=self.sede, name='Outro Responsavel',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        resp = self._client(membro).get(reverse('member-self-disciplers'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ids = [d['id'] for d in resp.data]
+        self.assertEqual(ids, [self.profile.pk])
+
+    def test_membro_moves_own_visitor_between_intake_columns(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Critico Meu', self.profile, 2)
+        resp = self._client(membro).patch(
+            reverse('member-self-stage', args=[mine.pk]),
+            {'lifecycle_stage': Member.LifecycleStage.INTEGRATION},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['lifecycle_stage'], 'INTEGRATION')
+
+    def test_membro_cannot_promote_beyond_intake(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Critico Meu', self.profile, 2)
+        resp = self._client(membro).patch(
+            reverse('member-self-stage', args=[mine.pk]),
+            {'lifecycle_stage': Member.LifecycleStage.ACTIVE},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_membro_cannot_move_another_visitor(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        other = self._visitor('Alheio', self.responsible, 2)
+        resp = self._client(membro).patch(
+            reverse('member-self-stage', args=[other.pk]),
+            {'lifecycle_stage': Member.LifecycleStage.INTEGRATION},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_membro_unassigned_filter_lists_sentinel_visitors(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        self._visitor('Critico Meu', self.profile, 2)
+        unassigned = Member.objects.create(
+            church=self.sede, name='Visitante Sem Responsavel',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        resp = self._client(membro).get(
+            reverse('member-self-list'), {'unassigned': '1'},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ids = [m['id'] for m in resp.data]
+        self.assertEqual(ids, [unassigned.pk])
+
+    def test_membro_can_edit_unassigned_visitor(self):
+        # O funil lista o visitante sem responsável ao MEMBRO; editar por pk
+        # precisa funcionar mesmo sem a query string do filtro `unassigned`.
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        unassigned = Member.objects.create(
+            church=self.sede, name='Visitante Sem Responsavel',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        resp = self._client(membro).patch(
+            reverse('member-self-detail', args=[unassigned.pk]),
+            {'notes': 'primeiro contato feito'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        unassigned.refresh_from_db()
+        self.assertEqual(unassigned.notes, 'primeiro contato feito')
+
+    def test_membro_can_move_unassigned_visitor_between_intake_stages(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        unassigned = Member.objects.create(
+            church=self.sede, name='Visitante Sem Responsavel',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        resp = self._client(membro).patch(
+            reverse('member-self-stage', args=[unassigned.pk]),
+            {'lifecycle_stage': Member.LifecycleStage.INTEGRATION},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        unassigned.refresh_from_db()
+        self.assertEqual(
+            unassigned.lifecycle_stage, Member.LifecycleStage.INTEGRATION,
+        )
+
+    def test_membro_default_list_still_hides_unassigned_visitors(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Critico Meu', self.profile, 2)
+        Member.objects.create(
+            church=self.sede, name='Visitante Sem Responsavel',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+        )
+        resp = self._client(membro).get(reverse('member-self-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        ids = [m['id'] for m in resp.data]
+        self.assertEqual(ids, [mine.pk])
+
+    def test_membro_can_prepare_whatsapp_for_own_visitor(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Meu Visita', self.profile, 0)
+        mine.phone = '83 99800-4321'
+        mine.save(update_fields=['phone'])
+        template = MessageTemplate.objects.create(
+            church=self.sede, title='Boas-Vindas', category='WELCOME',
+            content='Olá {{PRIMEIRO_NOME}}, seja bem-vindo à {{IGREJA}}!',
+        )
+        resp = self._client(membro).post(
+            reverse('member-self-prepare-whatsapp', args=[mine.pk]),
+            {'template_id': template.pk, 'category': 'WELCOME'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIn('Meu', resp.data['formatted_message'])
+        log = MemberContactLog.objects.get(member=mine)
+        self.assertEqual(log.category, 'WELCOME')
+
+    # --------------------------------------------------------- alertas do MEMBRO
+
+    def test_membro_without_link_sees_no_visitor_alerts(self):
+        membro = self._membro()
+        owner = Member.objects.create(
+            church=self.sede, name='Ainda Sem Conta',
+            status=Member.Status.ACTIVE,
+            lifecycle_stage=Member.LifecycleStage.ACTIVE,
+        )
+        self._visitor('Critico Sem Conta', owner, 8)
+        self.assertEqual(self._visitor_alerts(membro), [])
+
+    def test_membro_sees_alerts_only_after_the_link(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        self._visitor('Critico Meu', self.profile, 8)
+        alerts = self._visitor_alerts(membro)
+        self.assertEqual(len(alerts), 1, alerts)
+        self.assertEqual(alerts[0]['type'], 'visitor_sla_critical')
+        self.assertEqual(alerts[0]['discipler_id'], self.profile.pk)
+        self.assertEqual(alerts[0]['waiting_days'], 8)
+
+    def test_alerts_are_scoped_to_own_disciples(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Critico Meu', self.profile, 8)
+        self._visitor('Critico Alheio', self.responsible, 8)
+        alerts = self._visitor_alerts(membro)
+        self.assertEqual([a['member_id'] for a in alerts], [mine.pk])
+
+    def test_member_list_is_scoped_to_own_disciples(self):
+        membro = self._membro()
+        self._patch(self.profile, {'user': membro.pk})
+        mine = self._visitor('Critico Meu', self.profile, 8)
+        self._visitor('Critico Alheio', self.responsible, 8)
+        resp = self._client(membro).get(reverse('member-self-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual([m['id'] for m in resp.data], [mine.pk])
+
+    def test_secretary_still_sees_every_visitor_alert(self):
+        self._visitor('Critico Meu', self.profile, 8)
+        self._visitor('Critico Alheio', self.responsible, 8)
+        alerts = self._visitor_alerts(self.secretary)
+        self.assertEqual(len(alerts), 2, alerts)
