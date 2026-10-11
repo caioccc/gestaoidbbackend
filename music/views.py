@@ -502,9 +502,12 @@ class SongViewSet(viewsets.ModelViewSet):
         )
         if self.action == 'list':
             qs = qs.defer('chords', 'chords_json', 'lyrics')
-        band = self.request.query_params.get('band')
-        if band:
-            qs = qs.filter(band_id=band)
+            # `band=<id>` no list filtra a banda FIXA do repertório. Em actions
+            # de detalhe (ex.: `history`) o mesmo param tem outro significado
+            # (banda do setlist) e não pode esvaziar o `get_object()`.
+            band = self.request.query_params.get('band')
+            if band:
+                qs = qs.filter(band_id=band)
         key = self.request.query_params.get('key')
         if key:
             qs = qs.filter(church_key__iexact=key)
@@ -846,6 +849,12 @@ class SongViewSet(viewsets.ModelViewSet):
             )
             .select_related('setlist', 'setlist__band')
         )
+        band_param = str(request.query_params.get('band', '')).strip()
+        if band_param:
+            try:
+                band_items = band_items.filter(setlist__band_id=int(band_param))
+            except (TypeError, ValueError):
+                pass
         rows = [
             {
                 'date': item.setlist.date,
@@ -853,6 +862,9 @@ class SongViewSet(viewsets.ModelViewSet):
                 'key': item.custom_key or fallback_key,
                 'kind': 'band',
                 'setlist_id': item.setlist_id,
+                'band': item.setlist.band_id,
+                'band_name': item.setlist.band.name if item.setlist.band else '',
+                'band_color': item.setlist.band.color if item.setlist.band else '',
             }
             for item in band_items
         ]

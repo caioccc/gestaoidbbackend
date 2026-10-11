@@ -454,6 +454,9 @@ class SongHistorySerializer(serializers.Serializer):
     key = serializers.CharField(required=False, allow_blank=True)
     kind = serializers.CharField(required=False, allow_blank=True)
     setlist_id = serializers.IntegerField(required=False)
+    band = serializers.IntegerField(allow_null=True, required=False)
+    band_name = serializers.CharField(allow_blank=True, required=False)
+    band_color = serializers.CharField(allow_blank=True, required=False)
 
 
 class SongEnrichPayloadSerializer(serializers.Serializer):

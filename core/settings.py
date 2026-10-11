@@ -62,6 +62,7 @@ INSTALLED_APPS = [
 
     # Apps locais
     'accounts',
+    'boletim',
     'finance',
     'music',
 ]
@@ -206,6 +207,13 @@ REST_FRAMEWORK = {
         'public_invite_form': '60/min',
         'growth_group_join': '30/min',
     },
+}
+
+# JWT: sessão de 7 dias no access token (login com duração de 1 semana) e
+# refresh de 14 dias como rede de segurança para renovação automática.
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=14),
 }
 
 # Observabilidade: emite logs de INFO+ para o stderr (capturado pelo Heroku/log.

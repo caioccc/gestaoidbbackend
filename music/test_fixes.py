@@ -347,11 +347,21 @@ class SongHistoryTest(MusicManagerFixturesMixin, TestCase):
         self.song = Song.objects.create(
             church=self.church, title='M1', youtube_id='aaaaaaaaaaa', church_key='Em',
         )
+        self.band_a = Band.objects.create(church=self.church, name='Alpha', color='#111111')
+        self.band_b = Band.objects.create(church=self.church, name='Beta', color='#222222')
+        self.today = timezone.localdate()
 
-    def _history(self):
+    def _history(self, query=None):
         from music.views import SongViewSet
+        url = f'/api/music/songs/{self.song.id}/history/'
+        if query:
+            if isinstance(query, str):
+                url = f'{url}?{query}'
+            else:
+                from urllib.parse import urlencode
+                url = f'{url}?{urlencode(query)}'
         v = SongViewSet()
-        req = self._rf('get', f'/api/music/songs/{self.song.id}/history/')
+        req = self._rf('get', url)
         v.request = req
         v.action = 'history'
         v.kwargs = {'pk': self.song.id}
@@ -383,3 +393,45 @@ class SongHistoryTest(MusicManagerFixturesMixin, TestCase):
 
         results = self._history().data['results']
         self.assertEqual(results[0]['key'], 'G#m')
+
+    def test_history_includes_band_info(self):
+        for band, days in ((self.band_a, 1), (self.band_b, 2), (None, 3)):
+            setlist = BandSetlist.objects.create(
+                church=self.church, date=self.today - timedelta(days=days),
+                description='Setlist', band=band,
+            )
+            BandSetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+
+        by_band = {r['band_name']: r for r in self._history().data['results']}
+        self.assertEqual(by_band['Alpha']['band'], self.band_a.id)
+        self.assertEqual(by_band['Alpha']['band_color'], '#111111')
+        self.assertEqual(by_band['Beta']['band'], self.band_b.id)
+        self.assertEqual(by_band['Beta']['band_color'], '#222222')
+        self.assertIsNone(by_band['']['band'])
+        self.assertEqual(by_band['']['band_name'], '')
+        self.assertEqual(by_band['']['band_color'], '')
+
+    def test_history_filters_by_band(self):
+        for band, days in ((self.band_a, 1), (self.band_b, 2)):
+            setlist = BandSetlist.objects.create(
+                church=self.church, date=self.today - timedelta(days=days),
+                description=f'Setlist {band.name}', band=band,
+            )
+            BandSetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+
+        results = self._history({'band': str(self.band_a.id)}).data['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['band'], self.band_a.id)
+
+    def test_history_band_filter_ignores_invalid(self):
+        setlist = BandSetlist.objects.create(
+            church=self.church, date=self.today - timedelta(days=1),
+            description='Setlist Alpha', band=self.band_a,
+        )
+        BandSetlistItem.objects.create(setlist=setlist, song=self.song, order=1)
+
+        results = self._history({'band': 'abc'}).data['results']
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['band'], self.band_a.id)
+        results = self._history({'band': '99999'}).data['results']
+        self.assertEqual(results, [])
