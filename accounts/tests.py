@@ -6296,15 +6296,18 @@ class PrayerRequestTests(BaseChurchTestCase):
                 self.assertIn(field, resp.data)
         self.assertEqual(PrayerRequest.objects.count(), 0)
 
-    def test_public_visit_requires_preferred_period(self):
+    def test_public_visit_allows_any_preferred_period(self):
+        """'Qualquer Horário' (ANY) é uma opção válida do formulário público,
+        então a visita pastoral deve ser aceita com esse período."""
         client = APIClient()
         resp = client.post(
             reverse('public-church-prayer-requests', args=[self.sede.slug]),
             self._visit_payload(preferred_period='ANY'),
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
-        self.assertIn('preferred_period', resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        pr = PrayerRequest.objects.get(pk=resp.data['id'])
+        self.assertEqual(pr.preferred_period, PrayerRequest.PreferredPeriod.ANY)
 
     def test_public_visit_rejects_short_cep(self):
         client = APIClient()

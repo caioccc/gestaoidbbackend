@@ -2411,11 +2411,6 @@ class PublicPrayerRequestSerializer(serializers.ModelSerializer):
         if state and len(state) != 2:
             errors.setdefault('state', []).append('Informe a UF com 2 letras.')
 
-        if attrs.get('preferred_period') == PrayerRequest.PreferredPeriod.ANY:
-            errors.setdefault('preferred_period', []).append(
-                'Escolha o melhor período para a visita pastoral.'
-            )
-
         if errors:
             raise serializers.ValidationError(errors)
         return attrs
