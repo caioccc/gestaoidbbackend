@@ -32,6 +32,7 @@ from .models import (
     RosterAssignment,
     SetlistItem,
     Song,
+    SongHighlight,
     VolunteerRoster,
     WorshipSetlist,
 )
@@ -468,6 +469,7 @@ class SongViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in (
             'list', 'retrieve', 'history', 'check_youtube', 'reprocess',
+            'highlight', 'highlights',
         ):
             return [IsChurchRole(*VIEW_ROLES)()]
         if self.action in ('bulk_create', 'check_youtube_bulk'):
@@ -499,6 +501,12 @@ class SongViewSet(viewsets.ModelViewSet):
                 ),
                 distinct=True,
             ),
+            is_highlighted=django_models.Exists(
+                SongHighlight.objects.filter(
+                    song=django_models.OuterRef('pk'),
+                    user=self.request.user,
+                )
+            ),
         )
         if self.action == 'list':
             qs = qs.defer('chords', 'chords_json', 'lyrics')
@@ -522,6 +530,11 @@ class SongViewSet(viewsets.ModelViewSet):
                 | django_models.Q(tags__icontains=search)
             )
         ordering = self.request.query_params.get('ordering')
+        if ordering == 'highlighted':
+            return (
+                qs.filter(highlights__user=self.request.user)
+                .order_by('-highlights__created_at', 'title')
+            )
         order_target = SONG_ORDERING_MAP.get(ordering, '?')
         return qs.order_by(order_target)
 
@@ -552,6 +565,30 @@ class SongViewSet(viewsets.ModelViewSet):
         rows = self._attach_band_stats(queryset)
         serializer = self.get_serializer(rows, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='highlights')
+    def highlights(self, request):
+        """Lista todas as músicas destacadas pelo usuário autenticado."""
+        qs = (
+            self.get_queryset()
+            .filter(highlights__user=request.user)
+            .order_by('-highlights__created_at', 'title')
+        )
+        rows = self._attach_band_stats(qs)
+        serializer = SongListSerializer(
+            rows, many=True, context=self.get_serializer_context()
+        )
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post', 'delete'], url_path='highlight')
+    def highlight(self, request, pk=None):
+        """Adiciona/remove a música dos destaques pessoais do usuário."""
+        song = self.get_object()
+        if request.method == 'DELETE':
+            SongHighlight.objects.filter(user=request.user, song=song).delete()
+            return Response({'is_highlighted': False})
+        SongHighlight.objects.get_or_create(user=request.user, song=song)
+        return Response({'is_highlighted': True})
 
     def perform_create(self, serializer):
         saved = serializer.save(

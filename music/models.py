@@ -310,6 +310,37 @@ class Song(models.Model):
         return f'{self.title} — {self.artist}'
 
 
+class SongHighlight(models.Model):
+    """Música marcada como destaque (favorita) por um usuário."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='song_highlights',
+        verbose_name='Usuário',
+    )
+    song = models.ForeignKey(
+        Song,
+        on_delete=models.CASCADE,
+        related_name='highlights',
+        verbose_name='Música',
+    )
+    created_at = models.DateTimeField('Criado em', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Destaque de Música'
+        verbose_name_plural = 'Destaques de Músicas'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'song'], name='unique_user_song_highlight'
+            )
+        ]
+
+    def __str__(self):
+        return f'{self.user} — {self.song}'
+
+
 class WorshipSetlist(models.Model):
     """Setlist de um culto (vinculada à escala)."""
 

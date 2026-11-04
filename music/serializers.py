@@ -13,6 +13,7 @@ from .models import (
     RosterAssignment,
     SetlistItem,
     Song,
+    SongHighlight,
     VolunteerRoster,
     WorshipSetlist,
 )
@@ -269,6 +270,7 @@ class SongSerializer(serializers.ModelSerializer):
     band_stats = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     can_edit = serializers.SerializerMethodField()
+    is_highlighted = serializers.SerializerMethodField()
 
     class Meta:
         model = Song
@@ -279,7 +281,7 @@ class SongSerializer(serializers.ModelSerializer):
             'bpm', 'time_signature', 'chords', 'chords_json', 'lyrics',
             'tags', 'band_stats', 'is_active', 'is_private', 'created_at',
             'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at',
-            'created_by', 'created_by_name', 'can_edit',
+            'created_by', 'created_by_name', 'can_edit', 'is_highlighted',
         ]
         read_only_fields = ['church', 'created_by', 'chord_status', 'chord_error', 'chord_retries', 'chord_processed_at']
 
@@ -397,6 +399,16 @@ class SongSerializer(serializers.ModelSerializer):
         user = getattr(request, 'user', None)
         return bool(user and can_edit_song(user, obj))
 
+    def get_is_highlighted(self, obj):
+        annotated = getattr(obj, 'is_highlighted', None)
+        if annotated is not None:
+            return bool(annotated)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not (user and getattr(user, 'is_authenticated', False)):
+            return False
+        return SongHighlight.objects.filter(user=user, song=obj).exists()
+
 
 class SongListSerializer(SongSerializer):
     """Representação leve do repertório; cifras e letra ficam no detalhe."""
@@ -409,7 +421,7 @@ class SongListSerializer(SongSerializer):
             'bpm', 'time_signature', 'tags', 'band_stats', 'is_active',
             'is_private', 'created_at', 'chord_status', 'chord_error',
             'chord_retries', 'chord_processed_at', 'created_by',
-            'created_by_name', 'can_edit',
+            'created_by_name', 'can_edit', 'is_highlighted',
         ]
 
 
