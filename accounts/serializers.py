@@ -843,6 +843,7 @@ class MemberSerializer(serializers.ModelSerializer):
             'ministry_areas', 'ministry_areas_display', 'photo',
             'relatives',
             'status', 'status_display', 'notes',
+            'how_known', 'wants_visit',
             'lifecycle_stage', 'lifecycle_stage_display', 'last_contact_at',
             'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
             'public_hash',
@@ -1793,6 +1794,7 @@ DEFAULT_LINK_ICONS = {
     ChurchPublicLink.LinkType.CALENDAR: 'calendar',
     ChurchPublicLink.LinkType.MEMBERSHIP: 'user-plus',
     ChurchPublicLink.LinkType.PRAYER: 'pray',
+    ChurchPublicLink.LinkType.VISITOR: 'user-heart',
     ChurchPublicLink.LinkType.GROWTH_GROUPS: 'users',
 }
 
@@ -1961,9 +1963,10 @@ class ChurchPublicLinkSerializer(serializers.ModelSerializer):
             ChurchPublicLink.LinkType.CALENDAR,
             ChurchPublicLink.LinkType.MEMBERSHIP,
             ChurchPublicLink.LinkType.PRAYER,
+            ChurchPublicLink.LinkType.VISITOR,
             ChurchPublicLink.LinkType.GROWTH_GROUPS,
         ):
-            # Sistema: a URL é resolvida a partir dos hashes públicos da igreja.
+            # Sistema: a URL Ǹ resolvida a partir dos hashes pǧblicos da igreja.
             attrs['url'] = ''
             attrs['pix_key'] = None
             attrs['pix_type'] = None
@@ -2067,6 +2070,8 @@ class PublicChurchPublicLinkSerializer(serializers.ModelSerializer):
             return ''
         if obj.link_type == ChurchPublicLink.LinkType.GROWTH_GROUPS:
             return f'{settings.FRONTEND_URL}/gc/{obj.church.slug}'
+        if obj.link_type == ChurchPublicLink.LinkType.VISITOR:
+            return f'{settings.FRONTEND_URL}/p/{obj.church.slug}/visitante'
         return obj.url
 
 
@@ -2094,6 +2099,7 @@ class PublicChurchLinksSerializer(serializers.Serializer):
             ChurchPublicLink.LinkType.CALENDAR,
             ChurchPublicLink.LinkType.MEMBERSHIP,
             ChurchPublicLink.LinkType.PRAYER,
+            ChurchPublicLink.LinkType.VISITOR,
             ChurchPublicLink.LinkType.GROWTH_GROUPS,
         )
         stored = set(
@@ -2123,6 +2129,14 @@ class PublicChurchLinksSerializer(serializers.Serializer):
                 'title': 'Pedido de Oração',
                 'url': '',
                 'icon_key': 'pray',
+                'highlight': False,
+            })
+        if ChurchPublicLink.LinkType.VISITOR not in stored:
+            system.append({
+                'link_type': ChurchPublicLink.LinkType.VISITOR,
+                'title': 'Cadastro de Visitante',
+                'url': f'{settings.FRONTEND_URL}/p/{church.slug}/visitante',
+                'icon_key': 'user-heart',
                 'highlight': False,
             })
         if ChurchPublicLink.LinkType.GROWTH_GROUPS not in stored:
@@ -2673,3 +2687,65 @@ class SundaySchoolSessionSerializer(serializers.ModelSerializer):
         if hasattr(obj, 'present_count'):
             return obj.present_count
         return obj.attendances.filter(is_present=True).count()
+
+class PublicVisitorCreateSerializer(serializers.Serializer):
+    """Cadastro público de visitante a partir da página /p/<slug>/visitante."""
+
+    name = serializers.CharField(max_length=150)
+    phone = serializers.CharField(max_length=32)
+    how_known = serializers.CharField(max_length=120, required=False, allow_blank=True, default='')
+    wants_visit = serializers.BooleanField(required=False, default=False)
+    cep = serializers.CharField(max_length=9, required=False, allow_blank=True, default='')
+    street = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
+    number = serializers.CharField(max_length=20, required=False, allow_blank=True, default='')
+    complement = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    neighborhood = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    city = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
+    state = serializers.CharField(max_length=2, required=False, allow_blank=True, default='')
+
+    def validate_name(self, value):
+        value = (value or '').strip()
+        if len(value) < 2:
+            raise serializers.ValidationError('Informe o nome completo.')
+        return value
+
+    def validate_phone(self, value):
+        raw = (value or '').strip()
+        digits = re.sub(r'\D', '', raw)
+        if len(digits) < 10 or len(digits) > 13:
+            raise serializers.ValidationError('Informe um telefone/WhatsApp válido com DDD.')
+        return raw
+
+    def validate_state(self, value):
+        return (value or '').strip().upper()
+
+    def validate(self, attrs):
+        for f in ('how_known', 'cep', 'street', 'number', 'complement', 'neighborhood', 'city'):
+            if f in attrs and isinstance(attrs[f], str):
+                attrs[f] = attrs[f].strip()
+        if not attrs.get('wants_visit'):
+            for f in ('cep', 'street', 'number', 'complement', 'neighborhood', 'city', 'state'):
+                attrs[f] = ''
+            return attrs
+
+        missing = []
+        if not attrs.get('cep'):
+            missing.append('cep')
+        if not attrs.get('street'):
+            missing.append('street')
+        if not attrs.get('number'):
+            missing.append('number')
+        if not attrs.get('neighborhood'):
+            missing.append('neighborhood')
+        if not attrs.get('city'):
+            missing.append('city')
+        state = (attrs.get('state') or '').strip().upper()
+        if len(state) != 2:
+            missing.append('state')
+        if missing:
+            errors = {k: 'Este campo é obrigatório quando deseja visita.' for k in missing}
+            if 'state' in missing and (attrs.get('state') or ''):
+                errors['state'] = 'Informe a UF com 2 letras.'
+            raise serializers.ValidationError(errors)
+        attrs['state'] = state
+        return attrs

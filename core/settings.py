@@ -134,6 +134,27 @@ if _TARGET_DATABASE_URL:
     )
 
 
+# --- Scraper Chordify / Selenium -------------------------------------------
+# No worker local (container), o Chrome real com o perfil do usuário roda no
+# HOST (Windows) e o container se conecta via Selenium Remote. Sem
+# SELENIUM_REMOTE_URL, mantém o comportamento antigo (Chromium do container).
+SELENIUM_REMOTE_URL = os.environ.get('SELENIUM_REMOTE_URL', '').strip()
+CHROME_HOST_BIN = os.environ.get('CHROME_HOST_BIN', '').strip()
+CHROME_HOST_USER_DATA_DIR = os.environ.get(
+    'CHROME_HOST_USER_DATA_DIR', ''
+).strip()
+CHROME_HOST_PROFILE_DIRECTORY = os.environ.get(
+    'CHROME_HOST_PROFILE_DIRECTORY', ''
+).strip()
+CHROME_HEADLESS = os.environ.get('CHROME_HEADLESS', 'false').lower() in (
+    '1', 'true', 'yes', 'on',
+)
+CHORDIFY_PAGE_LOAD_TIMEOUT = float(
+    os.environ.get('CHORDIFY_PAGE_LOAD_TIMEOUT', '30')
+)
+CHORDIFY_API_TIMEOUT = float(os.environ.get('CHORDIFY_API_TIMEOUT', '30'))
+
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
@@ -206,6 +227,7 @@ REST_FRAMEWORK = {
         'public_invite': '10/min',
         'public_invite_form': '60/min',
         'growth_group_join': '30/min',
+        'public_visitor': '10/min',
     },
 }
 

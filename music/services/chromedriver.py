@@ -66,8 +66,81 @@ def _apply_stealth(driver):
         logger.debug("navigator.webdriver não pôde ser mascarado (ChromeDriver antigo).")
 
 
+def _setting(name: str, default: str = '') -> str:
+    """Lê a configuração do ambiente (prioridade) ou do Django settings."""
+    value = os.getenv(name)
+    if value not in (None, ''):
+        return value
+    value = getattr(settings, name, default)
+    return str(value) if value is not None else default
+
+
+def _bool_setting(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        value = getattr(settings, name, default)
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _build_remote_options():
+    """Opções para o ChromeDriver do HOST abrir o Chrome com o perfil real.
+
+    O perfil dedicado fica no Windows (cookies/cf_clearance inclusos). Não
+    sobrescrevemos o User-Agent: o `cf_clearance` do Cloudflare é vinculado ao
+    UA/IP que resolveu o challenge, então um UA fixo diferente invalidaria a
+    sessão do perfil.
+    """
+    from selenium.webdriver.chrome.options import Options
+
+    options = Options()
+
+    browser_path = _setting('CHROME_HOST_BIN')
+    if browser_path:
+        options.binary_location = browser_path
+
+    user_data_dir = _setting('CHROME_HOST_USER_DATA_DIR')
+    if user_data_dir:
+        options.add_argument(f'--user-data-dir={user_data_dir}')
+
+    profile_directory = _setting('CHROME_HOST_PROFILE_DIRECTORY')
+    if profile_directory:
+        options.add_argument(f'--profile-directory={profile_directory}')
+
+    if _bool_setting('CHROME_HEADLESS'):
+        options.add_argument('--headless=new')
+
+    options.add_argument('--no-first-run')
+    options.add_argument('--no-default-browser-check')
+    options.add_argument('--start-minimized')
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option('excludeSwitches', ['enable-automation'])
+    options.add_experimental_option('useAutomationExtension', False)
+    return options
+
+
+def _create_remote_driver(remote_url: str):
+    """Conecta no ChromeDriver do host (Selenium Remote) e retorna o driver."""
+    from selenium import webdriver
+
+    options = _build_remote_options()
+    logger.info(
+        'ChromeDriver remoto: conectando em %s (bin=%s perfil=%s headless=%s).',
+        remote_url,
+        _setting('CHROME_HOST_BIN') or '-',
+        _setting('CHROME_HOST_PROFILE_DIRECTORY') or '-',
+        _bool_setting('CHROME_HEADLESS'),
+    )
+    driver = webdriver.Remote(command_executor=remote_url, options=options)
+    _apply_stealth(driver)
+    return driver
+
+
 def create_chrome_driver():
     """Cria uma instância do ChromeDriver configurada para o ambiente Docker/Heroku."""
+    remote_url = _setting('SELENIUM_REMOTE_URL').strip()
+    if remote_url:
+        return _create_remote_driver(remote_url)
+
     from selenium.webdriver import Chrome
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service

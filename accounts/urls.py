@@ -230,6 +230,11 @@ urlpatterns = [
         name='public-church-prayer-requests',
     ),
     path(
+        'public/churches/<str:slug>/visitantes/',
+        viewsets.PublicVisitorView.as_view(),
+        name='public-church-visitors',
+    ),
+    path(
         'public/churches/<str:slug>/growth-groups/',
         viewsets.GrowthGroupPublicView.as_view(),
         name='public-church-growth-groups',

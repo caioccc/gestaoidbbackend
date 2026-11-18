@@ -516,6 +516,10 @@ class Member(models.Model):
         help_text='Usado na URL pública do cartão de membro.',
     )
 
+    # Cadastro público de visitante / acolhimento
+    how_known = models.CharField('Como conheceu a igreja', max_length=120, blank=True)
+    wants_visit = models.BooleanField('Deseja visita pastoral/contato', default=False)
+
     # Endereço residencial do membro
     street = models.CharField('Rua / Avenida', max_length=150, blank=True)
     number = models.CharField('Número', max_length=20, blank=True)
@@ -1689,6 +1693,7 @@ class ChurchPublicLink(models.Model):
         MEMBERSHIP = 'MEMBERSHIP', 'Ficha de Membro / Cadastro'
         PRAYER = 'PRAYER', 'Pedido de Oração'
         GROWTH_GROUPS = 'GROWTH_GROUPS', 'Grupos de Crescimento'
+        VISITOR = 'VISITOR', 'Cadastro de Visitante'
 
     PIX_TYPES = ['CNPJ', 'CPF', 'Telefone', 'E-mail', 'Chave Aleatória']
 

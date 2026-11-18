@@ -4527,13 +4527,14 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
 
         listed = client.get(reverse('church-link-list'))
         self.assertEqual(listed.status_code, status.HTTP_200_OK)
-        # 4 padrões (Agenda de Cultos / Ficha de Membro / Pedido de Oração /
-        # Grupos de Crescimento) + o link criado
-        self.assertEqual(len(listed.data), 5)
+        # 5 padrões (Agenda, Ficha de Membro, Pedido de Oração,
+        # Cadastro de Visitante, Grupos de Crescimento) + o link criado
+        self.assertEqual(len(listed.data), 6)
         titles = {l['title'] for l in listed.data}
         self.assertIn('Agenda de Cultos', titles)
         self.assertIn('Ficha de Membro / Cadastro', titles)
         self.assertIn('Pedido de Oração', titles)
+        self.assertIn('Cadastro de Visitante', titles)
         self.assertIn('Grupos de Crescimento', titles)
 
     def test_secretaria_can_manage(self):
@@ -4672,7 +4673,7 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
         )
         listed = self._client(self.pastor).get(reverse('church-link-list'))
         # apenas os padrões da igreja ativa; o link alheio não aparece
-        self.assertEqual(len(listed.data), 4)
+        self.assertEqual(len(listed.data), 5)
         ids = [l['id'] for l in listed.data]
         self.assertNotIn(link.pk, ids)
 
@@ -4817,6 +4818,15 @@ class ChurchPublicLinkTests(BaseChurchTestCase):
         self.assertEqual(growth['title'], 'Grupos de Crescimento')
         self.assertTrue(growth['url'].endswith(f'/gc/{self.sede.slug}'))
         self.assertEqual(growth['icon_key'], 'users')
+
+        self.assertIn('VISITOR', system_types)
+        visitor = next(
+            s for s in data['system_links']
+            if s['link_type'] == 'VISITOR'
+        )
+        self.assertEqual(visitor['title'], 'Cadastro de Visitante')
+        self.assertTrue(visitor['url'].endswith(f'/p/{self.sede.slug}/visitante'))
+        self.assertEqual(visitor['icon_key'], 'user-heart')
 
     def test_public_exposes_pix_amount_modes(self):
         open_pix = self._create_link(
@@ -8388,3 +8398,108 @@ class MemberUserLinkTests(BaseChurchTestCase):
         self._visitor('Critico Alheio', self.responsible, 8)
         alerts = self._visitor_alerts(self.secretary)
         self.assertEqual(len(alerts), 2, alerts)
+
+
+class PublicVisitorTests(BaseChurchTestCase):
+    """Cadastro público de visitantes via /p/<slug>/visitante."""
+
+    def test_get_meta_by_slug(self):
+        url = reverse('public-church-visitors', args=[self.sede.slug])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['church_name'], self.sede.name)
+
+    def test_get_meta_by_links_hash(self):
+        url = reverse('public-church-visitors', args=[self.sede.links_hash])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['church_name'], self.sede.name)
+
+    def test_unknown_or_disabled_404(self):
+        resp = self.client.get(reverse('public-church-visitors', args=['nao-existe']))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.sede.public_links_enabled = False
+        self.sede.save(update_fields=['public_links_enabled'])
+        resp = self.client.get(reverse('public-church-visitors', args=[self.sede.slug]))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_post_creates_active_visitor(self):
+        url = reverse('public-church-visitors', args=[self.sede.slug])
+        resp = self.client.post(url, {
+            'name': 'Maria Visitante',
+            'phone': '(83) 99999-0000',
+            'how_known': 'Redes sociais',
+            'wants_visit': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        member = Member.objects.get(pk=resp.data['id'])
+        self.assertEqual(member.church, self.sede)
+        self.assertEqual(member.lifecycle_stage, Member.LifecycleStage.VISITOR)
+        self.assertEqual(member.status, Member.Status.ACTIVE)
+        self.assertEqual(member.how_known, 'Redes sociais')
+        self.assertFalse(member.wants_visit)
+        self.assertEqual(member.cep, '')
+
+    def test_post_wants_visit_requires_full_address(self):
+        url = reverse('public-church-visitors', args=[self.sede.slug])
+        resp = self.client.post(url, {
+            'name': 'João Visitante',
+            'phone': '(83) 98888-0000',
+            'wants_visit': True,
+            'street': 'Rua A',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        for key in ('cep', 'number', 'neighborhood', 'city', 'state'):
+            self.assertIn(key, resp.data)
+
+    def test_post_wants_visit_saves_address(self):
+        url = reverse('public-church-visitors', args=[self.sede.slug])
+        resp = self.client.post(url, {
+            'name': 'João Visitante',
+            'phone': '(83) 98888-0000',
+            'how_known': 'Indicação de amigo/familiar',
+            'wants_visit': True,
+            'cep': '58000-000',
+            'street': 'Rua das Flores',
+            'number': '123',
+            'complement': 'Apto 2',
+            'neighborhood': 'Centro',
+            'city': 'Campina Grande',
+            'state': 'pb',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        member = Member.objects.get(pk=resp.data['id'])
+        self.assertTrue(member.wants_visit)
+        self.assertEqual(member.cep, '58000-000')
+        self.assertEqual(member.street, 'Rua das Flores')
+        self.assertEqual(member.number, '123')
+        self.assertEqual(member.complement, 'Apto 2')
+        self.assertEqual(member.neighborhood, 'Centro')
+        self.assertEqual(member.city, 'Campina Grande')
+        self.assertEqual(member.state, 'PB')
+
+    def test_post_wants_visit_false_clears_address(self):
+        url = reverse('public-church-visitors', args=[self.sede.slug])
+        resp = self.client.post(url, {
+            'name': 'Ana Visitante',
+            'phone': '(83) 97777-0000',
+            'wants_visit': False,
+            'cep': '58000-000',
+            'street': 'Rua X',
+            'number': '1',
+            'neighborhood': 'Bairro',
+            'city': 'Cidade',
+            'state': 'PB',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        member = Member.objects.get(pk=resp.data['id'])
+        self.assertEqual(member.street, '')
+        self.assertEqual(member.cep, '')
+        self.assertEqual(member.state, '')
+
+    def test_post_validates_name_and_phone(self):
+        url = reverse('public-church-visitors', args=[self.sede.slug])
+        resp = self.client.post(url, {'name': 'A', 'phone': '123'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('name', resp.data)
+        self.assertIn('phone', resp.data)

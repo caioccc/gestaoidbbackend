@@ -1,5 +1,6 @@
 """Testes do scraper do Chordify (sem rede: todas as estratégias são mockadas)."""
 import json
+import os
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -7,6 +8,7 @@ from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from music.services import chordify as chordify_service
+from music.services.chromedriver import create_chrome_driver
 from music.views import ChordifyView
 
 User = get_user_model()
@@ -29,18 +31,25 @@ class _FakeElement:
 
 class _FakeDriver:
     def __init__(self, next_data='', api_body='', page_source='', dom_chords=(),
-                 next_data_sequence=None, api_body_sequence=None):
+                 next_data_sequence=None, api_body_sequence=None,
+                 title='', current_url='', page_data=None):
         self._next_data = next_data
         self._next_data_sequence = list(next_data_sequence or [])
         self._api_body = api_body
         self._api_body_sequence = list(api_body_sequence or [])
+        self._page_data = page_data
         self.page_source = page_source
         self._dom_chords = list(dom_chords)
+        self.title = title
+        self.current_url = current_url
         self.visited = []
         self.quit_called = False
+        self.page_load_timeout = None
+        self.script_timeout = None
 
     def get(self, url):
         self.visited.append(url)
+        self.current_url = url
 
     def find_element(self, by, value):
         return _FakeElement()
@@ -49,6 +58,8 @@ class _FakeDriver:
         return self._dom_chords
 
     def execute_script(self, script):
+        if '__staticRouterHydrationData' in script:
+            return self._page_data
         if '__NEXT_DATA__' in script:
             if self._next_data_sequence:
                 return self._next_data_sequence.pop(0)
@@ -56,6 +67,12 @@ class _FakeDriver:
         if self._api_body_sequence:
             return self._api_body_sequence.pop(0)
         return self._api_body
+
+    def set_page_load_timeout(self, value):
+        self.page_load_timeout = value
+
+    def set_script_timeout(self, value):
+        self.script_timeout = value
 
     def quit(self):
         self.quit_called = True
@@ -88,9 +105,39 @@ class SafeJsonLoadsTest(TestCase):
 
 
 class FetchSeleniumTest(TestCase):
+    def setUp(self):
+        for target, value in (
+            ('music.services.chordify.CF_CHALLENGE_POLL', 0),
+            ('music.services.chordify.CF_CHALLENGE_TIMEOUT', 0.2),
+            ('music.services.chordify.API_TIMEOUT', 0.2),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def _run(self, driver):
         with patch('music.services.chromedriver.create_chrome_driver', return_value=driver):
             return chordify_service._fetch_selenium('0ZF5em0MTwY'), driver
+
+    def test_api_challenge_clears_and_uses_json(self):
+        api_payload = {
+            'chords': '1000;C:maj;0;2\n1000;F:maj;2;4',
+            'derivedKey': 'C',
+            'derivedBpm': 120,
+        }
+        driver = _FakeDriver(
+            title='Just a moment...',
+            api_body_sequence=[
+                'Just a moment...',
+                '',
+                json.dumps(api_payload),
+            ],
+        )
+        data, created = self._run(driver)
+        self.assertEqual(created.visited, [_API_URL])
+        self.assertEqual(data['chords'], api_payload['chords'])
+        self.assertEqual(data['source'], 'selenium_api')
+        self.assertEqual(created.page_load_timeout, chordify_service.CHORDIFY_PAGE_LOAD_TIMEOUT)
 
     def test_navigates_to_public_page_when_api_unavailable(self):
         driver = _FakeDriver(
@@ -135,6 +182,42 @@ class FetchSeleniumTest(TestCase):
         data, created = self._run(driver)
         self.assertEqual(created.visited, [_API_URL, _PUBLIC_PAGE])
         self.assertIn('1000;C:maj;0;2', data['chords'])
+
+    def test_page_hydration_extracts_chords_bpm_and_key(self):
+        hydration = {
+            'loaderData': {
+                '0-2': {
+                    'chords': {
+                        '_type': 'Success',
+                        'value': {
+                            'chordInfo': {
+                                'derivedBpm': 68,
+                                'derivedKey': 'E:maj',
+                            },
+                            'chords': (
+                                '1;E:maj;0.46;1.34\n'
+                                '2;E:maj;1.34;2.22\n'
+                                '3;D#:maj;2.22;3.08'
+                            ),
+                        },
+                    },
+                },
+            },
+        }
+        driver = _FakeDriver(
+            api_body='Just a moment... performing security verification',
+            page_data={
+                'nextData': '',
+                'initialData': None,
+                'hydrationData': hydration,
+            },
+        )
+        data, created = self._run(driver)
+        self.assertEqual(created.visited, [_API_URL, _PUBLIC_PAGE])
+        self.assertEqual(data['source'], 'page_hydration')
+        self.assertEqual(data['derivedBpm'], 68)
+        self.assertEqual(data['derivedKey'], 'E:maj')
+        self.assertIn('1;E:maj;0.46;1.34', data['chords'])
 
     def test_extracts_next_data_recursively(self):
         payload = {
@@ -233,6 +316,53 @@ class FetchSeleniumTest(TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 chordify_service._fetch_selenium('0ZF5em0MTwY')
         self.assertIn('Selenium indisponível', str(ctx.exception))
+
+
+class RemoteDriverTest(TestCase):
+    @patch('music.services.chromedriver._apply_stealth')
+    @patch('selenium.webdriver.Remote')
+    def test_remote_url_uses_host_profile_options(self, remote, _stealth):
+        remote.return_value = object()
+        env = {
+            'SELENIUM_REMOTE_URL': 'http://host.docker.internal:9515',
+            'CHROME_HOST_BIN': r'C:\Chrome\chrome.exe',
+            'CHROME_HOST_USER_DATA_DIR': r'C:\Perfil',
+            'CHROME_HOST_PROFILE_DIRECTORY': 'Default',
+            'CHROME_HEADLESS': 'false',
+        }
+        with patch.dict(os.environ, env, clear=False):
+            driver = create_chrome_driver()
+
+        remote.assert_called_once()
+        kwargs = remote.call_args.kwargs
+        self.assertEqual(
+            kwargs['command_executor'], 'http://host.docker.internal:9515'
+        )
+        options = kwargs['options']
+        self.assertEqual(options.binary_location, r'C:\Chrome\chrome.exe')
+        self.assertIn(r'--user-data-dir=C:\Perfil', options.arguments)
+        self.assertIn('--profile-directory=Default', options.arguments)
+        self.assertFalse(
+            any(arg.startswith('--user-agent') for arg in options.arguments)
+        )
+        self.assertFalse(
+            any(arg.startswith('--headless') for arg in options.arguments)
+        )
+        self.assertIs(driver, remote.return_value)
+
+    @patch('music.services.chromedriver._apply_stealth')
+    @patch('selenium.webdriver.Remote')
+    def test_remote_headless_flag_is_optional(self, remote, _stealth):
+        remote.return_value = object()
+        env = {
+            'SELENIUM_REMOTE_URL': 'http://host.docker.internal:9515',
+            'CHROME_HEADLESS': 'true',
+        }
+        with patch.dict(os.environ, env, clear=False):
+            create_chrome_driver()
+
+        options = remote.call_args.kwargs['options']
+        self.assertIn('--headless=new', options.arguments)
 
 
 class NormalizeChordSymbolTest(TestCase):

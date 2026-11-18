@@ -14,6 +14,8 @@ import re
 import time
 from typing import Any
 
+from django.conf import settings
+
 logger = logging.getLogger(__name__)
 
 URL_API = (
@@ -32,18 +34,44 @@ _CLOUDFLARE_MARKERS = (
     'checking your browser',
     'attention required!',
     'cf-error',
+    'performing security verification',
+    'security service to protect',
 )
 
 ERROR_BLOCKED = 'chordify_blocked_or_unavailable'
+
+# Linhas da cifra do Chordify: `tempo;nota;inicio;fim` (ex.: `1;E:maj;0.46;1.34`).
+_CHORD_LINE_RE = re.compile(
+    r'^\s*\d+\s*;[^;\n]+\s*;\s*-?\d+(?:\.\d+)?\s*;\s*-?\d+(?:\.\d+)?',
+    re.MULTILINE,
+)
 
 # Quanto tempo esperar o challenge do Cloudflare limpar antes de desistir.
 # Mantém o scraping dentro do limite do router/Gunicorn do Heroku (~30s).
 CF_CHALLENGE_TIMEOUT = 18.0
 CF_CHALLENGE_POLL = 2.0
+CHORDIFY_PAGE_LOAD_TIMEOUT = float(
+    getattr(settings, 'CHORDIFY_PAGE_LOAD_TIMEOUT', 30) or 30
+)
+API_TIMEOUT = float(
+    getattr(settings, 'CHORDIFY_API_TIMEOUT', CF_CHALLENGE_TIMEOUT)
+    or CF_CHALLENGE_TIMEOUT
+)
 NEXT_DATA_JS = (
     "return document.getElementById('__NEXT_DATA__')?.textContent || ''"
 )
 BODY_JSON_JS = "return document.body.innerText || document.body.textContent || ''"
+# A página pública do Chordify (React Router) não usa mais `__NEXT_DATA__`:
+# os acordes/BPM ficam em `window.__staticRouterHydrationData` (chords com
+# timing) e `window.__INITIAL_DATA__` (songAbstract/chordInfo).
+PAGE_DATA_JS = """
+const next = document.getElementById('__NEXT_DATA__');
+return {
+  nextData: (next && next.textContent) || '',
+  initialData: window.__INITIAL_DATA__ || null,
+  hydrationData: window.__staticRouterHydrationData || null,
+};
+"""
 
 # Correções para nomes de notas não convencionais
 NOTE_MAP = {
@@ -280,6 +308,71 @@ def _extract_chords_from_dom(driver: Any) -> dict[str, Any] | None:
         return None
 
 
+def _iter_nested(value: Any):
+    """Percorre recursivamente dicts/listas (sem alterar a estrutura original)."""
+    yield value
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_nested(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_nested(item)
+
+
+def _find_chords_payload(value: Any) -> tuple[str, dict[str, Any]] | None:
+    """Localiza o dict que contém `chords` (string) e, de preferência, `chordInfo`.
+
+    Na hidratação do React Router o dado fica em
+    `...loaderData...chords.value = {chordInfo, chords}`; em outras versões
+    pode estar em `__NEXT_DATA__`. O dict com os dois campos é preferido para
+    evitar pegar cifras de músicas relacionadas.
+    """
+    fallback: tuple[str, dict[str, Any]] | None = None
+    for item in _iter_nested(value):
+        if not isinstance(item, dict):
+            continue
+        chords = item.get('chords')
+        if not isinstance(chords, str) or not _CHORD_LINE_RE.search(chords):
+            continue
+        info = item.get('chordInfo')
+        if isinstance(info, dict) and ('derivedBpm' in info or 'derivedKey' in info):
+            return chords, info
+        if fallback is None:
+            fallback = (chords, info if isinstance(info, dict) else {})
+    return fallback
+
+
+def _extract_from_page_data(data: Any) -> dict[str, Any] | None:
+    """Extrai acordes/BPM das variáveis globais da página pública do Chordify."""
+    if not isinstance(data, dict):
+        return None
+    roots = (data.get('hydrationData'), data.get('initialData'))
+    for root in roots:
+        found = _find_chords_payload(root)
+        if found:
+            chords, info = found
+            payload: dict[str, Any] = {
+                'chords': chords,
+                'chordInfo': info,
+                'source': 'page_hydration',
+            }
+            if info.get('derivedBpm') is not None:
+                payload['derivedBpm'] = info['derivedBpm']
+            if info.get('derivedKey'):
+                payload['derivedKey'] = info['derivedKey']
+            return payload
+    return None
+
+
+def _read_page_data(driver: Any) -> Any:
+    """Lê `__INITIAL_DATA__`/`__staticRouterHydrationData` sem quebrar o fluxo."""
+    try:
+        return driver.execute_script(PAGE_DATA_JS)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug('Chordify[page] falha ao ler dados da página: %s', exc)
+        return None
+
+
 def _wait_next_data(driver: Any, timeout: float = CF_CHALLENGE_TIMEOUT) -> str:
     """Aguarda até que `__NEXT_DATA__` apareça no DOM.
 
@@ -327,12 +420,14 @@ def _wait_next_data(driver: Any, timeout: float = CF_CHALLENGE_TIMEOUT) -> str:
 
 
 def _wait_for_json_body(driver: Any, timeout: float = CF_CHALLENGE_TIMEOUT) -> str:
-    """Aguarda o browser renderizar o texto do endpoint de API.
+    """Aguarda o browser renderizar o JSON do endpoint de API.
 
-    Após `driver.get(api_url)`, o `body.innerText` vira o JSON estruturado
-    (ou a página de verificação do Cloudflare, ou um erro legível). Faz
-    polling até surgir o primeiro corpus não-vazio; a decisão de usar/ignorar
-    fica com o chamador, que já tem o fallback da página pública.
+    Após `driver.get(api_url)`, o `body.innerText` primeiro mostra a página de
+    verificação do Cloudflare ("Just a moment...") e só depois vira o JSON
+    estruturado. Este polling NÃO retorna no primeiro texto não-vazio: ele
+    continua enquanto o conteúdo for challenge/HTML, e só devolve quando
+    encontrar JSON (com ou sem `chords`) ou quando o timeout estourar. Devolver
+    o challenge cedo era o motivo do fallback imediato para a página pública.
     """
     started = time.monotonic()
     deadline = started + timeout
@@ -340,24 +435,60 @@ def _wait_for_json_body(driver: Any, timeout: float = CF_CHALLENGE_TIMEOUT) -> s
     while time.monotonic() < deadline:
         elapsed = time.monotonic() - started
         try:
+            title = str(getattr(driver, 'title', '') or '')
+        except Exception:  # noqa: BLE001
+            title = ''
+        try:
             text = str(driver.execute_script(BODY_JSON_JS) or '').strip()
         except Exception:  # noqa: BLE001
             text = ''
-        if text and text != last_text:
+        if text:
             last_text = text
-            logger.debug(
-                'Chordify api body após %.1fs (len=%d, amostra=%r...)',
-                elapsed,
-                len(text),
-                text[:120],
+            payload = _safe_json_loads(text)
+            if isinstance(payload, dict) and payload.get('chords'):
+                logger.debug(
+                    'Chordify api JSON válido após %.1fs (len=%d).',
+                    elapsed,
+                    len(text),
+                )
+                return text
+            blocked = (
+                _looks_like_blocked_page(text[:1000])
+                or _looks_like_blocked_page(title)
             )
-            return text
+            if not blocked and text[:1] in '{[':
+                logger.debug(
+                    'Chordify api JSON sem chords após %.1fs (len=%d, amostra=%r...)',
+                    elapsed,
+                    len(text),
+                    text[:120],
+                )
+                return text
+            logger.debug(
+                'Chordify api challenge/HTML após %.1fs (título=%r, len=%d); aguardando...',
+                elapsed,
+                title[:80],
+                len(text),
+            )
         time.sleep(CF_CHALLENGE_POLL)
     logger.warning(
-        'Chordify api sem body em %.1fs (timeout).',
+        'Chordify api sem JSON válido em %.1fs (timeout).',
         timeout,
     )
     return last_text
+
+
+def _safe_get(driver: Any, url: str, label: str) -> None:
+    """`driver.get` tolerante a timeout de carregamento (Cloudflare segura a página)."""
+    try:
+        driver.get(url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'Chordify[%s] driver.get(%s) retornou %s; seguindo com o DOM atual.',
+            label,
+            url,
+            exc,
+        )
 
 
 def _fetch_selenium(youtube_id: str) -> dict[str, Any]:
@@ -376,6 +507,15 @@ def _fetch_selenium(youtube_id: str) -> dict[str, Any]:
         driver = create_chrome_driver()
         logger.info('Chordify[driver] ChromeDriver criado em %.1fs',
                     time.monotonic() - t)
+        try:
+            driver.set_page_load_timeout(CHORDIFY_PAGE_LOAD_TIMEOUT)
+            driver.set_script_timeout(10)
+            logger.debug(
+                'Chordify[driver] page_load_timeout=%.1fs script_timeout=10s.',
+                CHORDIFY_PAGE_LOAD_TIMEOUT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug('Chordify[driver] não foi possível ajustar timeouts: %s', exc)
     except Exception as exc:
         logger.error('Chordify[driver] falha ao iniciar ChromeDriver após %.1fs: %s',
                      time.monotonic() - started, exc)
@@ -391,7 +531,7 @@ def _fetch_selenium(youtube_id: str) -> dict[str, Any]:
         # 1) Tenta o endpoint de API (JSON estruturado) num browser real.
         api_url = URL_API.format(youtube_id)
         t = time.monotonic()
-        driver.get(api_url)
+        _safe_get(driver, api_url, 'api')
         logger.info('Chordify[api] GET %s concluído em %.1fs',
                     api_url, time.monotonic() - t)
 
@@ -403,7 +543,7 @@ def _fetch_selenium(youtube_id: str) -> dict[str, Any]:
                     time.monotonic() - t)
 
         t = time.monotonic()
-        api_text = _wait_for_json_body(driver, timeout=CF_CHALLENGE_TIMEOUT)
+        api_text = _wait_for_json_body(driver, timeout=API_TIMEOUT)
         logger.info('Chordify[api] body resolvido em %.1fs (len=%d)',
                     time.monotonic() - t, len(api_text))
 
@@ -415,12 +555,20 @@ def _fetch_selenium(youtube_id: str) -> dict[str, Any]:
                 logger.info('Chordify[fim] ok via selenium_api em %.1fs',
                             time.monotonic() - started)
                 return raw_api
-        logger.info('Chordify[api] sem JSON útil; caindo para a página pública.')
+        try:
+            logger.info(
+                'Chordify[api] sem JSON útil (título=%r, url=%s); '
+                'caindo para a página pública.',
+                str(getattr(driver, 'title', '') or '')[:120],
+                getattr(driver, 'current_url', '-'),
+            )
+        except Exception:  # noqa: BLE001
+            logger.info('Chordify[api] sem JSON útil; caindo para a página pública.')
 
         # 2) Fallback: PÁGINA PÚBLICA da música (nunca para a URL crua da API).
         url = URL_CHORDS_PAGE.format(youtube_id)
         t = time.monotonic()
-        driver.get(url)
+        _safe_get(driver, url, 'navegacao')
         logger.info('Chordify[navegacao] GET %s concluído em %.1fs',
                     url, time.monotonic() - t)
 
@@ -430,6 +578,24 @@ def _fetch_selenium(youtube_id: str) -> dict[str, Any]:
         )
         logger.info('Chordify[body] <body> presente após %.1fs',
                     time.monotonic() - t)
+
+        # 2.1) Hidratação da página pública: tem `chords` com timing + derivedBpm
+        # mesmo quando a API está bloqueada pelo Cloudflare.
+        t = time.monotonic()
+        page_data = _extract_from_page_data(_read_page_data(driver))
+        if page_data:
+            page_data.setdefault('youtube_id', youtube_id)
+            logger.info(
+                'Chordify[fim] ok via page_hydration em %.1fs '
+                '(acordes=%d bpm=%s tom=%s)',
+                time.monotonic() - started,
+                len(get_notes_formatada(page_data['chords'])),
+                page_data.get('derivedBpm') or '-',
+                page_data.get('derivedKey') or '-',
+            )
+            return page_data
+        logger.debug('Chordify[page] hidratação sem acordes em %.3fs; '
+                     'aguardando __NEXT_DATA__/DOM.', time.monotonic() - t)
 
         # Espere o __NEXT_DATA__ (isso também dá tempo do CF challenge resolver).
         t = time.monotonic()

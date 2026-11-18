@@ -13,6 +13,7 @@ from django.db.models import (
     DateTimeField,
     F,
     IntegerField,
+    Max,
     Prefetch,
     Q,
     Value,
@@ -122,6 +123,7 @@ from .serializers import (
     PublicInviteMetaSerializer,
     PrayerRequestSerializer,
     PublicPrayerRequestSerializer,
+    PublicVisitorCreateSerializer,
     SundaySchoolClassSerializer,
     SundaySchoolEnrollmentSerializer,
     SundaySchoolSessionSerializer,
@@ -1712,6 +1714,7 @@ class ChurchPublicLinkViewSet(viewsets.ModelViewSet):
         (ChurchPublicLink.LinkType.CALENDAR, 'Agenda de Cultos', 'calendar'),
         (ChurchPublicLink.LinkType.MEMBERSHIP, 'Ficha de Membro / Cadastro', 'user-plus'),
         (ChurchPublicLink.LinkType.PRAYER, 'Pedido de Oração', 'pray'),
+        (ChurchPublicLink.LinkType.VISITOR, 'Cadastro de Visitante', 'user-heart'),
         (ChurchPublicLink.LinkType.GROWTH_GROUPS, 'Grupos de Crescimento', 'users'),
     )
 
@@ -1726,34 +1729,52 @@ class ChurchPublicLinkViewSet(viewsets.ModelViewSet):
         return super().list(request, *args, **kwargs)
 
     def _ensure_defaults(self, church):
-        """Garante os links padrão (Agenda de Cultos / Ficha de Membro) como
-        itens do painel, para que possam ser reposicionados pelo usuário."""
+        """Garante os links padrão do painel, preservando a ordem existente.
+
+        Novos tipos de sistema são inseridos de forma idempotente e o
+        visitante é posicionado adjacente ao pedido de oração, sem o
+        deslocamento em massa que o comportamento anterior fazia.
+        """
         if church is None:
             return
-        stored = set(
-            church.public_links.filter(
-                link_type__in=[lt for lt, _, _ in self.DEFAULT_LINKS]
-            ).values_list('link_type', flat=True)
-        )
-        missing = [d for d in self.DEFAULT_LINKS if d[0] not in stored]
-        if not missing:
-            return
+        defaults_by_type = {lt: (lt, title, icon) for lt, title, icon in self.DEFAULT_LINKS}
         with transaction.atomic():
-            count = church.public_links.count()
-            if count:
-                ChurchPublicLink.objects.filter(church=church).update(
-                    order=F('order') + len(missing)
-                )
-            for i, (link_type, title, icon) in enumerate(missing):
-                ChurchPublicLink.objects.create(
-                    church=church,
-                    title=title,
-                    link_type=link_type,
-                    icon_key=icon,
-                    order=i,
-                    highlight=False,
-                )
+            stored = {
+                link.link_type: link
+                for link in church.public_links.filter(link_type__in=list(defaults_by_type.keys()))
+            }
+            missing_types = [lt for lt, _, _ in self.DEFAULT_LINKS if lt not in stored]
+            if missing_types:
+                max_order = church.public_links.aggregate(m=Max('order'))['m']
+                next_order = (max_order if max_order is not None else -1) + 1
+                for lt in missing_types:
+                    link_type, title, icon = defaults_by_type[lt]
+                    stored[lt] = ChurchPublicLink.objects.create(
+                        church=church,
+                        title=title,
+                        link_type=link_type,
+                        icon_key=icon,
+                        order=next_order,
+                        highlight=False,
+                    )
+                    next_order += 1
 
+            visitor = stored.get(ChurchPublicLink.LinkType.VISITOR)
+            prayer = stored.get(ChurchPublicLink.LinkType.PRAYER)
+            if visitor and prayer and visitor.order != prayer.order + 1:
+                desired = prayer.order + 1
+                if visitor.order < desired:
+                    (church.public_links
+                     .filter(order__gt=visitor.order, order__lte=desired)
+                     .exclude(pk=visitor.pk)
+                     .update(order=F('order') - 1))
+                else:
+                    (church.public_links
+                     .filter(order__gte=desired, order__lt=visitor.order)
+                     .exclude(pk=visitor.pk)
+                     .update(order=F('order') + 1))
+                visitor.order = desired
+                visitor.save(update_fields=['order'])
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context['church'] = self.request.user.church
@@ -3498,6 +3519,58 @@ class PublicPrayerRequestView(APIView):
         )
         return Response(
             PublicPrayerRequestSerializer(prayer_request).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PublicVisitorView(APIView):
+    """Cadastro público de visitantes via agregador de links (/p/<slug>/visitante)."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'public_visitor'
+
+    def _resolve_church(self, slug):
+        church = (
+            Church.objects.filter(slug=slug, public_links_enabled=True).first()
+            or Church.objects.filter(links_hash=slug, public_links_enabled=True).first()
+        )
+        if church is None:
+            raise NotFound('Página não encontrada.')
+        return church
+
+    def get(self, request, slug):
+        church = self._resolve_church(slug)
+        return Response({
+            'church_name': church.name,
+            'church_city': church.city or '',
+            'church_state': church.state or '',
+        })
+
+    def post(self, request, slug):
+        church = self._resolve_church(slug)
+        serializer = PublicVisitorCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        member = Member.objects.create(
+            church=church,
+            name=data['name'],
+            phone=data['phone'],
+            how_known=data.get('how_known') or '',
+            wants_visit=bool(data.get('wants_visit')),
+            cep=data.get('cep') or '',
+            street=data.get('street') or '',
+            number=data.get('number') or '',
+            complement=data.get('complement') or '',
+            neighborhood=data.get('neighborhood') or '',
+            city=data.get('city') or '',
+            state=data.get('state') or '',
+            lifecycle_stage=Member.LifecycleStage.VISITOR,
+            status=Member.Status.ACTIVE,
+        )
+        return Response(
+            {'id': member.id, 'name': member.name},
             status=status.HTTP_201_CREATED,
         )
 
