@@ -847,7 +847,8 @@ class MemberSerializer(serializers.ModelSerializer):
             'how_known', 'wants_visit',
             'lifecycle_stage', 'lifecycle_stage_display', 'last_contact_at',
             'street', 'number', 'complement',             'neighborhood', 'city', 'state', 'cep',
-            'latitude', 'longitude',
+            'latitude', 'longitude', 'location_source', 'geocode_status',
+            'geocoded_at',
             'public_hash', 'qr_hash',
             'discipler', 'discipler_name', 'discipler_phone', 'discipler_photo',
             'discipler_is_sentinel',
@@ -861,6 +862,7 @@ class MemberSerializer(serializers.ModelSerializer):
             'public_hash', 'qr_hash', 'last_contact_at',
             'discipler_assigned_at', 'discipler_assigned_by', 'source_hash',
             'stage_entered_at', 'sla_state', 'sla_days_waiting',
+            'geocode_status', 'geocoded_at',
         ]
 
     def get_analysis(self, obj):
@@ -963,6 +965,26 @@ class MemberSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {'longitude': ['Longitude fora do intervalo válido.']}
             )
+        attrs.pop('geocode_status', None)
+        attrs.pop('geocoded_at', None)
+        coords = services.valid_member_coordinates(latitude, longitude) \
+            if latitude is not None and longitude is not None else None
+        if coords:
+            attrs['latitude'], attrs['longitude'] = coords
+            source = attrs.get(
+                'location_source',
+                getattr(self.instance, 'location_source', None),
+            )
+            if source not in Member.LocationSource.values:
+                source = Member.LocationSource.GEOCODED
+            attrs['location_source'] = source
+            attrs['geocode_status'] = Member.GeocodeStatus.FOUND
+            attrs['geocoded_at'] = timezone.now()
+        else:
+            attrs.pop('location_source', None)
+            if 'latitude' in attrs:
+                attrs['geocode_status'] = Member.GeocodeStatus.PENDING
+                attrs['geocoded_at'] = None
         church_entry = attrs.get('church_entry')
         if church_entry is None and self.instance:
             church_entry = self.instance.church_entry
@@ -1039,6 +1061,7 @@ class MemberSerializer(serializers.ModelSerializer):
             if not member.card_number:
                 member.card_number = services.next_member_card_number(member.church)
                 member.save(update_fields=['card_number'])
+        services.geocode_member_and_save(member)
         return member
 
     def update(self, instance, validated_data):
@@ -1052,6 +1075,12 @@ class MemberSerializer(serializers.ModelSerializer):
         member = super().update(instance, validated_data)
         if relatives is not None:
             self._sync_relatives(member, list(relatives))
+        address_fields = {
+            'street', 'number', 'complement', 'neighborhood',
+            'city', 'state', 'cep',
+        }
+        if address_fields.intersection(validated_data):
+            services.geocode_member_and_save(member)
         return member
 
 
@@ -1670,7 +1699,8 @@ class PublicMemberFormPrefillSerializer(serializers.ModelSerializer):
             'born_in_city', 'born_in_state', 'profession', 'education_level',
             'marital_status', 'marriage_date', 'father_name', 'mother_name',
             'church_entry', 'church_entry_other', 'street', 'number', 'complement',
-            'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
+            'neighborhood', 'city', 'state', 'cep', 'latitude', 'longitude',
+            'location_source', 'notes', 'photo', 'relatives',
         ]
 
 

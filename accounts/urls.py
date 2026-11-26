@@ -120,6 +120,16 @@ urlpatterns = [
         name='member-locations',
     ),
     path(
+        'members/locations/geocode/',
+        viewsets.MemberLocationsGeocodeView.as_view(),
+        name='member-locations-geocode',
+    ),
+    path(
+        'members/<int:pk>/geocode/',
+        viewsets.MemberGeocodeView.as_view(),
+        name='member-geocode',
+    ),
+    path(
         'members/<int:pk>/declaration/',
         viewsets.MemberDeclarationView.as_view(),
         name='member-declaration',

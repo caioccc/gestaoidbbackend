@@ -17,6 +17,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction as db_transaction
 from django.template.loader import render_to_string
+from django.utils import timezone
 from urllib.parse import unquote
 
 
@@ -25,7 +26,8 @@ PUBLIC_MEMBER_EDIT_FIELDS = (
     'born_in_city', 'born_in_state', 'profession', 'education_level',
     'marital_status', 'marriage_date', 'father_name', 'mother_name',
     'church_entry', 'church_entry_other', 'street', 'number', 'complement',
-    'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
+    'neighborhood', 'city', 'state', 'cep', 'latitude', 'longitude',
+    'location_source', 'notes', 'photo', 'relatives',
 )
 
 PIX_KEY_TYPES = ('CNPJ', 'CPF', 'Telefone', 'E-mail', 'Chave Aleatória')
@@ -339,7 +341,7 @@ def cloudinary_url(field):
 
 def apply_public_member_data(member, data, clear_photo_when_empty=False):
     """Aplica ao membro os campos validados do formulário público."""
-    from .models import MemberRelative
+    from .models import Member, MemberRelative
 
     values = dict(data)
     for date_field in ('birth_date', 'marriage_date'):
@@ -357,11 +359,28 @@ def apply_public_member_data(member, data, clear_photo_when_empty=False):
         member.photo = None
 
     for field in PUBLIC_MEMBER_EDIT_FIELDS:
-        if field in values and field not in ('name', 'photo', 'relatives'):
+        if field in values and field not in (
+            'name', 'photo', 'relatives', 'latitude', 'longitude',
+            'location_source',
+        ):
             setattr(member, field, values[field])
     if values.get('name'):
         member.name = values['name'].strip()
+    coords = valid_member_coordinates(
+        values.get('latitude'), values.get('longitude')
+    )
+    if coords:
+        member.latitude, member.longitude = coords
+        source = values.get('location_source')
+        if source in Member.LocationSource.values:
+            member.location_source = source
+        else:
+            member.location_source = Member.LocationSource.GEOCODED
+        member.geocode_status = Member.GeocodeStatus.FOUND
+        member.geocoded_at = timezone.now()
     member.save()
+    if not coords:
+        geocode_member_and_save(member)
 
     member.relatives.all().delete()
     for rel in relatives:
@@ -787,6 +806,7 @@ def import_member_rows(church, file, mapping: dict, dry_run: bool = False) -> di
         return result
 
     if not dry_run:
+        created_members = []
         with db_transaction.atomic():
             for data in parsed_rows:
                 line = data.pop('line')
@@ -796,8 +816,11 @@ def import_member_rows(church, file, mapping: dict, dry_run: bool = False) -> di
                     card_number=card,
                     **data,
                 )
+                created_members.append(member)
                 rows_by_line[line] = ('created', member.id)
                 result['imported'] += 1
+        for member in created_members:
+            geocode_member_and_save(member)
     else:
         for data in parsed_rows:
             line = data.pop('line')
@@ -1529,6 +1552,7 @@ def receive_member_transfer(target_church, transfer, by_user) -> object:
             pk=transfer.source_member_id,
             church=transfer.source_church,
         ).update(status=Member.Status.INACTIVE)
+    geocode_member_and_save(member)
     return member
 
 
@@ -2241,6 +2265,7 @@ def geocode_member_address(member):
                 'format': 'json',
                 'limit': 1,
                 'addressdetails': 0,
+                'countrycodes': 'br',
             },
             headers={
                 'User-Agent': getattr(
@@ -2254,9 +2279,158 @@ def geocode_member_address(member):
         response.raise_for_status()
         results = response.json()
         if results:
-            coords = (float(results[0]['lat']), float(results[0]['lon']))
+            latitude = float(results[0]['lat'])
+            longitude = float(results[0]['lon'])
+            if -90 <= latitude <= 90 and -180 <= longitude <= 180:
+                coords = (latitude, longitude)
     except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        coords = None
+        return None
 
     cache.set(cache_key, coords or 'none', MEMBER_GEOCODE_CACHE_TTL)
     return coords
+
+
+def valid_member_coordinates(latitude, longitude):
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        return None
+    return latitude, longitude
+
+
+def persist_member_geocode(
+    member, latitude, longitude, force=False,
+    source='GEOCODED',
+):
+    coords = valid_member_coordinates(latitude, longitude)
+    if coords is None:
+        return False
+    from .models import Member
+
+    queryset = Member.objects.filter(pk=member.pk)
+    if not force:
+        queryset = queryset.filter(
+            latitude__isnull=True, longitude__isnull=True
+        )
+    if source not in Member.LocationSource.values:
+        source = Member.LocationSource.GEOCODED
+    updated = queryset.update(
+        latitude=coords[0],
+        longitude=coords[1],
+        geocode_status=Member.GeocodeStatus.FOUND,
+        geocoded_at=timezone.now(),
+        location_source=source,
+    )
+    if updated:
+        member.latitude, member.longitude = coords
+        member.geocode_status = Member.GeocodeStatus.FOUND
+        member.geocoded_at = timezone.now()
+        member.location_source = source
+    return bool(updated)
+
+
+def set_member_geocode_status(member, status, source=None):
+    from .models import Member
+
+    if status not in Member.GeocodeStatus.values:
+        return False
+    values = {'geocode_status': status, 'geocoded_at': None}
+    if source in Member.LocationSource.values:
+        values['location_source'] = source
+    updated = Member.objects.filter(pk=member.pk).update(**values)
+    if updated:
+        member.geocode_status = status
+        if source in Member.LocationSource.values:
+            member.location_source = source
+        member.geocoded_at = None
+    return bool(updated)
+
+
+def geocode_member(member, force=False):
+    from .models import Member
+
+    result = {
+        'id': member.pk,
+        'status': 'error',
+        'latitude': member.latitude,
+        'longitude': member.longitude,
+    }
+    if (
+        not force
+        and member.latitude is not None
+        and member.longitude is not None
+    ):
+        result['status'] = 'already_located'
+        return result
+    if not member_location_query(member):
+        set_member_geocode_status(
+            member, Member.GeocodeStatus.PENDING, Member.LocationSource.UNKNOWN
+        )
+        result['status'] = 'no_address'
+        return result
+
+    cache_key = member_geocode_cache_key(member)
+    if force:
+        cache.delete(cache_key)
+    else:
+        cached = cache.get(cache_key)
+        if cached == 'none':
+            set_member_geocode_status(
+                member, Member.GeocodeStatus.NOT_FOUND
+            )
+            result['status'] = 'not_found'
+            return result
+        if cached is not None:
+            coords = valid_member_coordinates(cached[0], cached[1]) \
+                if isinstance(cached, (list, tuple)) and len(cached) == 2 \
+                else None
+            if coords and persist_member_geocode(member, coords[0], coords[1]):
+                result.update({
+                    'status': 'located',
+                    'latitude': coords[0],
+                    'longitude': coords[1],
+                })
+                return result
+
+    try:
+        coords = geocode_member_address(member)
+    except Exception:
+        set_member_geocode_status(member, Member.GeocodeStatus.ERROR)
+        return result
+
+    if not coords:
+        status = (
+            Member.GeocodeStatus.NOT_FOUND
+            if cache.get(cache_key) == 'none'
+            else Member.GeocodeStatus.ERROR
+        )
+        set_member_geocode_status(member, status)
+        result['status'] = 'not_found' if status == Member.GeocodeStatus.NOT_FOUND else 'error'
+        return result
+
+    if persist_member_geocode(member, coords[0], coords[1]):
+        result.update({
+            'status': 'located',
+            'latitude': coords[0],
+            'longitude': coords[1],
+        })
+        return result
+    set_member_geocode_status(member, Member.GeocodeStatus.ERROR)
+    return result
+
+
+def geocode_members(members, force=False, limit=None):
+    results = []
+    for index, member in enumerate(members):
+        if limit and index >= limit:
+            break
+        results.append(geocode_member(member, force=force))
+    return results
+
+
+def geocode_member_and_save(member):
+    result = geocode_member(member)
+    return result['status'] == 'located'

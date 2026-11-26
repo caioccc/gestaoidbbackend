@@ -134,6 +134,18 @@ ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
 MAX_MEMBER_GEOCODES_PER_REQUEST = 12
 
 
+def _geocode_force(value):
+    return value is True or value in ('true', 'True', '1', 1)
+
+
+def _geocode_limit(value):
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return MAX_MEMBER_GEOCODES_PER_REQUEST
+    return max(1, min(limit, MAX_MEMBER_GEOCODES_PER_REQUEST))
+
+
 def _query_date(value):
     """Query param de data em `YYYY-MM-DD`, ou `None` se não for utilizável.
 
@@ -2385,7 +2397,7 @@ class MemberQrRegenerateView(APIView):
 
 
 class MemberLocationsView(APIView):
-    """Pontos manuais dos membros, com geolocalização dinâmica por endereço."""
+    """Pontos dos membros, com geolocalização persistida a partir do endereço."""
 
     permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
 
@@ -2393,52 +2405,47 @@ class MemberLocationsView(APIView):
         church = request.user.church
         if church is None:
             raise NotFound('Você não tem uma igreja ativa.')
-        members = Member.objects.filter(
+        members = list(Member.objects.filter(
             church=church, is_sentinel=False
-        ).order_by('name')
+        ).order_by('name'))
         grouped = {}
         missing = []
         geocoded_total = 0
-        geocode_attempts = 0
+        address_total = 0
+        pending_total = 0
         for member in members:
             address = _format_member_location_address(member)
+            has_address = bool(services.member_location_query(member))
+            if has_address:
+                address_total += 1
             latitude = member.latitude
             longitude = member.longitude
-            source = 'manual'
-            reason = ''
+            source = 'geocoded' \
+                if member.location_source == Member.LocationSource.GEOCODED \
+                else 'manual'
             if latitude is None or longitude is None:
-                if not services.member_location_query(member):
+                if not has_address:
                     reason = 'no_address'
+                elif member.geocode_status == Member.GeocodeStatus.NOT_FOUND:
+                    reason = 'not_found'
+                elif member.geocode_status == Member.GeocodeStatus.ERROR:
+                    reason = 'error'
                 else:
-                    cached = services.get_cached_member_geocode(member)
-                    if cached is not None:
-                        if cached == 'none':
-                            reason = 'not_found'
-                        else:
-                            latitude, longitude = cached
-                            source = 'geocoded'
-                            geocoded_total += 1
-                    elif geocode_attempts >= MAX_MEMBER_GEOCODES_PER_REQUEST:
-                        reason = 'quota'
-                    else:
-                        geocode_attempts += 1
-                        coords = services.geocode_member_address(member)
-                        if coords:
-                            latitude, longitude = coords
-                            source = 'geocoded'
-                            geocoded_total += 1
-                        else:
-                            reason = 'not_found'
-                if latitude is None or longitude is None:
-                    missing.append({
-                        'id': member.id,
-                        'name': member.name,
-                        'status': member.status,
-                        'status_display': member.get_status_display(),
-                        'address': address,
-                        'reason': reason,
-                    })
-                    continue
+                    reason = 'pending'
+                if has_address and member.geocode_status != Member.GeocodeStatus.NOT_FOUND:
+                    pending_total += 1
+                missing.append({
+                    'id': member.id,
+                    'name': member.name,
+                    'status': member.status,
+                    'status_display': member.get_status_display(),
+                    'address': address,
+                    'geocode_status': member.geocode_status,
+                    'reason': reason,
+                })
+                continue
+            if member.location_source == Member.LocationSource.GEOCODED:
+                geocoded_total += 1
             key = (round(float(latitude), 5), round(float(longitude), 5))
             grouped.setdefault(key, []).append({
                 'id': member.id,
@@ -2481,12 +2488,72 @@ class MemberLocationsView(APIView):
             'points': points,
             'missing': missing,
             'counts': {
-                'members': members.count(),
+                'members': len(members),
                 'points': len(points),
                 'missing': len(missing),
                 'geocoded': geocoded_total,
+                'withAddress': address_total,
+                'pending': pending_total,
+                'ready': pending_total == 0,
             },
         })
+
+
+class MemberGeocodeView(APIView):
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+
+    def post(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Você não tem uma igreja ativa.')
+        member = Member.objects.filter(
+            pk=pk, church=church, is_sentinel=False
+        ).first()
+        if member is None:
+            raise NotFound('Membro não encontrado.')
+        force = _geocode_force(request.data.get('force'))
+        return Response(services.geocode_member(member, force=force))
+
+
+class MemberLocationsGeocodeView(APIView):
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+
+    def post(self, request):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Você não tem uma igreja ativa.')
+        force = _geocode_force(request.data.get('force'))
+        member_ids = request.data.get('member_ids')
+        queryset = Member.objects.filter(church=church, is_sentinel=False)
+        if member_ids is not None:
+            if not isinstance(member_ids, list):
+                raise ValidationError({'member_ids': 'Lista inválida.'})
+            try:
+                member_ids = [int(value) for value in member_ids]
+            except (TypeError, ValueError):
+                raise ValidationError({'member_ids': 'Lista inválida.'})
+            queryset = queryset.filter(pk__in=member_ids)
+        else:
+            queryset = queryset.filter(
+                latitude__isnull=True, longitude__isnull=True
+            )
+            if not force:
+                queryset = queryset.exclude(
+                    geocode_status=Member.GeocodeStatus.NOT_FOUND
+                )
+        limit = _geocode_limit(request.data.get('limit'))
+        results = services.geocode_members(
+            queryset.order_by('name'), force=force, limit=limit
+        )
+        counts = {
+            status_name: sum(
+                1 for result in results if result['status'] == status_name
+            )
+            for status_name in (
+                'located', 'already_located', 'not_found', 'no_address', 'error'
+            )
+        }
+        return Response({'results': results, 'counts': counts})
 
 
 class PublicQrValidationView(APIView):
@@ -2847,6 +2914,7 @@ class MemberSubmissionReviewView(APIView):
         submission.member.card_number = services.next_member_card_number(submission.church)
         submission.member.save(update_fields=['card_number'])
         self._create_relatives(submission.member, relatives)
+        services.geocode_member_and_save(submission.member)
         submission.notes = 'Candidato criado a partir do formulário público.'
 
     @staticmethod
@@ -3830,6 +3898,7 @@ class PublicVisitorView(APIView):
             lifecycle_stage=Member.LifecycleStage.VISITOR,
             status=Member.Status.ACTIVE,
         )
+        services.geocode_member_and_save(member)
         return Response(
             {'id': member.id, 'name': member.name},
             status=status.HTTP_201_CREATED,

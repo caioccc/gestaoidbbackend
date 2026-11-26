@@ -422,6 +422,17 @@ class Member(models.Model):
         SUPERIOR = 'SUPERIOR', 'Ensino Superior'
         POS_GRADUACAO = 'POS_GRADUACAO', 'Pós-graduação'
 
+    class GeocodeStatus(models.TextChoices):
+        PENDING = 'PENDING', 'Pendente'
+        FOUND = 'FOUND', 'Localizado'
+        NOT_FOUND = 'NOT_FOUND', 'Não encontrado'
+        ERROR = 'ERROR', 'Erro'
+
+    class LocationSource(models.TextChoices):
+        UNKNOWN = 'UNKNOWN', 'Desconhecido'
+        MANUAL = 'MANUAL', 'Manual'
+        GEOCODED = 'GEOCODED', 'Geolocalizado'
+
     church = models.ForeignKey(
         Church,
         on_delete=models.CASCADE,
@@ -540,6 +551,23 @@ class Member(models.Model):
     cep = models.CharField('CEP', max_length=9, blank=True)
     latitude = models.FloatField('Latitude do ponto no mapa', null=True, blank=True)
     longitude = models.FloatField('Longitude do ponto no mapa', null=True, blank=True)
+    geocode_status = models.CharField(
+        'Status da geolocalização',
+        max_length=16,
+        choices=GeocodeStatus.choices,
+        default=GeocodeStatus.PENDING,
+        blank=True,
+    )
+    geocoded_at = models.DateTimeField(
+        'Geolocalizado em', null=True, blank=True,
+    )
+    location_source = models.CharField(
+        'Origem do ponto',
+        max_length=16,
+        choices=LocationSource.choices,
+        default=LocationSource.UNKNOWN,
+        blank=True,
+    )
 
     # Cuidado pastoral: quem responde por este membro no funil de visitantes.
     user = models.OneToOneField(
