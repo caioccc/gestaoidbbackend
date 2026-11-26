@@ -28,6 +28,60 @@ PUBLIC_MEMBER_EDIT_FIELDS = (
     'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
 )
 
+PIX_KEY_TYPES = ('CNPJ', 'CPF', 'Telefone', 'E-mail', 'Chave Aleatória')
+
+
+def normalize_pix_key(key, pix_type):
+    value = str(key or '').strip()
+    if pix_type == 'CPF':
+        return re.sub(r'\D', '', value)
+    if pix_type == 'CNPJ':
+        return re.sub(r'[^0-9A-Za-z]', '', value).upper()
+    if pix_type == 'Telefone':
+        digits = re.sub(r'\D', '', value)
+        if len(digits) == 12 and digits.startswith('55'):
+            return f'+55{digits[2:]}'
+        if len(digits) in (10, 11):
+            return f'+55{digits}'
+        return f'+{digits}'
+    return value
+
+
+def validate_pix_key(key, pix_type):
+    value = str(key or '').strip()
+    if not value:
+        return 'Informe a chave PIX para este link.'
+    if pix_type not in PIX_KEY_TYPES:
+        return 'Selecione um tipo de chave PIX válido.'
+
+    valid = False
+    if pix_type == 'CPF':
+        valid = len(re.sub(r'\D', '', value)) == 11
+    elif pix_type == 'CNPJ':
+        normalized = re.sub(r'[^0-9A-Za-z]', '', value)
+        valid = len(normalized) == 14 and normalized.isalnum()
+    elif pix_type == 'Telefone':
+        digits = re.sub(r'\D', '', value)
+        valid = len(digits) in (10, 11) or (
+            digits.startswith('55') and len(digits) in (12, 13)
+        )
+    elif pix_type == 'E-mail':
+        valid = len(value) <= 77 and bool(
+            re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', value)
+        )
+    elif pix_type == 'Chave Aleatória':
+        valid = bool(re.fullmatch(
+            r'(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})',
+            value,
+            re.IGNORECASE,
+        ))
+
+    if not valid:
+        return f'Chave PIX inválida para o tipo {pix_type}.'
+    if len(normalize_pix_key(value, pix_type)) > 77:
+        return 'A chave PIX deve ter no máximo 77 caracteres.'
+    return None
+
 
 def next_member_card_number(church) -> str:
     """Próxima matrícula sequencial por igreja (ex.: '0007'), sem prefixo.
