@@ -6,12 +6,24 @@ e notificações de aprovação/rejeição de congregações.
 import base64
 import logging
 import re
+import unicodedata
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction as db_transaction
 from django.template.loader import render_to_string
+from urllib.parse import unquote
+
+
+PUBLIC_MEMBER_EDIT_FIELDS = (
+    'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+    'born_in_city', 'born_in_state', 'profession', 'education_level',
+    'marital_status', 'marriage_date', 'father_name', 'mother_name',
+    'church_entry', 'church_entry_other', 'street', 'number', 'complement',
+    'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
+)
+
 
 def next_member_card_number(church) -> str:
     """Próxima matrícula sequencial por igreja (ex.: '0007'), sem prefixo.
@@ -265,6 +277,81 @@ def cloudinary_url(field):
         return getattr(field, 'url', None) or (field.name if field.name else None)
     except Exception:  # noqa: BLE001
         return field.name if getattr(field, 'name', None) else None
+
+
+def apply_public_member_data(member, data, clear_photo_when_empty=False):
+    """Aplica ao membro os campos validados do formulário público."""
+    from .models import MemberRelative
+
+    values = dict(data)
+    for date_field in ('birth_date', 'marriage_date'):
+        if values.get(date_field) in (None, ''):
+            values[date_field] = None
+    photo_raw = values.pop('photo', '') or ''
+    relatives = values.pop('relatives', None) or []
+    if not isinstance(relatives, list):
+        relatives = []
+
+    photo_file = data_url_to_file(photo_raw, 'member_photo.png')
+    if photo_file is not None:
+        member.photo = photo_file
+    elif clear_photo_when_empty and not photo_raw:
+        member.photo = None
+
+    for field in PUBLIC_MEMBER_EDIT_FIELDS:
+        if field in values and field not in ('name', 'photo', 'relatives'):
+            setattr(member, field, values[field])
+    if values.get('name'):
+        member.name = values['name'].strip()
+    member.save()
+
+    member.relatives.all().delete()
+    for rel in relatives:
+        MemberRelative.objects.create(
+            member=member,
+            name=(rel.get('name') or '').strip(),
+            kinship=rel.get('kinship'),
+            birth_date=rel.get('birth_date') or None,
+            phone=(rel.get('phone') or '').strip(),
+        )
+    return member
+
+
+def normalize_qr_code(value):
+    text = unquote(str(value or '').strip())
+    if not text:
+        return ''
+    text = text.split('?', 1)[0].rstrip('/')
+    if '/' in text:
+        text = text.split('/')[-1]
+    return text.replace(' ', '').upper()
+
+
+def resolve_qr_code(code, context=None):
+    from .models import Member
+
+    normalized = normalize_qr_code(code)
+    if not normalized:
+        return None
+    member = (
+        Member.objects.select_related('church')
+        .filter(
+            qr_hash=normalized,
+            status=Member.Status.ACTIVE,
+            church__status='ACTIVE',
+            is_sentinel=False,
+        )
+        .first()
+    )
+    if member is None:
+        return None
+    return {
+        'kind': 'member',
+        'code': normalized,
+        'member': member,
+        'context': context,
+        'url': f'{settings.FRONTEND_URL}/validar/{normalized}',
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1806,3 +1893,225 @@ def build_sunday_school_report_pdf(church, report) -> bytes:
     if pisa_status.err:
         raise RuntimeError('Erro ao gerar o PDF do relatório mensal de EBD.')
     return output.getvalue()
+
+
+MEMBER_PROFILE_OPTIONAL_FIELDS = (
+    'email', 'birth_date', 'baptism_date', 'cpf', 'born_in_city',
+    'born_in_state', 'profession', 'education_level', 'marital_status',
+    'marriage_date', 'father_name', 'mother_name', 'church_entry',
+    'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
+)
+
+MEMBER_DUPLICATE_FIELDS = (
+    ('name_duplicate', 'name', 'name'),
+    ('cpf_duplicate', 'cpf', 'cpf'),
+    ('rg_duplicate', 'rg', 'rg'),
+    ('phone_duplicate', 'phone', 'phone'),
+)
+
+SUBMISSION_DUPLICATE_FIELDS = (
+    ('name_exists', 'name', 'name'),
+    ('cpf_exists', 'cpf', 'cpf'),
+    ('email_exists', 'email', 'email'),
+)
+
+
+def _analysis_text(value):
+    text = unicodedata.normalize('NFKD', str(value or '')).encode('ascii', 'ignore').decode('ascii')
+    return text.strip().lower()
+
+
+def _analysis_name(value):
+    return re.sub(r'\s+', ' ', _analysis_text(value))
+
+
+def _analysis_code(value):
+    return re.sub(r'[^a-z0-9]', '', _analysis_text(value))
+
+
+def _analysis_digits(value):
+    return re.sub(r'\D', '', str(value or ''))
+
+
+def _analysis_entry(pk, name, card_number):
+    return {
+        'id': pk,
+        'name': name or '',
+        'card_number': card_number or '',
+    }
+
+
+def build_member_analysis_index(members):
+    index = {
+        'name': {},
+        'cpf': {},
+        'rg': {},
+        'email': {},
+        'phone': {},
+        'by_id': {},
+    }
+    for member in members:
+        entry = _analysis_entry(member.pk, member.name, member.card_number)
+        index['by_id'][member.pk] = entry
+        values = (
+            ('name', _analysis_name(member.name)),
+            ('cpf', _analysis_code(member.cpf)),
+            ('rg', _analysis_code(member.rg)),
+            ('email', (member.email or '').strip().lower()),
+            ('phone', _analysis_digits(member.phone)),
+        )
+        for key, value in values:
+            if value:
+                index[key].setdefault(value, []).append(entry)
+    return index
+
+
+def _analysis_matches(index, key, value, exclude_id=None):
+    normalized = _analysis_name(value) if key == 'name' else _analysis_code(value) if key in ('cpf', 'rg') else (
+        (value or '').strip().lower() if key == 'email' else _analysis_digits(value)
+    )
+    if not normalized:
+        return []
+    return [
+        entry for entry in index.get(key, {}).get(normalized, [])
+        if entry['id'] != exclude_id
+    ]
+
+
+def _analysis_issue(code, severity, **extra):
+    issue = {'code': code, 'severity': severity}
+    issue.update(extra)
+    return issue
+
+
+def _analysis_result(issues):
+    return {
+        'has_issues': bool(issues),
+        'has_critical': any(issue['severity'] == 'critical' for issue in issues),
+        'issues': issues,
+    }
+
+
+def _add_duplicate_issues(issues, index, exclude_id, fields, severity='critical'):
+    for code, key, field in fields:
+        matches = _analysis_matches(index, key, field[1], exclude_id)
+        if matches:
+            issues.append(_analysis_issue(code, severity, matches=matches, fields=[field[0]]))
+
+
+def _missing_registered_names(index, names, exclude_id=None):
+    missing = []
+    seen = set()
+    for name in names:
+        display = str(name or '').strip()
+        normalized = _analysis_name(display)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if not _analysis_matches(index, 'name', normalized, exclude_id):
+            missing.append(display)
+    return missing
+
+
+def _default_member_analysis_index(instance):
+    from .models import Member
+
+    church_id = getattr(instance, 'church_id', None)
+    if church_id is None:
+        return build_member_analysis_index([])
+    return build_member_analysis_index(
+        Member.objects.filter(church_id=church_id).exclude(is_sentinel=True)
+    )
+
+
+def member_analysis(member, index=None):
+    if index is None:
+        index = _default_member_analysis_index(member)
+    issues = []
+    duplicate_fields = tuple(
+        (code, key, (field, getattr(member, field, '')))
+        for code, key, field in MEMBER_DUPLICATE_FIELDS
+    )
+    _add_duplicate_issues(issues, index, member.pk, duplicate_fields)
+
+    missing_fields = [
+        field for field in MEMBER_PROFILE_OPTIONAL_FIELDS
+        if not str(getattr(member, field, '') or '').strip()
+    ]
+    if (
+        getattr(member, 'church_entry', None) == 'OUTRO'
+        and not str(getattr(member, 'church_entry_other', '') or '').strip()
+    ):
+        missing_fields.append('church_entry_other')
+    if missing_fields:
+        issues.append(_analysis_issue('missing_fields', 'alert', fields=missing_fields))
+
+    if not _analysis_digits(member.phone):
+        issues.append(_analysis_issue('phone_missing', 'critical', fields=['phone']))
+
+    father = str(member.father_name or '').strip()
+    if father and not _analysis_matches(index, 'name', father, member.pk):
+        issues.append(_analysis_issue(
+            'father_not_registered', 'alert', names=[father], fields=['father_name'],
+        ))
+
+    mother = str(member.mother_name or '').strip()
+    if mother and not _analysis_matches(index, 'name', mother, member.pk):
+        issues.append(_analysis_issue(
+            'mother_not_registered', 'alert', names=[mother], fields=['mother_name'],
+        ))
+
+    relative_names = [
+        str(relative.name or '').strip()
+        for relative in member.relatives.all()
+        if str(relative.name or '').strip()
+    ]
+    missing_relatives = _missing_registered_names(index, relative_names, member.pk)
+    if missing_relatives:
+        issues.append(_analysis_issue(
+            'relative_not_registered', 'alert', names=missing_relatives,
+        ))
+
+    return _analysis_result(issues)
+
+
+def submission_analysis(submission, index=None):
+    if index is None:
+        index = _default_member_analysis_index(submission)
+    data = submission.data if isinstance(submission.data, dict) else {}
+    issues = []
+    duplicate_fields = tuple(
+        (code, key, (field, data.get(field, '')))
+        for code, key, field in SUBMISSION_DUPLICATE_FIELDS
+    )
+    _add_duplicate_issues(
+        issues, index, submission.member_id, duplicate_fields, severity='alert',
+    )
+
+    father = str(data.get('father_name') or '').strip()
+    if father and not _analysis_matches(index, 'name', father, submission.member_id):
+        issues.append(_analysis_issue(
+            'father_without_registration', 'alert', names=[father],
+            fields=['father_name'],
+        ))
+
+    mother = str(data.get('mother_name') or '').strip()
+    if mother and not _analysis_matches(index, 'name', mother, submission.member_id):
+        issues.append(_analysis_issue(
+            'mother_without_registration', 'alert', names=[mother],
+            fields=['mother_name'],
+        ))
+
+    relative_names = []
+    for relative in data.get('relatives') or []:
+        if isinstance(relative, dict) and str(relative.get('name') or '').strip():
+            relative_names.append(str(relative['name']).strip())
+    missing_relatives = _missing_registered_names(
+        index, relative_names, submission.member_id,
+    )
+    if missing_relatives:
+        issues.append(_analysis_issue(
+            'relatives_without_registration', 'alert', names=missing_relatives,
+        ))
+
+    return _analysis_result(issues)

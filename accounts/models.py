@@ -515,6 +515,16 @@ class Member(models.Model):
         editable=False, default=None, null=True,
         help_text='Usado na URL pública do cartão de membro.',
     )
+    form_completion_hash = models.CharField(
+        'Hash do link de conclusão do cadastro', max_length=44, unique=True,
+        editable=False, default=None, null=True, blank=True,
+        help_text='Usado na URL pública de conclusão do cadastro.',
+    )
+    qr_hash = models.CharField(
+        'Código curto do QR', max_length=12, unique=True,
+        editable=False, default=None, null=True, blank=True,
+        help_text='Código curto usado no QR da carteirinha e na validação.',
+    )
 
     # Cadastro público de visitante / acolhimento
     how_known = models.CharField('Como conheceu a igreja', max_length=120, blank=True)
@@ -608,6 +618,10 @@ class Member(models.Model):
     def save(self, *args, **kwargs):
         if not self.public_hash:
             self.public_hash = secrets.token_urlsafe(32)
+        if not self.form_completion_hash:
+            self.form_completion_hash = secrets.token_urlsafe(32)
+        if not self.qr_hash:
+            self.qr_hash = self.generate_qr_hash()
         if self._needs_sentinel():
             self.discipler = Member.get_church_sentinel(self.church, create=True)
             update_fields = kwargs.get('update_fields')
@@ -660,6 +674,35 @@ class Member(models.Model):
     def regenerate_public_hash(self):
         self.public_hash = secrets.token_urlsafe(32)
         self.save(update_fields=['public_hash', 'updated_at'])
+
+    def ensure_form_completion_hash(self) -> str:
+        """Retorna (gerando se preciso) o hash do link de conclusão do cadastro."""
+        if not self.form_completion_hash:
+            self.form_completion_hash = secrets.token_urlsafe(32)
+        return self.form_completion_hash
+
+    def regenerate_form_completion_hash(self) -> str:
+        self.form_completion_hash = secrets.token_urlsafe(32)
+        self.save(update_fields=['form_completion_hash', 'updated_at'])
+        return self.form_completion_hash
+
+    QR_HASH_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+    @classmethod
+    def generate_qr_hash(cls) -> str:
+        return ''.join(
+            secrets.choice(cls.QR_HASH_ALPHABET) for _ in range(8)
+        )
+
+    def ensure_qr_hash(self) -> str:
+        if not self.qr_hash:
+            self.qr_hash = self.generate_qr_hash()
+        return self.qr_hash
+
+    def regenerate_qr_hash(self) -> str:
+        self.qr_hash = self.generate_qr_hash()
+        self.save(update_fields=['qr_hash', 'updated_at'])
+        return self.qr_hash
 
     SENTINEL_NAME = 'Responsável pela Igreja (sem atribuição)'
 

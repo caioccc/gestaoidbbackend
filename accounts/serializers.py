@@ -830,6 +830,7 @@ class MemberSerializer(serializers.ModelSerializer):
     user_email = serializers.SerializerMethodField()
     sla_state = serializers.SerializerMethodField()
     sla_days_waiting = serializers.SerializerMethodField()
+    analysis = serializers.SerializerMethodField()
 
     class Meta:
         model = Member
@@ -845,21 +846,27 @@ class MemberSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'notes',
             'how_known', 'wants_visit',
             'lifecycle_stage', 'lifecycle_stage_display', 'last_contact_at',
-            'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
-            'public_hash',
+            'street', 'number', 'complement',             'neighborhood', 'city', 'state', 'cep',
+            'public_hash', 'qr_hash',
             'discipler', 'discipler_name', 'discipler_phone', 'discipler_photo',
             'discipler_is_sentinel',
             'discipler_assigned_at', 'source_hash',
             'user', 'user_email',
             'stage_entered_at', 'sla_state', 'sla_days_waiting',
-            'created_at', 'updated_at',
+            'created_at', 'updated_at', 'analysis',
         ]
         read_only_fields = [
             'id', 'church', 'created_at', 'updated_at', 'card_number',
-            'public_hash', 'last_contact_at',
+            'public_hash', 'qr_hash', 'last_contact_at',
             'discipler_assigned_at', 'discipler_assigned_by', 'source_hash',
             'stage_entered_at', 'sla_state', 'sla_days_waiting',
         ]
+
+    def get_analysis(self, obj):
+        index = self.context.get('member_analysis_index')
+        if index is None:
+            return {'has_issues': False, 'has_critical': False, 'issues': []}
+        return services.member_analysis(obj, index)
 
     def get_sla_days_waiting(self, obj):
         return services.visitor_waiting_days(obj)
@@ -1478,17 +1485,33 @@ class ChurchMinutesSerializer(serializers.ModelSerializer):
 
 
 class PublicMemberCardSerializer(serializers.Serializer):
-    """Dados públicos do cartão de membro (frente e verso), SEM endereço."""
+    """Dados públicos do cartão de membro (frente e verso)."""
 
     name = serializers.CharField()
     card_number = serializers.SerializerMethodField()
     photo = serializers.SerializerMethodField()
     birth_date = serializers.DateField(format='%d/%m/%Y', required=False, allow_null=True)
+    baptism_date = serializers.DateField(format='%d/%m/%Y', required=False, allow_null=True)
+    cpf = serializers.CharField(required=False, allow_blank=True)
+    profession = serializers.CharField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True)
+    street = serializers.CharField(required=False, allow_blank=True)
+    number = serializers.CharField(required=False, allow_blank=True)
+    neighborhood = serializers.CharField(required=False, allow_blank=True)
+    city = serializers.CharField(required=False, allow_blank=True)
+    state = serializers.CharField(required=False, allow_blank=True)
     status = serializers.CharField()
+    public_hash = serializers.CharField(required=False, allow_null=True)
+    qr_hash = serializers.CharField(required=False, allow_null=True)
     church_name = serializers.CharField(source='church.name')
     church_city = serializers.CharField(source='church.city')
     church_state = serializers.CharField(source='church.state')
     church_phone = serializers.CharField(source='church.phone')
+    church_street = serializers.CharField(source='church.street', required=False, allow_blank=True)
+    church_number = serializers.CharField(source='church.number', required=False, allow_blank=True)
+    church_neighborhood = serializers.CharField(
+        source='church.neighborhood', required=False, allow_blank=True,
+    )
     card_primary_color = serializers.CharField(source='church.card_primary_color')
     card_secondary_color = serializers.CharField(source='church.card_secondary_color')
     card_valid_until = serializers.DateField(
@@ -1496,6 +1519,7 @@ class PublicMemberCardSerializer(serializers.Serializer):
     )
     card_front_phrase = serializers.CharField(source='church.card_front_phrase')
     card_back_phrase = serializers.CharField(source='church.card_back_phrase')
+    card_theme = serializers.CharField(source='church.card_theme', required=False)
 
     def get_card_number(self, obj):
         return obj.card_number or ''
@@ -1507,6 +1531,42 @@ class PublicMemberCardSerializer(serializers.Serializer):
             except Exception:
                 return None
         return None
+
+
+class PublicQrValidationSerializer(serializers.Serializer):
+    """Resultado público da validação de um QR code."""
+
+    kind = serializers.CharField()
+    code = serializers.CharField()
+    valid = serializers.BooleanField()
+    context = serializers.CharField(required=False, allow_null=True)
+    checked_at = serializers.DateTimeField()
+    qr_url = serializers.CharField()
+    subject = serializers.SerializerMethodField()
+
+    def get_subject(self, obj):
+        member = obj['member']
+        valid_until = member.church.card_valid_until
+        return {
+            'name': member.name,
+            'photo': services.cloudinary_url(member.photo),
+            'church_name': member.church.name,
+            'church_city': member.church.city,
+            'church_state': member.church.state,
+            'card_number': member.card_number or '',
+            'status': member.status,
+            'status_display': member.get_status_display(),
+            'role_title': member.profession or '',
+            'valid_until': valid_until.strftime('%d/%m/%Y') if valid_until else None,
+            'cpf': member.cpf or '',
+            'street': member.street or '',
+            'number': member.number or '',
+            'complement': member.complement or '',
+            'neighborhood': member.neighborhood or '',
+            'city': member.city or '',
+            'state': member.state or '',
+            'phone': member.phone or '',
+        }
 
 
 class PublicMemberProfileSerializer(serializers.Serializer):
@@ -1576,29 +1636,47 @@ class PublicMemberProfileSerializer(serializers.Serializer):
         }
 
 
-class PublicMemberFormSerializer(serializers.Serializer):
-    """Metadados públicos do formulário (link do cartão ou genérico da igreja).
+class PublicMemberFormPrefillSerializer(serializers.ModelSerializer):
+    """Dados já cadastrados para o link privado de conclusão do cadastro."""
 
-    - `type = "member"`   → o hash é de um cartão de membro (atualização).
-    - `type = "candidate"` → o hash é o formulário genérico da igreja (novo candidato).
+    birth_date = serializers.DateField(format='%Y-%m-%d', read_only=True)
+    marriage_date = serializers.DateField(format='%Y-%m-%d', read_only=True)
+    photo = MemberPhotoField(read_only=True)
+    relatives = MemberRelativeSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Member
+        fields = [
+            'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+            'born_in_city', 'born_in_state', 'profession', 'education_level',
+            'marital_status', 'marriage_date', 'father_name', 'mother_name',
+            'church_entry', 'church_entry_other', 'street', 'number', 'complement',
+            'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
+        ]
+
+
+class PublicMemberFormSerializer(serializers.Serializer):
+    """Metadados públicos do formulário (cartão, conclusão ou link genérico).
+
+    - `mode = "member"`     → hash público do cartão (atualização pendente).
+    - `mode = "completion"` → hash privado de conclusão (atualização direta).
+    - `mode = "candidate"`  → link genérico da igreja (novo candidato).
     """
 
     type = serializers.CharField()
+    mode = serializers.CharField(default='candidate')
     church_name = serializers.CharField()
     church_city = serializers.CharField()
     church_state = serializers.CharField()
     church_phone = serializers.CharField()
     member_name = serializers.CharField(read_only=True, default=None)
     card_number = serializers.CharField(read_only=True, default=None)
+    prefill = PublicMemberFormPrefillSerializer(
+        read_only=True, required=False, allow_null=True,
+    )
 
 
-PUBLIC_SUBMISSION_FIELDS = (
-    'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
-    'born_in_city', 'born_in_state', 'profession', 'education_level',
-    'marital_status', 'marriage_date', 'father_name', 'mother_name',
-    'church_entry', 'church_entry_other', 'street', 'number', 'complement',
-    'neighborhood', 'city', 'state', 'cep', 'notes', 'photo', 'relatives',
-)
+PUBLIC_SUBMISSION_FIELDS = services.PUBLIC_MEMBER_EDIT_FIELDS
 
 
 def _valid_cpf(value: str) -> bool:
@@ -1750,6 +1828,8 @@ class PublicSubmissionSerializer(serializers.Serializer):
             data['photo'] = photo
         if data.get('relatives'):
             data['relatives'] = clean_relatives
+        if attrs['data'].get('photo_removed'):
+            data['photo_removed'] = True
         attrs['data'] = data
         return attrs
 
@@ -1761,6 +1841,7 @@ class MemberSubmissionSerializer(serializers.ModelSerializer):
     member_card_number = serializers.SerializerMethodField()
     reviewed_by_name = serializers.SerializerMethodField()
     status_display = serializers.CharField(source='get_status_display', read_only=True)
+    analysis = serializers.SerializerMethodField()
 
     class Meta:
         model = MemberSubmission
@@ -1768,9 +1849,15 @@ class MemberSubmissionSerializer(serializers.ModelSerializer):
             'id', 'church', 'member', 'member_name', 'member_card_number',
             'source_hash', 'data', 'status', 'status_display',
             'reviewed_by', 'reviewed_by_name', 'notes',
-            'created_at', 'updated_at', 'reviewed_at',
+            'created_at', 'updated_at', 'reviewed_at', 'analysis',
         ]
         read_only_fields = fields
+
+    def get_analysis(self, obj):
+        index = self.context.get('member_analysis_index')
+        if index is None:
+            return {'has_issues': False, 'has_critical': False, 'issues': []}
+        return services.submission_analysis(obj, index)
 
     def get_member_name(self, obj):
         return obj.member.name if obj.member else None

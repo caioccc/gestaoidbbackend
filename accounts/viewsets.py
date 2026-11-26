@@ -82,7 +82,6 @@ from .permissions import (
     resolve_own_member,
 )
 from .serializers import (
-    PUBLIC_SUBMISSION_FIELDS,
     AddChurchUserSerializer,
     ChurchCreateSerializer,
     ChurchLinksConfigSerializer,
@@ -108,8 +107,10 @@ from .serializers import (
     PendingCongregationSerializer,
     PublicChurchLinksSerializer,
     PublicMemberCardSerializer,
+    PublicMemberFormPrefillSerializer,
     PublicMemberFormSerializer,
     PublicMemberProfileSerializer,
+    PublicQrValidationSerializer,
     PublicSubmissionSerializer,
     RegisterSerializer,
     StorageLocationSerializer,
@@ -875,7 +876,37 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context['church'] = self.request.user.church
+        if self.request.method in SAFE_METHODS:
+            context['member_analysis_index'] = services.build_member_analysis_index(
+                self.get_member_analysis_scope()
+            )
         return context
+
+    def get_member_analysis_scope(self):
+        user = self.request.user
+        church = user.church
+        if church is None:
+            return Member.objects.none()
+        qs = (
+            Member.objects.filter(church=church)
+            .exclude(is_sentinel=True)
+            .prefetch_related('relatives')
+        )
+        if not can_view_all_members(user, church):
+            own = resolve_own_member(user)
+            if own is None:
+                return Member.objects.none()
+            unassigned_intake = (
+                Q(
+                    lifecycle_stage__in=[
+                        Member.LifecycleStage.VISITOR,
+                        Member.LifecycleStage.INTEGRATION,
+                    ]
+                )
+                & (Q(discipler__isnull=True) | Q(discipler__is_sentinel=True))
+            )
+            qs = qs.filter(Q(discipler_id=own.id) | unassigned_intake)
+        return qs
 
     def list(self, request, *args, **kwargs):
         if request.query_params.get('paginate') != '1':
@@ -2288,6 +2319,80 @@ class ChurchMemberFormLinkView(APIView):
         })
 
 
+class MemberFormCompletionLinkView(APIView):
+    """Link privado para concluir/atualizar o cadastro de um membro.
+
+    GET  → retorna o link (gera o hash se ainda não existir).
+    POST → regenera o hash e invalida o link anterior.
+    """
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+
+    def _get_member(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Você não tem uma igreja ativa.')
+        return get_object_or_404(Member, pk=pk, church=church)
+
+    def _payload(self, member):
+        return Response({
+            'hash': member.form_completion_hash,
+            'url': f'{settings.FRONTEND_URL}/formulario/{member.form_completion_hash}',
+        })
+
+    def get(self, request, pk):
+        member = self._get_member(request, pk)
+        member.ensure_form_completion_hash()
+        member.save(update_fields=['form_completion_hash', 'updated_at'])
+        return self._payload(member)
+
+    def post(self, request, pk):
+        member = self._get_member(request, pk)
+        member.regenerate_form_completion_hash()
+        return self._payload(member)
+
+
+class MemberQrRegenerateView(APIView):
+    """Regera o código curto do QR de um membro."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+
+    def post(self, request, pk):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Você não tem uma igreja ativa.')
+        member = get_object_or_404(Member, pk=pk, church=church)
+        code = member.regenerate_qr_hash()
+        return Response({
+            'hash': code,
+            'code': code,
+            'url': f'{settings.FRONTEND_URL}/validar/{code}',
+        })
+
+
+class PublicQrValidationView(APIView):
+    """Validação pública de QR codes (atualmente: membros)."""
+
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, code):
+        context = request.query_params.get('context') or None
+        resolved = services.resolve_qr_code(code, context=context)
+        if resolved is None:
+            raise NotFound('QR code inválido.')
+        payload = {
+            'kind': resolved['kind'],
+            'code': resolved['code'],
+            'valid': True,
+            'context': resolved['context'],
+            'checked_at': timezone.now(),
+            'qr_url': resolved['url'],
+            'member': resolved['member'],
+        }
+        return Response(PublicQrValidationSerializer(payload).data)
+
+
 class PublicMemberCardView(APIView):
     """Cartão público de um membro pelo hash (https://.../cartao/{hash})."""
 
@@ -2330,11 +2435,12 @@ class PublicMemberFormView(APIView):
     """Formulário público de membro (https://.../formulario/{hash}).
 
     O hash pode ser:
-    - o `public_hash` de um membro  → formulário do tipo `member` (atualização);
-    - o `member_form_hash` da igreja → formulário do tipo `candidate` (genérico).
+    - `form_completion_hash` de um membro → conclusão direta do cadastro;
+    - `public_hash` de um membro → atualização pendente de revisão;
+    - `member_form_hash` da igreja → novo candidato.
 
-    GET  → metadados (nome da igreja, tipo, e, se for membro, nome/cartão).
-    POST → valida e cria a pendência de revisão (`MemberSubmission`).
+    GET  → metadados, mode e, quando aplicável, os dados para prefill.
+    POST → conclui o cadastro diretamente ou cria a pendência de revisão.
     """
 
     authentication_classes = []
@@ -2345,12 +2451,30 @@ class PublicMemberFormView(APIView):
         if member is not None:
             return {
                 'type': 'member',
+                'mode': 'member',
+                'church': member.church,
+                'member': member,
+            }
+        member = (
+            Member.objects.select_related('church')
+            .filter(form_completion_hash=hash)
+            .first()
+        )
+        if member is not None:
+            return {
+                'type': 'member',
+                'mode': 'completion',
                 'church': member.church,
                 'member': member,
             }
         church = Church.objects.filter(member_form_hash=hash).first()
         if church is not None:
-            return {'type': 'candidate', 'church': church, 'member': None}
+            return {
+                'type': 'candidate',
+                'mode': 'candidate',
+                'church': church,
+                'member': None,
+            }
         return None
 
     def get(self, request, hash):
@@ -2360,6 +2484,7 @@ class PublicMemberFormView(APIView):
         church = resolved['church']
         meta = {
             'type': resolved['type'],
+            'mode': resolved['mode'],
             'church_name': church.name,
             'church_city': church.city,
             'church_state': church.state,
@@ -2368,6 +2493,10 @@ class PublicMemberFormView(APIView):
         if resolved['member'] is not None:
             meta['member_name'] = resolved['member'].name
             meta['card_number'] = resolved['member'].card_number or ''
+            if resolved['mode'] == 'completion':
+                meta['prefill'] = PublicMemberFormPrefillSerializer(
+                    resolved['member'],
+                ).data
         return Response(PublicMemberFormSerializer(meta).data)
 
     def post(self, request, hash):
@@ -2376,11 +2505,26 @@ class PublicMemberFormView(APIView):
             raise NotFound('Formulário não encontrado.')
         serializer = PublicSubmissionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data['data']
+        if resolved['mode'] == 'completion':
+            member = resolved['member']
+            data['rg'] = member.rg or ''
+            services.apply_public_member_data(
+                member,
+                data,
+                clear_photo_when_empty=bool(data.get('photo_removed')),
+            )
+            member.regenerate_form_completion_hash()
+            return Response({
+                'id': member.id,
+                'status': 'COMPLETED',
+                'mode': 'completion',
+            }, status=status.HTTP_200_OK)
         submission = MemberSubmission.objects.create(
             church=resolved['church'],
             member=resolved['member'],
             source_hash=hash,
-            data=serializer.validated_data['data'],
+            data=data,
         )
         return Response({
             'id': submission.id,
@@ -2497,12 +2641,17 @@ class MemberSubmissionsView(APIView):
         status_filter = request.query_params.get('status')
         if status_filter:
             qs = qs.filter(status=status_filter)
+        context = {
+            'member_analysis_index': services.build_member_analysis_index(
+                Member.objects.filter(church=church).exclude(is_sentinel=True)
+            )
+        }
         if request.query_params.get('paginate') == '1':
             paginator = MemberListPagination()
             page = paginator.paginate_queryset(qs, request)
-            serializer = MemberSubmissionSerializer(page, many=True)
+            serializer = MemberSubmissionSerializer(page, many=True, context=context)
             return paginator.get_paginated_response(serializer.data)
-        return Response(MemberSubmissionSerializer(qs, many=True).data)
+        return Response(MemberSubmissionSerializer(qs, many=True, context=context).data)
 
 
 class MemberSubmissionReviewView(APIView):
@@ -2538,7 +2687,12 @@ class MemberSubmissionReviewView(APIView):
         submission.reviewed_at = timezone.now()
         submission.reviewed_by = request.user
         submission.save()
-        return Response(MemberSubmissionSerializer(submission).data)
+        context = {
+            'member_analysis_index': services.build_member_analysis_index(
+                Member.objects.filter(church=submission.church).exclude(is_sentinel=True)
+            )
+        }
+        return Response(MemberSubmissionSerializer(submission, context=context).data)
 
     def _apply(self, submission, reviewer):
         """Aplica os dados da submissão: atualiza o membro ou cria o candidato."""
@@ -2546,26 +2700,14 @@ class MemberSubmissionReviewView(APIView):
         for date_field in ('birth_date', 'marriage_date'):
             if data.get(date_field) in (None, ''):
                 data[date_field] = None
-        photo_raw = (data.pop('photo', '') or '')
+        photo_raw = (data.get('photo') or '')
         photo_file = services.data_url_to_file(photo_raw, 'member_photo.png')
-        relatives = data.pop('relatives', None) or []
+        relatives = data.get('relatives') or []
         if not isinstance(relatives, list):
             relatives = []
 
-        def save_member_photo(member):
-            if photo_file is not None:
-                member.photo = photo_file
-
         if submission.member is not None:
-            for field in PUBLIC_SUBMISSION_FIELDS:
-                if field in data and field not in ('name', 'photo', 'relatives'):
-                    setattr(submission.member, field, data[field])
-            if data.get('name'):
-                submission.member.name = data['name'].strip()
-            save_member_photo(submission.member)
-            submission.member.save()
-            submission.member.relatives.all().delete()
-            self._create_relatives(submission.member, relatives)
+            services.apply_public_member_data(submission.member, data)
             submission.notes = 'Dados aplicados ao membro existente.'
             return
         member_kwargs = {k: v for k, v in data.items() if k in (

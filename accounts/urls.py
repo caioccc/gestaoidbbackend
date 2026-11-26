@@ -185,6 +185,11 @@ urlpatterns = [
         name='public-member-card',
     ),
     path(
+        'public/qr/<str:code>/validate/',
+        viewsets.PublicQrValidationView.as_view(),
+        name='public-qr-validation',
+    ),
+    path(
         'public/forms/<str:hash>/',
         viewsets.PublicMemberFormView.as_view(),
         name='public-member-form',
@@ -198,6 +203,16 @@ urlpatterns = [
         'members/form/public-link/',
         viewsets.ChurchMemberFormLinkView.as_view(),
         name='member-form-public-link',
+    ),
+    path(
+        'members/<int:pk>/form-completion-link/',
+        viewsets.MemberFormCompletionLinkView.as_view(),
+        name='member-form-completion-link',
+    ),
+    path(
+        'members/<int:pk>/qr/regenerate/',
+        viewsets.MemberQrRegenerateView.as_view(),
+        name='member-qr-regenerate',
     ),
     path(
         'member-submissions/',

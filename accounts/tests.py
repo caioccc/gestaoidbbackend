@@ -4102,6 +4102,57 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertNotIn(self.card_hash, resp.data['public_url'])
 
+    def test_member_qr_hash_generated(self):
+        self.assertEqual(len(self.member.qr_hash), 8)
+        self.assertTrue(set(self.member.qr_hash) <= set(Member.QR_HASH_ALPHABET))
+
+    def test_member_qr_regenerate_invalidates_old(self):
+        old_code = self.member.qr_hash
+        resp = self._client(self.secretaria).post(
+            reverse('member-qr-regenerate', args=[self.member.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(resp.data['code'], old_code)
+        self.assertTrue(resp.data['url'].endswith(resp.data['code']))
+
+        old_resp = APIClient().get(
+            reverse('public-qr-validation', args=[old_code])
+        )
+        self.assertEqual(old_resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_card_exposes_qr_hash(self):
+        resp = APIClient().get(reverse('public-member-card', args=[self.card_hash]))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['qr_hash'], self.member.qr_hash)
+
+    def test_public_qr_validation_returns_member_data(self):
+        resp = APIClient().get(
+            reverse('public-qr-validation', args=[self.member.qr_hash.lower()])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['kind'], 'member')
+        self.assertTrue(resp.data['valid'])
+        self.assertEqual(resp.data['code'], self.member.qr_hash)
+        subject = resp.data['subject']
+        self.assertEqual(subject['name'], 'Maria da Silva')
+        self.assertEqual(subject['card_number'], self.member.card_number or '')
+        self.assertEqual(subject['church_name'], self.sede.name)
+        self.assertEqual(subject['cpf'], '12345678901')
+        self.assertEqual(subject['phone'], '(83) 99999-1111')
+        self.assertNotIn('form_completion_hash', str(resp.data))
+
+    def test_public_qr_validation_rejects_inactive_member(self):
+        self.member.status = Member.Status.INACTIVE
+        self.member.save(update_fields=['status'])
+        resp = APIClient().get(
+            reverse('public-qr-validation', args=[self.member.qr_hash])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_qr_validation_unknown_code_404(self):
+        resp = APIClient().get(reverse('public-qr-validation', args=['XXXXXXXX']))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_church_member_form_link_roundtrip(self):
         client = self._client(self.secretaria)
         resp = client.get(reverse('member-form-public-link'))
@@ -4118,9 +4169,36 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.assertEqual(resp.data['name'], 'Maria da Silva')
         self.assertEqual(resp.data['card_number'], '')
         self.assertEqual(resp.data['church_name'], self.sede.name)
-        self.assertNotIn('street', resp.data)
-        self.assertNotIn('cpf', resp.data)
-        self.assertNotIn('public_hash', resp.data)
+        self.assertEqual(resp.data['public_hash'], self.card_hash)
+        self.assertEqual(resp.data['card_theme'], self.sede.card_theme)
+        self.assertNotIn('form_completion_hash', resp.data)
+
+    def test_public_card_exposes_profile_and_address_fields(self):
+        self.member.profession = 'Secretária'
+        self.member.baptism_date = '2012-03-09'
+        self.member.street = 'Rua do Membro'
+        self.member.number = '55'
+        self.member.neighborhood = 'Bairro Novo'
+        self.member.city = 'Campina Grande'
+        self.member.state = 'PB'
+        self.member.save(update_fields=[
+            'profession', 'baptism_date', 'street', 'number',
+            'neighborhood', 'city', 'state',
+        ])
+
+        resp = APIClient().get(reverse('public-member-card', args=[self.card_hash]))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['cpf'], '12345678901')
+        self.assertEqual(resp.data['profession'], 'Secretária')
+        self.assertEqual(resp.data['phone'], '(83) 99999-1111')
+        self.assertEqual(resp.data['baptism_date'], '09/03/2012')
+        self.assertEqual(resp.data['street'], 'Rua do Membro')
+        self.assertEqual(resp.data['number'], '55')
+        self.assertEqual(resp.data['neighborhood'], 'Bairro Novo')
+        self.assertEqual(resp.data['city'], 'Campina Grande')
+        self.assertEqual(resp.data['state'], 'PB')
+        self.assertEqual(resp.data['church_street'], '')
 
     def test_public_card_unknown_hash_404(self):
         resp = APIClient().get(reverse('public-member-card', args=['hash-invalido']))
@@ -4164,6 +4242,72 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         sub = MemberSubmission.objects.get(pk=resp.data['id'])
         self.assertIsNone(sub.member)
         self.assertEqual(sub.church, self.sede)
+
+    def test_member_form_completion_link_roundtrip(self):
+        client = self._client(self.secretaria)
+        url = reverse('member-form-completion-link', args=[self.member.pk])
+        resp = client.get(url)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        first_hash = resp.data['hash']
+        self.assertTrue(resp.data['url'].endswith(first_hash))
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.form_completion_hash, first_hash)
+
+        resp2 = client.post(url)
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        self.assertNotEqual(resp2.data['hash'], first_hash)
+
+    def test_public_form_completion_get_returns_prefill(self):
+        self.member.street = 'Rua do Cadastro'
+        self.member.save(update_fields=['street'])
+        resp = APIClient().get(
+            reverse('public-member-form', args=[self.member.form_completion_hash])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['type'], 'member')
+        self.assertEqual(resp.data['mode'], 'completion')
+        self.assertEqual(resp.data['member_name'], 'Maria da Silva')
+        self.assertEqual(resp.data['prefill']['name'], 'Maria da Silva')
+        self.assertEqual(resp.data['prefill']['cpf'], '12345678901')
+        self.assertEqual(resp.data['prefill']['street'], 'Rua do Cadastro')
+        self.assertNotIn('form_completion_hash', resp.data)
+
+    def test_public_form_completion_updates_member_directly(self):
+        old_hash = self.member.form_completion_hash
+        submissions_before = MemberSubmission.objects.count()
+        resp = self._submit(
+            old_hash,
+            name='Maria Atualizada',
+            street='Rua Nova',
+            relatives=[{'name': 'Filho', 'kinship': 'FILHO'}],
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['mode'], 'completion')
+        self.assertEqual(MemberSubmission.objects.count(), submissions_before)
+
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.name, 'Maria Atualizada')
+        self.assertEqual(self.member.street, 'Rua Nova')
+        self.assertEqual(self.member.relatives.count(), 1)
+        self.assertEqual(self.member.relatives.first().name, 'Filho')
+        self.assertNotEqual(self.member.form_completion_hash, old_hash)
+
+        old_resp = APIClient().get(reverse('public-member-form', args=[old_hash]))
+        self.assertEqual(old_resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_public_form_completion_preserves_rg(self):
+        self.member.rg = '9876543'
+        self.member.save(update_fields=['rg'])
+        resp = self._submit(self.member.form_completion_hash)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.rg, '9876543')
+
+    def test_public_form_completion_rejects_invalid_data(self):
+        submissions_before = MemberSubmission.objects.count()
+        resp = self._submit(self.member.form_completion_hash, cpf='11111111111')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(MemberSubmission.objects.count(), submissions_before)
 
     def test_public_submission_requires_name(self):
         resp = self._submit(self.card_hash, name='')
@@ -8503,3 +8647,133 @@ class PublicVisitorTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('name', resp.data)
         self.assertIn('phone', resp.data)
+
+
+class MemberRegistrationAnalysisTests(BaseChurchTestCase):
+    def setUp(self):
+        super().setUp()
+        self.pastor = self._user(
+            'analysis-pastor@teste.com',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        self.member = Member.objects.create(
+            church=self.sede,
+            name='José Silva',
+            phone='(83) 99999-1111',
+            email='jose@teste.com',
+            cpf='111.444.777-35',
+            rg='1234567',
+            father_name='Pai Ausente',
+            mother_name='Mãe Ausente',
+            status=Member.Status.ACTIVE,
+        )
+        MemberRelative.objects.create(
+            member=self.member, name='Filho Ausente', kinship='FILHO',
+        )
+        self.duplicate = Member.objects.create(
+            church=self.sede,
+            name='José   Silva',
+            phone='(83)99999-1111',
+            email='jose@teste.com',
+            cpf='11144477735',
+            rg='123-456-7',
+            status=Member.Status.INACTIVE,
+        )
+
+    def test_member_detail_reports_duplicates_missing_fields_and_relatives(self):
+        resp = self._client(self.pastor).get(
+            reverse('member-self-detail', args=[self.member.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        analysis = resp.data['analysis']
+        codes = {issue['code'] for issue in analysis['issues']}
+        self.assertTrue(analysis['has_issues'])
+        self.assertTrue(analysis['has_critical'])
+        self.assertIn('name_duplicate', codes)
+        self.assertIn('cpf_duplicate', codes)
+        self.assertIn('rg_duplicate', codes)
+        self.assertIn('phone_duplicate', codes)
+        self.assertIn('missing_fields', codes)
+        self.assertIn('father_not_registered', codes)
+        self.assertIn('mother_not_registered', codes)
+        self.assertIn('relative_not_registered', codes)
+        self.assertNotIn('phone_missing', codes)
+
+    def test_member_detail_reports_missing_phone_as_critical(self):
+        member = Member.objects.create(
+            church=self.sede,
+            name='Sem Telefone',
+            phone='',
+            status=Member.Status.ACTIVE,
+        )
+        resp = self._client(self.pastor).get(
+            reverse('member-self-detail', args=[member.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        issue = next(
+            issue for issue in resp.data['analysis']['issues']
+            if issue['code'] == 'phone_missing'
+        )
+        self.assertEqual(issue['severity'], 'critical')
+
+    def test_member_issues_do_not_block_update(self):
+        url = reverse('member-self-detail', args=[self.member.pk])
+        resp = self._client(self.pastor).patch(
+            url, {'email': 'jose.novo@teste.com'}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.email, 'jose.novo@teste.com')
+
+
+class SubmissionRegistrationAnalysisTests(PublicMemberCardAndFormTests):
+    def test_submission_analysis_flags_duplicates_and_missing_relatives(self):
+        Member.objects.create(
+            church=self.sede,
+            name='Maria Aparecida Silva',
+            phone='(83) 99999-3333',
+            email='maria@teste.com',
+            cpf='52998224725',
+            status=Member.Status.ACTIVE,
+        )
+        self._submit(
+            self.card_hash,
+            name='Maria Aparecida Silva',
+            cpf='529.982.247-25',
+            email=' MARIA@teste.com ',
+            father_name='Pai Desconhecido',
+            mother_name='Mãe Desconhecida',
+            relatives=[{'name': 'Filho Desconhecido', 'kinship': 'FILHO'}],
+        )
+        resp = self._client(self.pastor).get(reverse('member-submissions'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        analysis = resp.data[0]['analysis']
+        codes = {issue['code'] for issue in analysis['issues']}
+        self.assertTrue(analysis['has_issues'])
+        self.assertFalse(analysis['has_critical'])
+        self.assertIn('name_exists', codes)
+        self.assertIn('cpf_exists', codes)
+        self.assertIn('email_exists', codes)
+        self.assertIn('father_without_registration', codes)
+        self.assertIn('mother_without_registration', codes)
+        self.assertIn('relatives_without_registration', codes)
+        self.assertNotIn('rg_exists', codes)
+
+    def test_submission_issues_do_not_block_approval(self):
+        self._submit(
+            self.card_hash,
+            name='Maria da Silva',
+            cpf='52998224725',
+            email='maria@teste.com',
+            father_name='Pai Desconhecido',
+        )
+        submission = MemberSubmission.objects.get()
+        resp = self._client(self.pastor).post(
+            reverse('member-submission-review', args=[submission.pk]),
+            {'action': 'approve'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, MemberSubmission.Status.APPROVED)
