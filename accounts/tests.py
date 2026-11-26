@@ -8862,6 +8862,46 @@ class MemberLocationsTests(BaseChurchTestCase):
             longitude=-35.91000,
         )
 
+    def test_member_location_query_ignores_complement(self):
+        self.member_one.complement = 'Complemento Apto 101'
+        query = services.member_location_query(self.member_one)
+        self.assertNotIn('Complemento', query)
+        self.assertIn('Rua A 10', query)
+
+    def test_locations_church_address_uses_profile_fields(self):
+        self.sede.street = 'Rua Sede'
+        self.sede.number = '100'
+        self.sede.neighborhood = 'Centro'
+        self.sede.cep = '58400000'
+        self.sede.save()
+
+        resp = self._client(self.secretaria).get(reverse('member-locations'))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('Rua Sede 100', resp.data['church']['address'])
+        self.assertIn('Centro', resp.data['church']['address'])
+
+    def test_locations_church_address_falls_back_to_maps_link(self):
+        ChurchPublicLink.objects.create(
+            church=self.sede,
+            title='Como chegar',
+            link_type=ChurchPublicLink.LinkType.MAPS,
+            url='https://maps.google.com/?q=teste',
+            is_active=True,
+            address_street='Rua do Mapa',
+            address_number='200',
+            address_neighborhood='Bairro do Mapa',
+            address_city='Campina Grande',
+            address_state='PB',
+            address_cep='58400001',
+        )
+
+        resp = self._client(self.secretaria).get(reverse('member-locations'))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('Rua do Mapa 200', resp.data['church']['address'])
+        self.assertIn('Bairro do Mapa', resp.data['church']['address'])
+
     def test_locations_are_grouped_and_scoped_to_current_church(self):
         resp = self._client(self.secretaria).get(reverse('member-locations'))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -9154,6 +9194,55 @@ class MemberLocationsTests(BaseChurchTestCase):
         first = next(p for p in data['points'] if p['latitude'] == -7.23072)
         self.assertEqual(first['source'], 'manual')
 
+    def test_secretaria_can_save_unchanged_manual_point(self):
+        self.member_one.location_source = Member.LocationSource.MANUAL
+        self.member_one.save(update_fields=['location_source'])
+        url = reverse(
+            'church-members-detail', args=[self.sede.id, self.member_one.id]
+        )
+        resp = self._client(self.secretaria).patch(
+            url,
+            {
+                'notes': 'Observação atualizada',
+                'latitude': -7.23072,
+                'longitude': -35.88172,
+                'location_source': Member.LocationSource.MANUAL,
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+    def test_treasurer_and_admin_can_change_manual_coordinates(self):
+        url = reverse(
+            'church-members-detail', args=[self.sede.id, self.missing.id]
+        )
+        accounts = (
+            (
+                'tesoureiro-mapas@teste.com',
+                ChurchMembership.Role.TESOUREIRO,
+                False,
+            ),
+            ('admin-mapas@teste.com', None, True),
+        )
+        for email, role, is_staff in accounts:
+            user = self._user(
+                email,
+                name=email.split('@')[0],
+                church=self.sede if role else None,
+                role=role,
+                is_staff=is_staff,
+            )
+            resp = self._client(user).patch(
+                url,
+                {
+                    'latitude': -7.275,
+                    'longitude': -35.935,
+                    'location_source': Member.LocationSource.MANUAL,
+                },
+                format='json',
+            )
+            self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
     def test_member_role_cannot_view_locations(self):
         user = self._user(
             'membro-mapas@teste.com',
@@ -9173,18 +9262,35 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
         self.assertIn('latitude', resp.data)
 
+        manual_payload = {
+            'latitude': -7.26,
+            'longitude': -35.92,
+            'location_source': Member.LocationSource.MANUAL,
+            'geocode_status': Member.GeocodeStatus.NOT_FOUND,
+            'geocoded_at': '2020-01-01T00:00:00Z',
+        }
+        resp = client.patch(url, manual_payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+
         resp = client.patch(
             url,
             {
-                'latitude': -7.26,
-                'longitude': -35.92,
-                'location_source': Member.LocationSource.MANUAL,
-                'geocode_status': Member.GeocodeStatus.NOT_FOUND,
-                'geocoded_at': '2020-01-01T00:00:00Z',
+                'latitude': -7.265,
+                'longitude': -35.925,
+                'location_source': Member.LocationSource.GEOCODED,
             },
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        pastor = self._user(
+            'pastor-mapas@teste.com',
+            name='Pastor Mapas',
+            church=self.sede,
+            role=ChurchMembership.Role.PASTOR,
+        )
+        resp = self._client(pastor).patch(url, manual_payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.missing.refresh_from_db()
         self.assertEqual(self.missing.latitude, -7.26)
         self.assertEqual(self.missing.longitude, -35.92)
@@ -9194,7 +9300,7 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(self.missing.geocode_status, Member.GeocodeStatus.FOUND)
         self.assertIsNotNone(self.missing.geocoded_at)
 
-        resp = client.patch(
+        resp = self._client(pastor).patch(
             url,
             {'geocode_status': Member.GeocodeStatus.NOT_FOUND},
             format='json',

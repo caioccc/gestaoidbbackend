@@ -2213,7 +2213,6 @@ def member_location_query(member) -> str:
     ]))
     parts = list(filter(None, [
         street,
-        str(member.complement or '').strip(),
         str(member.neighborhood or '').strip(),
         city_state,
         str(member.cep or '').strip(),

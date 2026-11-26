@@ -10,6 +10,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
 from . import services
 from .models import (
@@ -41,6 +42,7 @@ from .models import (
     SundaySchoolSession,
     SundaySchoolAttendance,
 )
+from .permissions import can_edit_member_coordinates
 
 User = get_user_model()
 
@@ -951,6 +953,7 @@ class MemberSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        self._validate_manual_coordinates(attrs)
         latitude = attrs.get('latitude', getattr(self.instance, 'latitude', None))
         longitude = attrs.get('longitude', getattr(self.instance, 'longitude', None))
         if (latitude is None) != (longitude is None):
@@ -999,6 +1002,48 @@ class MemberSerializer(serializers.ModelSerializer):
             attrs['church_entry_other'] = ''
         self._validate_pastoral_care(attrs)
         return attrs
+
+    def _validate_manual_coordinates(self, attrs):
+        if ('latitude' in attrs) != ('longitude' in attrs):
+            return
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        church = self.context.get('church')
+        if church is None and self.instance is not None:
+            church = self.instance.church
+        if church is None:
+            church = getattr(user, 'church', None)
+        if can_edit_member_coordinates(user, church):
+            return
+
+        denied = PermissionDenied(
+            'Somente ADMIN, PASTOR e TESOUREIRO podem definir o ponto manualmente.'
+        )
+        if self.instance is None:
+            if (
+                attrs.get('latitude') is not None
+                and attrs.get('longitude') is not None
+                and attrs.get('location_source') == Member.LocationSource.MANUAL
+            ):
+                raise denied
+            return
+
+        current_lat = self.instance.latitude
+        current_lng = self.instance.longitude
+        current_source = self.instance.location_source
+        new_lat = attrs.get('latitude', current_lat)
+        new_lng = attrs.get('longitude', current_lng)
+        new_source = attrs.get('location_source', current_source)
+        coords_changed = new_lat != current_lat or new_lng != current_lng
+        source_changed = new_source != current_source
+        if not coords_changed and not source_changed:
+            return
+        if (
+            coords_changed and new_source != Member.LocationSource.GEOCODED
+        ) or (
+            source_changed and new_source == Member.LocationSource.MANUAL
+        ):
+            raise denied
 
     def _validate_pastoral_care(self, attrs):
         """Valida a atribuição de responsável quando um membro é indicado.
@@ -1700,7 +1745,7 @@ class PublicMemberFormPrefillSerializer(serializers.ModelSerializer):
             'marital_status', 'marriage_date', 'father_name', 'mother_name',
             'church_entry', 'church_entry_other', 'street', 'number', 'complement',
             'neighborhood', 'city', 'state', 'cep', 'latitude', 'longitude',
-            'location_source', 'notes', 'photo', 'relatives',
+            'location_source', 'geocode_status', 'notes', 'photo', 'relatives',
         ]
 
 

@@ -18,6 +18,18 @@ def is_admin(user) -> bool:
     )
 
 
+def can_edit_member_coordinates(user, church=None) -> bool:
+    """ADMIN, PASTOR e TESOUREIRO podem definir coordenadas manualmente."""
+    if is_admin(user):
+        return True
+    if user is None or not user.is_authenticated or church is None:
+        return False
+    return user.get_role_for(church) in (
+        ChurchMembership.Role.PASTOR,
+        ChurchMembership.Role.TESOUREIRO,
+    )
+
+
 def can_view_all_members(user, church=None) -> bool:
     """Se o usuário enxerga o diretório inteiro da igreja.
 

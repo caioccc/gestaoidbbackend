@@ -187,6 +187,47 @@ def _format_member_location_address(member):
     return ', '.join(filter(None, parts))
 
 
+def _join_location_parts(street, number, neighborhood, city, state, cep):
+    street_number = ' '.join(filter(None, [street, number])).strip()
+    detail = ', '.join(filter(None, [street_number, neighborhood]))
+    city_state = '/'.join(filter(None, [city, state]))
+    return ', '.join(filter(None, [detail, city_state, cep]))
+
+
+def _format_church_location_address(church):
+    profile_detail = ', '.join(filter(None, [
+        ' '.join(filter(None, [church.street, church.number])).strip(),
+        church.neighborhood,
+        church.cep,
+    ]))
+    if profile_detail:
+        return _join_location_parts(
+            church.street, church.number, church.neighborhood,
+            church.city, church.state, church.cep,
+        )
+
+    link = church.public_links.filter(
+        link_type=ChurchPublicLink.LinkType.MAPS,
+        is_active=True,
+    ).order_by('order', 'id').first()
+    if link is not None:
+        link_detail = ', '.join(filter(None, [
+            ' '.join(filter(None, [
+                link.address_street, link.address_number,
+            ])).strip(),
+            link.address_neighborhood,
+            link.address_cep,
+        ]))
+        if link_detail:
+            return _join_location_parts(
+                link.address_street, link.address_number,
+                link.address_neighborhood, link.address_city,
+                link.address_state, link.address_cep,
+            )
+
+    return '/'.join(filter(None, [church.city, church.state]))
+
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """Login com payload customizado contendo os dados do usuário/igreja.
 
@@ -2471,12 +2512,7 @@ class MemberLocationsView(APIView):
                 'members': people,
             })
 
-        church_address = ', '.join(filter(None, [
-            ' '.join(filter(None, [church.street, church.number])).strip(),
-            church.neighborhood,
-            '/'.join(filter(None, [church.city, church.state])),
-            church.cep,
-        ]))
+        church_address = _format_church_location_address(church)
         return Response({
             'church': {
                 'id': church.id,
