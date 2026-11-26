@@ -4,11 +4,15 @@ Centraliza o envio de e-mails transacionais: credenciais no cadastro,
 e notificações de aprovação/rejeição de congregações.
 """
 import base64
+import hashlib
 import logging
 import re
+import time
 import unicodedata
 
+import requests
 from django.conf import settings
+from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.mail import EmailMultiAlternatives
 from django.db import transaction as db_transaction
@@ -2115,3 +2119,90 @@ def submission_analysis(submission, index=None):
         ))
 
     return _analysis_result(issues)
+
+
+MEMBER_GEOCODE_CACHE_TTL = 60 * 60 * 24 * 7
+MEMBER_GEOCODE_MIN_INTERVAL = 1.1
+MEMBER_GEOCODE_TIMEOUT = 5
+
+
+def member_location_query(member) -> str:
+    street = ' '.join(
+        filter(None, [str(member.street or '').strip(), str(member.number or '').strip()])
+    ).strip()
+    city_state = '/'.join(filter(None, [
+        str(member.city or '').strip(), str(member.state or '').strip(),
+    ]))
+    parts = list(filter(None, [
+        street,
+        str(member.complement or '').strip(),
+        str(member.neighborhood or '').strip(),
+        city_state,
+        str(member.cep or '').strip(),
+    ]))
+    if not parts:
+        return ''
+    parts.append('Brasil')
+    return ', '.join(parts)
+
+
+def member_geocode_cache_key(member):
+    return 'accounts:member-geocode:' + hashlib.sha256(
+        member_location_query(member).encode('utf-8')
+    ).hexdigest()
+
+
+def get_cached_member_geocode(member):
+    query = member_location_query(member)
+    if not query:
+        return None
+    return cache.get(member_geocode_cache_key(member))
+
+
+def _wait_for_member_geocode_slot():
+    last = cache.get('accounts:member-geocode:last-call')
+    if isinstance(last, (int, float)):
+        wait = MEMBER_GEOCODE_MIN_INTERVAL - (time.time() - last)
+        if wait > 0:
+            time.sleep(wait)
+    cache.set('accounts:member-geocode:last-call', time.time(), 60)
+
+
+def geocode_member_address(member):
+    query = member_location_query(member)
+    if not query:
+        return None
+    cache_key = member_geocode_cache_key(member)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return None if cached == 'none' else cached
+
+    _wait_for_member_geocode_slot()
+    coords = None
+    try:
+        response = requests.get(
+            'https://nominatim.openstreetmap.org/search',
+            params={
+                'q': query,
+                'format': 'json',
+                'limit': 1,
+                'addressdetails': 0,
+            },
+            headers={
+                'User-Agent': getattr(
+                    settings,
+                    'MEMBER_GEOCODER_USER_AGENT',
+                    'GestaoIDB/1.0 (member-map)',
+                )
+            },
+            timeout=MEMBER_GEOCODE_TIMEOUT,
+        )
+        response.raise_for_status()
+        results = response.json()
+        if results:
+            coords = (float(results[0]['lat']), float(results[0]['lon']))
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        coords = None
+
+    cache.set(cache_key, coords or 'none', MEMBER_GEOCODE_CACHE_TTL)
+    return coords

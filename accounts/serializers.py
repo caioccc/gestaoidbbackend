@@ -847,6 +847,7 @@ class MemberSerializer(serializers.ModelSerializer):
             'how_known', 'wants_visit',
             'lifecycle_stage', 'lifecycle_stage_display', 'last_contact_at',
             'street', 'number', 'complement',             'neighborhood', 'city', 'state', 'cep',
+            'latitude', 'longitude',
             'public_hash', 'qr_hash',
             'discipler', 'discipler_name', 'discipler_phone', 'discipler_photo',
             'discipler_is_sentinel',
@@ -948,6 +949,20 @@ class MemberSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        latitude = attrs.get('latitude', getattr(self.instance, 'latitude', None))
+        longitude = attrs.get('longitude', getattr(self.instance, 'longitude', None))
+        if (latitude is None) != (longitude is None):
+            raise serializers.ValidationError(
+                {'latitude': ['Informe latitude e longitude juntas.']}
+            )
+        if latitude is not None and not -90 <= latitude <= 90:
+            raise serializers.ValidationError(
+                {'latitude': ['Latitude fora do intervalo válido.']}
+            )
+        if longitude is not None and not -180 <= longitude <= 180:
+            raise serializers.ValidationError(
+                {'longitude': ['Longitude fora do intervalo válido.']}
+            )
         church_entry = attrs.get('church_entry')
         if church_entry is None and self.instance:
             church_entry = self.instance.church_entry

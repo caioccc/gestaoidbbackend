@@ -538,6 +538,8 @@ class Member(models.Model):
     city = models.CharField('Cidade', max_length=100, blank=True)
     state = models.CharField('UF', max_length=2, blank=True)
     cep = models.CharField('CEP', max_length=9, blank=True)
+    latitude = models.FloatField('Latitude do ponto no mapa', null=True, blank=True)
+    longitude = models.FloatField('Longitude do ponto no mapa', null=True, blank=True)
 
     # Cuidado pastoral: quem responde por este membro no funil de visitantes.
     user = models.OneToOneField(
@@ -746,6 +748,12 @@ class Member(models.Model):
         """
         super().clean()
         errors = self._check_discipler_link()
+        if (self.latitude is None) != (self.longitude is None):
+            errors['latitude'] = 'Informe latitude e longitude juntas.'
+        if self.latitude is not None and not -90 <= self.latitude <= 90:
+            errors['latitude'] = 'Latitude fora do intervalo válido.'
+        if self.longitude is not None and not -180 <= self.longitude <= 180:
+            errors['longitude'] = 'Longitude fora do intervalo válido.'
         if errors:
             raise ValidationError(errors)
 

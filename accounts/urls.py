@@ -115,6 +115,11 @@ urlpatterns = [
         name='member-import',
     ),
     path(
+        'members/locations/',
+        viewsets.MemberLocationsView.as_view(),
+        name='member-locations',
+    ),
+    path(
         'members/<int:pk>/declaration/',
         viewsets.MemberDeclarationView.as_view(),
         name='member-declaration',

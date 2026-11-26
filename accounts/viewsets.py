@@ -131,6 +131,7 @@ from .serializers import (
 )
 
 ALLOWED_DOC_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.webp'}
+MAX_MEMBER_GEOCODES_PER_REQUEST = 12
 
 
 def _query_date(value):
@@ -159,6 +160,19 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     dlmb = radians(lng2 - lng1)
     a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlmb / 2) ** 2
     return 2 * r * asin(sqrt(a))
+
+
+def _format_member_location_address(member):
+    street = ' '.join(filter(None, [member.street, member.number])).strip()
+    city_state = '/'.join(filter(None, [member.city, member.state]))
+    parts = [
+        street,
+        member.complement,
+        member.neighborhood,
+        city_state,
+        member.cep,
+    ]
+    return ', '.join(filter(None, parts))
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -2367,6 +2381,111 @@ class MemberQrRegenerateView(APIView):
             'hash': code,
             'code': code,
             'url': f'{settings.FRONTEND_URL}/validar/{code}',
+        })
+
+
+class MemberLocationsView(APIView):
+    """Pontos manuais dos membros, com geolocalização dinâmica por endereço."""
+
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+
+    def get(self, request):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Você não tem uma igreja ativa.')
+        members = Member.objects.filter(
+            church=church, is_sentinel=False
+        ).order_by('name')
+        grouped = {}
+        missing = []
+        geocoded_total = 0
+        geocode_attempts = 0
+        for member in members:
+            address = _format_member_location_address(member)
+            latitude = member.latitude
+            longitude = member.longitude
+            source = 'manual'
+            reason = ''
+            if latitude is None or longitude is None:
+                if not services.member_location_query(member):
+                    reason = 'no_address'
+                else:
+                    cached = services.get_cached_member_geocode(member)
+                    if cached is not None:
+                        if cached == 'none':
+                            reason = 'not_found'
+                        else:
+                            latitude, longitude = cached
+                            source = 'geocoded'
+                            geocoded_total += 1
+                    elif geocode_attempts >= MAX_MEMBER_GEOCODES_PER_REQUEST:
+                        reason = 'quota'
+                    else:
+                        geocode_attempts += 1
+                        coords = services.geocode_member_address(member)
+                        if coords:
+                            latitude, longitude = coords
+                            source = 'geocoded'
+                            geocoded_total += 1
+                        else:
+                            reason = 'not_found'
+                if latitude is None or longitude is None:
+                    missing.append({
+                        'id': member.id,
+                        'name': member.name,
+                        'status': member.status,
+                        'status_display': member.get_status_display(),
+                        'address': address,
+                        'reason': reason,
+                    })
+                    continue
+            key = (round(float(latitude), 5), round(float(longitude), 5))
+            grouped.setdefault(key, []).append({
+                'id': member.id,
+                'name': member.name,
+                'phone': member.phone or '',
+                'card_number': member.card_number or '',
+                'status': member.status,
+                'status_display': member.get_status_display(),
+                'address': address,
+                'location_source': source,
+            })
+
+        points = []
+        for (latitude, longitude), people in sorted(grouped.items()):
+            sources = {person['location_source'] for person in people}
+            source = 'mixed' if len(sources) > 1 else next(iter(sources))
+            points.append({
+                'key': f'{latitude}:{longitude}',
+                'latitude': latitude,
+                'longitude': longitude,
+                'address': people[0]['address'],
+                'source': source,
+                'members': people,
+            })
+
+        church_address = ', '.join(filter(None, [
+            ' '.join(filter(None, [church.street, church.number])).strip(),
+            church.neighborhood,
+            '/'.join(filter(None, [church.city, church.state])),
+            church.cep,
+        ]))
+        return Response({
+            'church': {
+                'id': church.id,
+                'name': church.name,
+                'latitude': church.latitude,
+                'longitude': church.longitude,
+                'address': church_address,
+            },
+            'points': points,
+            'missing': missing,
+            'counts': {
+                'members': members.count(),
+                'points': len(points),
+                'missing': len(missing),
+                'geocoded': geocoded_total,
+            },
         })
 
 
