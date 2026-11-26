@@ -8735,6 +8735,18 @@ class MemberRegistrationAnalysisTests(BaseChurchTestCase):
         self.assertIn('relative_not_registered', codes)
         self.assertNotIn('phone_missing', codes)
 
+    def test_missing_fields_issue_does_not_include_complement(self):
+        resp = self._client(self.pastor).get(
+            reverse('member-self-detail', args=[self.member.pk])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        issue = next(
+            issue for issue in resp.data['analysis']['issues']
+            if issue['code'] == 'missing_fields'
+        )
+        self.assertNotIn('complement', issue['fields'])
+        self.assertIn('birth_date', issue['fields'])
+
     def test_member_detail_reports_missing_phone_as_critical(self):
         member = Member.objects.create(
             church=self.sede,

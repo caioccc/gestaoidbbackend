@@ -1,7 +1,7 @@
 ﻿"""Views do mÃ³dulo financeiro (EclÃ©sia IDB)."""
 import base64
 import os
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from io import BytesIO
 from typing import Optional
@@ -14,6 +14,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -36,6 +37,7 @@ from .models import (
 )
 from .serializers import (
     CalendarEventSerializer,
+    CalendarEventTableRowSerializer,
     CategorySerializer,
     FinancialEntrySerializer,
     FinancialExitSerializer,
@@ -1428,7 +1430,83 @@ def _default_audience_for(user) -> str:
     return ''  # PASTOR escolhe
 
 
-class CalendarEventViewSet(viewsets.ModelViewSet):
+class CalendarEventTablePagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+_CALENDAR_TABLE_ORDERINGS = {
+    'occurrence_date', '-occurrence_date',
+    'title', '-title',
+    'category', '-category',
+    'category_display', '-category_display',
+    'start_time', '-start_time',
+    'recurrence_display', '-recurrence_display',
+    'created_by_name', '-created_by_name',
+}
+
+
+def _calendar_table_sort_value(row, field):
+    value = row.get(field)
+    if value is None:
+        return (1, '')
+    if hasattr(value, 'isoformat'):
+        return (0, value.isoformat())
+    return (0, str(value))
+
+
+class CalendarEventTableMixin:
+    """Tabela paginada de ocorrências expandidas do calendário."""
+
+    @action(detail=False, methods=['get'], url_path='table')
+    def table(self, request, *args, **kwargs):
+        today = date.today()
+        year = _int_param(request, 'year', today.year)
+        month = _int_param(request, 'month', today.month)
+        if year not in range(2000, 2101):
+            year = today.year
+        if month not in range(1, 13):
+            month = today.month
+        show_all = str(request.query_params.get('all', '')).lower() in ('1', 'true', 'yes')
+
+        queryset = self.get_queryset().select_related('created_by').prefetch_related('members')
+        category = request.query_params.get('category')
+        if category in CalendarEvent.Category.values:
+            queryset = queryset.filter(category=category)
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(description__icontains=search)
+                | Q(created_by__name__icontains=search)
+            )
+
+        events = list(queryset)
+        start, end = services.calendar_table_window(year, month, show_all, events)
+        rows = services.build_calendar_event_table_rows(events, start, end)
+
+        ordering = request.query_params.get('ordering') or 'occurrence_date'
+        descending = ordering.startswith('-')
+        field = ordering.lstrip('-')
+        if field not in {name.lstrip('-') for name in _CALENDAR_TABLE_ORDERINGS}:
+            field = 'occurrence_date'
+            descending = False
+        rows.sort(key=lambda row: row['row_key'])
+        rows.sort(
+            key=lambda row: _calendar_table_sort_value(row, field),
+            reverse=descending,
+        )
+
+        serializer = CalendarEventTableRowSerializer(rows, many=True)
+        self.pagination_class = CalendarEventTablePagination
+        page = self.paginate_queryset(serializer.data)
+        if page is not None:
+            return self.get_paginated_response(page)
+        return Response(page)
+
+
+class CalendarEventViewSet(CalendarEventTableMixin, viewsets.ModelViewSet):
     """Calendário geral da igreja ativa do usuário.
 
     TESOUREIRO/PASTOR/ADMIN enxergam todos os eventos (financeiros e gerais) e
@@ -1507,7 +1585,7 @@ class CalendarEventViewSet(viewsets.ModelViewSet):
             })
 
 
-class AdminChurchCalendarEventsViewSet(viewsets.ModelViewSet):
+class AdminChurchCalendarEventsViewSet(CalendarEventTableMixin, viewsets.ModelViewSet):
     """CRUD de eventos do calendário de uma igreja específica (apenas staff)."""
 
     serializer_class = CalendarEventSerializer

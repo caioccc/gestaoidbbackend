@@ -603,3 +603,107 @@ class ValidationChecksCongregationTests(RepasseTestCase):
         self.assertNotIn('prebenda', resp.data['checks'])
         natures = [n['nature'] for n in resp.data['checks']['nature_summary']]
         self.assertNotIn('PREBENDA', natures)
+
+
+class CalendarEventTableTests(RepasseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.sec = self._user('sec-table@teste.com', self.sede, ChurchMembership.Role.SECRETARIA)
+        self.tes = self._user('tes-table@teste.com', self.sede, ChurchMembership.Role.TESOUREIRO)
+        self.pastor = self._user('pastor-table@teste.com', self.sede, ChurchMembership.Role.PASTOR)
+
+        self.monthly = CalendarEvent.objects.create(
+            church=self.sede, audience='GENERAL', title='Culto Mensal',
+            category='culto', repeat_monthly=True, day=15,
+        )
+        self.weekly = CalendarEvent.objects.create(
+            church=self.sede, audience='GENERAL', title='Ensaio Semanal',
+            category='ensaio', repeat_weekly=True, weekdays=[0],
+            repeat_interval=1, date=date(2026, 10, 5),
+        )
+        self.finance = CalendarEvent.objects.create(
+            church=self.sede, audience='FINANCE', title='Conta de Outubro',
+            category='bill', date=date(2026, 10, 20),
+        )
+        CalendarEvent.objects.create(
+            church=self.cong, audience='GENERAL', title='Evento Alheio',
+            category='event', date=date(2026, 10, 10),
+        )
+
+    def _table(self, user, params=None, church_pk=None):
+        if church_pk is None:
+            url = reverse('calendar-event-table')
+        else:
+            url = reverse('admin-church-calendar-events-table', args=[church_pk])
+        return self._client(user).get(url, params or {})
+
+    def test_secretary_table_expands_recurrences_and_hides_finance(self):
+        resp = self._table(self.sec, {'year': 2026, 'month': 10, 'page_size': 100})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 5)
+        dates = [row['occurrence_date'] for row in resp.data['results']]
+        self.assertEqual(dates, [
+            '2026-10-05', '2026-10-12', '2026-10-15',
+            '2026-10-19', '2026-10-26',
+        ])
+        self.assertNotIn('Conta de Outubro', [row['title'] for row in resp.data['results']])
+        monthly_row = next(r for r in resp.data['results'] if r['event_id'] == self.monthly.pk)
+        self.assertEqual(monthly_row['row_key'], f'2026-10-15:{self.monthly.pk}')
+        self.assertEqual(monthly_row['recurrence_display'], 'Mensal')
+
+    def test_treasurer_table_includes_finance_events(self):
+        resp = self._table(self.tes, {'year': 2026, 'month': 10, 'page_size': 100})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 6)
+        self.assertIn('Conta de Outubro', [row['title'] for row in resp.data['results']])
+
+    def test_table_paginates_after_expanding(self):
+        resp = self._table(self.sec, {
+            'year': 2026, 'month': 10, 'page_size': 2, 'page': 2,
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 5)
+        self.assertEqual(len(resp.data['results']), 2)
+        self.assertEqual(resp.data['results'][0]['occurrence_date'], '2026-10-15')
+
+    def test_table_all_mode_includes_other_months(self):
+        resp = self._table(self.sec, {'all': '1', 'page_size': 100})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(any(
+            r['event_id'] == self.monthly.pk and r['occurrence_date'] == '2026-11-15'
+            for r in resp.data['results'][: resp.data['count']]
+        ))
+
+    def test_table_filters_search_category_and_ordering(self):
+        base = {'year': 2026, 'month': 10, 'page_size': 100}
+        category = self._table(self.sec, {**base, 'category': 'culto'})
+        self.assertEqual(category.data['count'], 1)
+
+        search = self._table(self.sec, {**base, 'search': 'Ensaio'})
+        self.assertEqual(search.data['count'], 4)
+
+        ordered = self._table(self.sec, {**base, 'ordering': '-occurrence_date'})
+        self.assertEqual(ordered.data['results'][0]['occurrence_date'], '2026-10-26')
+
+    def test_legacy_list_keeps_returning_array(self):
+        resp = self._client(self.sec).get(reverse('calendar-event-list'))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(resp.data, list)
+        self.assertEqual(len(resp.data), 2)
+
+    def test_admin_table_is_paginated_and_scoped_to_church(self):
+        resp = self._table(
+            self.pastor,
+            {'year': 2026, 'month': 10, 'page_size': 100},
+            church_pk=self.sede.pk,
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['count'], 6)
+        self.assertNotIn('Evento Alheio', [row['title'] for row in resp.data['results']])
+
+    def test_table_rejects_unknown_ordering_with_default(self):
+        resp = self._table(self.sec, {
+            'year': 2026, 'month': 10, 'ordering': 'DROP TABLE', 'page_size': 100,
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['results'][0]['occurrence_date'], '2026-10-05')

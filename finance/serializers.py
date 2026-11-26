@@ -320,6 +320,25 @@ class PublicCalendarEventSerializer(serializers.ModelSerializer):
         ]
 
 
+class CalendarEventTableRowSerializer(serializers.Serializer):
+    """Linha da tabela administrativa: uma ocorrência expandida de um evento."""
+    row_key = serializers.CharField()
+    occurrence_date = serializers.DateField()
+    event_id = serializers.IntegerField()
+    title = serializers.CharField()
+    category = serializers.CharField()
+    category_display = serializers.CharField()
+    audience = serializers.CharField()
+    audience_display = serializers.CharField()
+    color = serializers.CharField()
+    description = serializers.CharField()
+    start_time = serializers.TimeField(allow_null=True, required=False)
+    end_time = serializers.TimeField(allow_null=True, required=False)
+    created_by_name = serializers.CharField()
+    members_names = serializers.ListField(child=serializers.DictField())
+    recurrence_display = serializers.CharField()
+
+
 class CategorySerializer(serializers.Serializer):
     """Helper para expor as categorias disponíveis."""
     value = serializers.CharField()

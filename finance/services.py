@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from pathlib import Path
@@ -32,6 +32,138 @@ DEFAULT_CALENDAR_EVENTS = [
     ('Internet', CalendarEvent.Category.BILL, 20),
     ('Envio do relatório (Convenção Regional)', CalendarEvent.Category.DEADLINE, 5),
 ]
+
+CALENDAR_TABLE_HORIZON_YEARS = 5
+
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, ordinal: int) -> Optional[int]:
+    """Dia do mês do n-ésimo weekday (0=Seg ... 6=Dom); -1 = último."""
+    last = calendar.monthrange(year, month)[1]
+    matches = [
+        d for d in range(1, last + 1)
+        if date(year, month, d).weekday() == weekday
+    ]
+    if not matches:
+        return None
+    if ordinal == -1:
+        return matches[-1]
+    if 1 <= ordinal <= len(matches):
+        return matches[ordinal - 1]
+    return None
+
+
+def calendar_event_occurs_on(event, day: date) -> bool:
+    """Resolve a recorrência de um evento para uma data específica."""
+    if event.repeat_end_date and day > event.repeat_end_date:
+        return False
+
+    if event.repeat_monthly:
+        weekday = event.repeat_monthly_weekday
+        ordinal = event.repeat_monthly_ordinal
+        if weekday is not None and ordinal is not None:
+            return day.day == _nth_weekday_of_month(
+                day.year, day.month, weekday, ordinal
+            )
+        return event.day == day.day
+
+    if event.repeat_weekly:
+        if day.weekday() not in (event.weekdays or []):
+            return False
+        if event.date:
+            if day < event.date:
+                return False
+            interval = event.repeat_interval or 1
+            if (day - event.date).days % (7 * interval) != 0:
+                return False
+        return True
+
+    return bool(event.date and day == event.date)
+
+
+def calendar_event_recurrence_display(event) -> str:
+    if event.repeat_monthly:
+        return 'Mensal'
+    if event.repeat_weekly:
+        return 'Quinzenal' if (event.repeat_interval or 1) > 1 else 'Semanal'
+    return 'Pontual'
+
+
+def calendar_event_anchor_date(event) -> Optional[date]:
+    if event.date:
+        return event.date
+    today = date.today()
+    if event.month and event.day:
+        try:
+            return date(today.year, event.month, event.day)
+        except ValueError:
+            return None
+    return None
+
+
+def build_calendar_event_table_rows(events, start: date, end: date) -> List[Dict]:
+    """Expande eventos em linhas de ocorrência dentro de [start, end]."""
+    rows: List[Dict] = []
+    members_by_event = {
+        event.pk: sorted(
+            (
+                {'id': m.pk, 'name': m.name}
+                for m in event.members.all()
+            ),
+            key=lambda m: m['name'],
+        )
+        for event in events
+    }
+    day = start
+    while day <= end:
+        for event in events:
+            if not calendar_event_occurs_on(event, day):
+                continue
+            rows.append({
+                'row_key': f'{day.isoformat()}:{event.pk}',
+                'occurrence_date': day,
+                'event_id': event.pk,
+                'title': event.title,
+                'category': event.category,
+                'category_display': event.get_category_display(),
+                'audience': event.audience,
+                'audience_display': event.get_audience_display(),
+                'color': event.color,
+                'description': event.description,
+                'start_time': event.start_time,
+                'end_time': event.end_time,
+                'created_by_name': event.created_by.name if event.created_by else '',
+                'members_names': members_by_event.get(event.pk, []),
+                'recurrence_display': calendar_event_recurrence_display(event),
+            })
+        day += timedelta(days=1)
+    return rows
+
+
+def calendar_table_window(year: int, month: int, show_all: bool, events=None):
+    """Janela de expansão para os filtros da tabela administrativa."""
+    today = date.today()
+    if not show_all:
+        start = date(year, month, 1)
+        end = date(year, month, calendar.monthrange(year, month)[1])
+        return start, end
+
+    events = list(events or [])
+    horizon_end = date(min(today.year + CALENDAR_TABLE_HORIZON_YEARS, 2100), 12, 31)
+    anchors = [d for d in (calendar_event_anchor_date(e) for e in events) if d]
+    start = min(anchors + [date(today.year, today.month, 1)])
+    repeat_ends = [
+        e.repeat_end_date for e in events
+        if e.repeat_end_date and e.repeat_end_date <= horizon_end
+    ]
+    open_ended = any(
+        (e.repeat_monthly or e.repeat_weekly) and not e.repeat_end_date
+        for e in events
+    )
+    end = horizon_end if open_ended or not repeat_ends else max(repeat_ends)
+    anchors_in_window = [d for d in anchors if d <= horizon_end]
+    if anchors_in_window:
+        end = max(end, max(anchors_in_window))
+    return start, end
 
 
 def seed_default_calendar_events(church) -> int:

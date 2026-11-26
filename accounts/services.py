@@ -1981,7 +1981,7 @@ MEMBER_PROFILE_OPTIONAL_FIELDS = (
     'email', 'birth_date', 'baptism_date', 'cpf', 'born_in_city',
     'born_in_state', 'profession', 'education_level', 'marital_status',
     'marriage_date', 'father_name', 'mother_name', 'church_entry',
-    'street', 'number', 'complement', 'neighborhood', 'city', 'state', 'cep',
+    'street', 'number', 'neighborhood', 'city', 'state', 'cep',
 )
 
 MEMBER_DUPLICATE_FIELDS = (
