@@ -1937,9 +1937,19 @@ class ChurchPublicLinkSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {'pix_key': 'Informe a chave PIX para este link.'}
                 )
+            pix_type = attrs.get('pix_type') or getattr(
+                self.instance, 'pix_type', None
+            )
+            if pix_type not in services.PIX_KEY_TYPES:
+                raise serializers.ValidationError(
+                    {'pix_type': 'Selecione um tipo de chave PIX válido.'}
+                )
+            error = services.validate_pix_key(pix_key, pix_type)
+            if error:
+                raise serializers.ValidationError({'pix_key': error})
+            attrs['pix_key'] = services.normalize_pix_key(pix_key, pix_type)
+            attrs['pix_type'] = pix_type
             attrs['url'] = url or ''
-            if not attrs.get('pix_type'):
-                attrs['pix_type'] = getattr(self.instance, 'pix_type', None)
 
             mode = attrs.get(
                 'pix_amount_mode',
@@ -2089,6 +2099,22 @@ class ChurchLinksConfigSerializer(serializers.ModelSerializer):
             'slug', 'public_links_enabled', 'theme_color',
             'default_pix_key', 'default_pix_type',
         ]
+
+    def validate(self, attrs):
+        key = attrs.get('default_pix_key', getattr(self.instance, 'default_pix_key', None))
+        pix_type = attrs.get(
+            'default_pix_type', getattr(self.instance, 'default_pix_type', None)
+        )
+        if key:
+            if pix_type not in services.PIX_KEY_TYPES:
+                raise serializers.ValidationError(
+                    {'default_pix_type': 'Selecione um tipo de chave PIX válido.'}
+                )
+            error = services.validate_pix_key(key, pix_type)
+            if error:
+                raise serializers.ValidationError({'default_pix_key': error})
+            attrs['default_pix_key'] = services.normalize_pix_key(key, pix_type)
+        return attrs
 
     def validate_theme_color(self, value):
         value = (value or '').strip().upper()
