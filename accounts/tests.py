@@ -8902,6 +8902,85 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertIn('Rua do Mapa 200', resp.data['church']['address'])
         self.assertIn('Bairro do Mapa', resp.data['church']['address'])
 
+    def test_church_location_query_uses_full_address_and_city_fallback(self):
+        self.sede.street = 'Rua Sede'
+        self.sede.number = '100'
+        self.sede.neighborhood = 'Centro'
+        self.sede.cep = '58400000'
+        self.sede.save()
+        self.assertEqual(
+            services.church_location_query(self.sede),
+            'Rua Sede 100, Centro, Campina Grande/PB, 58400000, Brasil',
+        )
+
+        self.sede.street = ''
+        self.sede.number = ''
+        self.sede.neighborhood = ''
+        self.sede.cep = ''
+        self.sede.save()
+        self.assertEqual(
+            services.church_location_query(self.sede),
+            'Campina Grande/PB, Brasil',
+        )
+
+    def test_locations_includes_church_item_when_without_coordinates(self):
+        self.sede.street = 'Rua Sede'
+        self.sede.number = '100'
+        self.sede.save()
+
+        resp = self._client(self.secretaria).get(reverse('member-locations'))
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        item = resp.data['missing'][0]
+        self.assertEqual(item['kind'], 'church')
+        self.assertEqual(item['id'], 'church')
+        self.assertEqual(item['name'], 'Igreja Teste')
+        self.assertIn('Rua Sede 100', item['address'])
+        self.assertEqual(item['reason'], 'pending')
+
+    def test_church_geocode_endpoint_persists_coordinates(self):
+        cache.clear()
+        self.sede.street = 'Rua Sede'
+        self.sede.number = '100'
+        self.sede.save()
+        with patch(
+            'accounts.services.geocode_church_address',
+            return_value=(-7.27000, -35.93000),
+        ) as geocode:
+            first = self._client(self.secretaria).post(
+                reverse('church-geocode'), {}, format='json'
+            )
+            second = self._client(self.secretaria).post(
+                reverse('church-geocode'), {}, format='json'
+            )
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        self.assertEqual(first.data['status'], 'located')
+        self.assertEqual(second.data['status'], 'already_located')
+        geocode.assert_called_once()
+        self.sede.refresh_from_db()
+        self.assertEqual(self.sede.latitude, -7.27)
+        self.assertEqual(self.sede.longitude, -35.93)
+        data = self._client(self.secretaria).get(reverse('member-locations')).data
+        self.assertFalse(any(i['kind'] == 'church' for i in data['missing']))
+
+    def test_church_geocode_endpoint_without_address(self):
+        cache.clear()
+        for field in ('street', 'number', 'neighborhood', 'city', 'state', 'cep'):
+            setattr(self.sede, field, '')
+        self.sede.save()
+        with patch(
+            'accounts.services.geocode_church_address',
+            return_value=(-7.27000, -35.93000),
+        ) as geocode:
+            resp = self._client(self.secretaria).post(
+                reverse('church-geocode'), {}, format='json'
+            )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['status'], 'no_address')
+        geocode.assert_not_called()
+        data = self._client(self.secretaria).get(reverse('member-locations')).data
+        self.assertEqual(data['missing'][0]['reason'], 'no_address')
+
     def test_locations_are_grouped_and_scoped_to_current_church(self):
         resp = self._client(self.secretaria).get(reverse('member-locations'))
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -8909,10 +8988,10 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(data['church']['id'], self.sede.id)
         self.assertEqual(data['counts']['members'], 4)
         self.assertEqual(data['counts']['points'], 2)
-        self.assertEqual(data['counts']['missing'], 1)
+        self.assertEqual(data['counts']['missing'], 2)
         self.assertEqual(data['counts']['withAddress'], 1)
-        self.assertEqual(data['counts']['pending'], 0)
-        self.assertTrue(data['counts']['ready'])
+        self.assertEqual(data['counts']['pending'], 1)
+        self.assertFalse(data['counts']['ready'])
 
         first = next(p for p in data['points'] if p['latitude'] == -7.23072)
         self.assertEqual(first['longitude'], -35.88172)
@@ -8925,9 +9004,13 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(second['members'][0]['name'], 'Carlos')
         self.assertEqual(second['members'][0]['status'], Member.Status.INACTIVE)
         self.assertEqual(
-            {m['name'] for m in data['missing']}, {'Diana'}
+            {m['name'] for m in data['missing']}, {'Igreja Teste', 'Diana'}
         )
-        self.assertEqual(data['missing'][0]['reason'], 'no_address')
+        church_item = data['missing'][0]
+        self.assertEqual(church_item['kind'], 'church')
+        self.assertEqual(church_item['id'], 'church')
+        self.assertEqual(church_item['reason'], 'pending')
+        self.assertEqual(data['missing'][1]['reason'], 'no_address')
         self.assertEqual(first['source'], 'manual')
         self.assertTrue(
             all(m['location_source'] == 'manual' for m in first['members'])
@@ -8949,9 +9032,10 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         geocode.assert_not_called()
         self.assertEqual(resp.data['counts']['withAddress'], 2)
-        self.assertEqual(resp.data['counts']['pending'], 1)
-        self.assertEqual(resp.data['counts']['missing'], 1)
+        self.assertEqual(resp.data['counts']['pending'], 2)
+        self.assertEqual(resp.data['counts']['missing'], 2)
         self.assertEqual(resp.data['missing'][0]['reason'], 'pending')
+        self.assertEqual(resp.data['missing'][1]['reason'], 'pending')
         self.missing.refresh_from_db()
         self.assertIsNone(self.missing.latitude)
 
@@ -8985,8 +9069,9 @@ class MemberLocationsTests(BaseChurchTestCase):
         )
         data = self._client(self.secretaria).get(reverse('member-locations')).data
         self.assertEqual(data['counts']['geocoded'], 1)
-        self.assertEqual(data['counts']['missing'], 0)
-        self.assertTrue(data['counts']['ready'])
+        self.assertEqual(data['counts']['missing'], 1)
+        self.assertEqual(data['missing'][0]['kind'], 'church')
+        self.assertFalse(data['counts']['ready'])
 
     def test_locations_report_pending_without_geocoding(self):
         cache.clear()
@@ -9008,7 +9093,7 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         geocode.assert_not_called()
         self.assertEqual(resp.data['counts']['withAddress'], 14)
-        self.assertEqual(resp.data['counts']['pending'], 13)
+        self.assertEqual(resp.data['counts']['pending'], 14)
         self.assertFalse(resp.data['counts']['ready'])
 
     def test_member_create_geocodes_address_best_effort(self):
@@ -9112,7 +9197,7 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(resp.data['counts']['located'], 12)
         data = self._client(self.secretaria).get(reverse('member-locations')).data
         self.assertEqual(data['counts']['geocoded'], 12)
-        self.assertEqual(data['counts']['missing'], 1)
+        self.assertEqual(data['counts']['missing'], 2)
 
     def test_batch_endpoint_respects_limit(self):
         cache.clear()
@@ -9173,7 +9258,7 @@ class MemberLocationsTests(BaseChurchTestCase):
         self.assertEqual(second.data['status'], 'located')
         geocode.assert_called_once()
         data = client.get(reverse('member-locations')).data
-        self.assertEqual(data['counts']['missing'], 0)
+        self.assertEqual(data['counts']['missing'], 1)
 
     def test_manual_coordinates_are_not_replaced_by_geocoding(self):
         with patch(

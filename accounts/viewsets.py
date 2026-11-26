@@ -187,45 +187,8 @@ def _format_member_location_address(member):
     return ', '.join(filter(None, parts))
 
 
-def _join_location_parts(street, number, neighborhood, city, state, cep):
-    street_number = ' '.join(filter(None, [street, number])).strip()
-    detail = ', '.join(filter(None, [street_number, neighborhood]))
-    city_state = '/'.join(filter(None, [city, state]))
-    return ', '.join(filter(None, [detail, city_state, cep]))
-
-
 def _format_church_location_address(church):
-    profile_detail = ', '.join(filter(None, [
-        ' '.join(filter(None, [church.street, church.number])).strip(),
-        church.neighborhood,
-        church.cep,
-    ]))
-    if profile_detail:
-        return _join_location_parts(
-            church.street, church.number, church.neighborhood,
-            church.city, church.state, church.cep,
-        )
-
-    link = church.public_links.filter(
-        link_type=ChurchPublicLink.LinkType.MAPS,
-        is_active=True,
-    ).order_by('order', 'id').first()
-    if link is not None:
-        link_detail = ', '.join(filter(None, [
-            ' '.join(filter(None, [
-                link.address_street, link.address_number,
-            ])).strip(),
-            link.address_neighborhood,
-            link.address_cep,
-        ]))
-        if link_detail:
-            return _join_location_parts(
-                link.address_street, link.address_number,
-                link.address_neighborhood, link.address_city,
-                link.address_state, link.address_cep,
-            )
-
-    return '/'.join(filter(None, [church.city, church.state]))
+    return services.format_church_location_address(church)
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -2449,11 +2412,26 @@ class MemberLocationsView(APIView):
         members = list(Member.objects.filter(
             church=church, is_sentinel=False
         ).order_by('name'))
+        church_address = _format_church_location_address(church)
+        church_location = services.church_location_query(church)
         grouped = {}
         missing = []
         geocoded_total = 0
         address_total = 0
         pending_total = 0
+        if church.latitude is None or church.longitude is None:
+            church_reason = 'no_address' if not church_location else 'pending'
+            missing.append({
+                'id': 'church',
+                'kind': 'church',
+                'name': church.name,
+                'status': 'ACTIVE',
+                'status_display': '',
+                'address': church_address,
+                'reason': church_reason,
+            })
+            if church_location:
+                pending_total += 1
         for member in members:
             address = _format_member_location_address(member)
             has_address = bool(services.member_location_query(member))
@@ -2477,6 +2455,7 @@ class MemberLocationsView(APIView):
                     pending_total += 1
                 missing.append({
                     'id': member.id,
+                    'kind': 'member',
                     'name': member.name,
                     'status': member.status,
                     'status_display': member.get_status_display(),
@@ -2512,7 +2491,6 @@ class MemberLocationsView(APIView):
                 'members': people,
             })
 
-        church_address = _format_church_location_address(church)
         return Response({
             'church': {
                 'id': church.id,
@@ -2549,6 +2527,17 @@ class MemberGeocodeView(APIView):
             raise NotFound('Membro não encontrado.')
         force = _geocode_force(request.data.get('force'))
         return Response(services.geocode_member(member, force=force))
+
+
+class ChurchGeocodeView(APIView):
+    permission_classes = [IsChurchRole('PASTOR', 'SECRETARIA', 'TESOUREIRO')]
+
+    def post(self, request):
+        church = request.user.church
+        if church is None:
+            raise NotFound('Você não tem uma igreja ativa.')
+        force = _geocode_force(request.data.get('force'))
+        return Response(services.geocode_church(church, force=force))
 
 
 class MemberLocationsGeocodeView(APIView):

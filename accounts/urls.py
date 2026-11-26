@@ -130,6 +130,11 @@ urlpatterns = [
         name='member-geocode',
     ),
     path(
+        'church/geocode/',
+        viewsets.ChurchGeocodeView.as_view(),
+        name='church-geocode',
+    ),
+    path(
         'members/<int:pk>/declaration/',
         viewsets.MemberDeclarationView.as_view(),
         name='member-declaration',

@@ -2223,9 +2223,65 @@ def member_location_query(member) -> str:
     return ', '.join(parts)
 
 
+def _join_location_parts(street, number, neighborhood, city, state, cep):
+    street_number = ' '.join(filter(None, [street, number])).strip()
+    detail = ', '.join(filter(None, [street_number, neighborhood]))
+    city_state = '/'.join(filter(None, [city, state]))
+    return ', '.join(filter(None, [detail, city_state, cep]))
+
+
+def format_church_location_address(church):
+    from .models import ChurchPublicLink
+
+    profile_detail = ', '.join(filter(None, [
+        ' '.join(filter(None, [church.street, church.number])).strip(),
+        church.neighborhood,
+        church.cep,
+    ]))
+    if profile_detail:
+        return _join_location_parts(
+            church.street, church.number, church.neighborhood,
+            church.city, church.state, church.cep,
+        )
+
+    link = church.public_links.filter(
+        link_type=ChurchPublicLink.LinkType.MAPS,
+        is_active=True,
+    ).order_by('order', 'id').first()
+    if link is not None:
+        link_detail = ', '.join(filter(None, [
+            ' '.join(filter(None, [
+                link.address_street, link.address_number,
+            ])).strip(),
+            link.address_neighborhood,
+            link.address_cep,
+        ]))
+        if link_detail:
+            return _join_location_parts(
+                link.address_street, link.address_number,
+                link.address_neighborhood, link.address_city,
+                link.address_state, link.address_cep,
+            )
+
+    return '/'.join(filter(None, [church.city, church.state]))
+
+
+def church_location_query(church):
+    address = format_church_location_address(church).strip()
+    if not address:
+        return ''
+    return f'{address}, Brasil'
+
+
 def member_geocode_cache_key(member):
     return 'accounts:member-geocode:' + hashlib.sha256(
         member_location_query(member).encode('utf-8')
+    ).hexdigest()
+
+
+def church_geocode_cache_key(church):
+    return 'accounts:church-geocode:' + hashlib.sha256(
+        church_location_query(church).encode('utf-8')
     ).hexdigest()
 
 
@@ -2246,10 +2302,20 @@ def _wait_for_member_geocode_slot():
 
 
 def geocode_member_address(member):
-    query = member_location_query(member)
+    return _geocode_query(
+        member_location_query(member), member_geocode_cache_key(member)
+    )
+
+
+def geocode_church_address(church):
+    return _geocode_query(
+        church_location_query(church), church_geocode_cache_key(church)
+    )
+
+
+def _geocode_query(query, cache_key):
     if not query:
         return None
-    cache_key = member_geocode_cache_key(member)
     cached = cache.get(cache_key)
     if cached is not None:
         return None if cached == 'none' else cached
@@ -2433,3 +2499,82 @@ def geocode_members(members, force=False, limit=None):
 def geocode_member_and_save(member):
     result = geocode_member(member)
     return result['status'] == 'located'
+
+
+def persist_church_geocode(church, latitude, longitude, force=False):
+    coords = valid_member_coordinates(latitude, longitude)
+    if coords is None:
+        return False
+    from .models import Church
+
+    queryset = Church.objects.filter(pk=church.pk)
+    if not force:
+        queryset = queryset.filter(
+            latitude__isnull=True, longitude__isnull=True
+        )
+    updated = queryset.update(
+        latitude=coords[0], longitude=coords[1]
+    )
+    if updated:
+        church.latitude, church.longitude = coords
+    return bool(updated)
+
+
+def geocode_church(church, force=False):
+    result = {
+        'id': 'church',
+        'status': 'error',
+        'latitude': church.latitude,
+        'longitude': church.longitude,
+    }
+    if (
+        not force
+        and church.latitude is not None
+        and church.longitude is not None
+    ):
+        result['status'] = 'already_located'
+        return result
+
+    if not church_location_query(church):
+        result['status'] = 'no_address'
+        return result
+
+    cache_key = church_geocode_cache_key(church)
+    if force:
+        cache.delete(cache_key)
+    else:
+        cached = cache.get(cache_key)
+        if cached == 'none':
+            result['status'] = 'not_found'
+            return result
+        if cached is not None:
+            coords = valid_member_coordinates(cached[0], cached[1]) \
+                if isinstance(cached, (list, tuple)) and len(cached) == 2 \
+                else None
+            if coords and persist_church_geocode(church, coords[0], coords[1]):
+                result.update({
+                    'status': 'located',
+                    'latitude': coords[0],
+                    'longitude': coords[1],
+                })
+                return result
+
+    try:
+        coords = geocode_church_address(church)
+    except Exception:
+        return result
+
+    if not coords:
+        result['status'] = (
+            'not_found' if cache.get(cache_key) == 'none' else 'error'
+        )
+        return result
+
+    if persist_church_geocode(church, coords[0], coords[1]):
+        result.update({
+            'status': 'located',
+            'latitude': coords[0],
+            'longitude': coords[1],
+        })
+        return result
+    return result
