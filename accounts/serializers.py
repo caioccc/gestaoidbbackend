@@ -1494,6 +1494,10 @@ class PublicMemberCardSerializer(serializers.Serializer):
     baptism_date = serializers.DateField(format='%d/%m/%Y', required=False, allow_null=True)
     cpf = serializers.CharField(required=False, allow_blank=True)
     profession = serializers.CharField(required=False, allow_blank=True)
+    marital_status = serializers.CharField(required=False, allow_blank=True)
+    marital_status_display = serializers.CharField(
+        source='get_marital_status_display', required=False, allow_blank=True,
+    )
     phone = serializers.CharField(required=False, allow_blank=True)
     street = serializers.CharField(required=False, allow_blank=True)
     number = serializers.CharField(required=False, allow_blank=True)

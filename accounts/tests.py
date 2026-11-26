@@ -4175,6 +4175,7 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
 
     def test_public_card_exposes_profile_and_address_fields(self):
         self.member.profession = 'Secretária'
+        self.member.marital_status = Member.MaritalStatus.CASADO
         self.member.baptism_date = '2012-03-09'
         self.member.street = 'Rua do Membro'
         self.member.number = '55'
@@ -4182,7 +4183,7 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.member.city = 'Campina Grande'
         self.member.state = 'PB'
         self.member.save(update_fields=[
-            'profession', 'baptism_date', 'street', 'number',
+            'profession', 'marital_status', 'baptism_date', 'street', 'number',
             'neighborhood', 'city', 'state',
         ])
 
@@ -4191,6 +4192,8 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['cpf'], '12345678901')
         self.assertEqual(resp.data['profession'], 'Secretária')
+        self.assertEqual(resp.data['marital_status'], Member.MaritalStatus.CASADO)
+        self.assertEqual(resp.data['marital_status_display'], 'Casado(a)')
         self.assertEqual(resp.data['phone'], '(83) 99999-1111')
         self.assertEqual(resp.data['baptism_date'], '09/03/2012')
         self.assertEqual(resp.data['street'], 'Rua do Membro')
