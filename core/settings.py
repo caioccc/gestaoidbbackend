@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     # Apps locais
     'accounts',
     'boletim',
+    'events',
     'finance',
     'music',
 ]
@@ -228,6 +229,8 @@ REST_FRAMEWORK = {
         'public_invite_form': '60/min',
         'growth_group_join': '30/min',
         'public_visitor': '10/min',
+        'public_event_checkin': '30/min',
+        'public_event_registration': '30/min',
     },
 }
 
