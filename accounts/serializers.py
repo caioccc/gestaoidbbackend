@@ -1733,6 +1733,7 @@ class PublicMemberFormPrefillSerializer(serializers.ModelSerializer):
     """Dados já cadastrados para o link privado de conclusão do cadastro."""
 
     birth_date = serializers.DateField(format='%Y-%m-%d', read_only=True)
+    baptism_date = serializers.DateField(format='%Y-%m-%d', read_only=True)
     marriage_date = serializers.DateField(format='%Y-%m-%d', read_only=True)
     photo = MemberPhotoField(read_only=True)
     relatives = MemberRelativeSerializer(many=True, read_only=True)
@@ -1740,7 +1741,7 @@ class PublicMemberFormPrefillSerializer(serializers.ModelSerializer):
     class Meta:
         model = Member
         fields = [
-            'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+            'name', 'phone', 'email', 'birth_date', 'baptism_date', 'cpf', 'rg',
             'born_in_city', 'born_in_state', 'profession', 'education_level',
             'marital_status', 'marriage_date', 'father_name', 'mother_name',
             'church_entry', 'church_entry_other', 'street', 'number', 'complement',

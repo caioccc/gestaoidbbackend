@@ -2908,7 +2908,7 @@ class MemberSubmissionReviewView(APIView):
     def _apply(self, submission, reviewer):
         """Aplica os dados da submissão: atualiza o membro ou cria o candidato."""
         data = dict(submission.data)
-        for date_field in ('birth_date', 'marriage_date'):
+        for date_field in ('birth_date', 'baptism_date', 'marriage_date'):
             if data.get(date_field) in (None, ''):
                 data[date_field] = None
         photo_raw = (data.get('photo') or '')
@@ -2922,7 +2922,7 @@ class MemberSubmissionReviewView(APIView):
             submission.notes = 'Dados aplicados ao membro existente.'
             return
         member_kwargs = {k: v for k, v in data.items() if k in (
-            'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+            'name', 'phone', 'email', 'birth_date', 'baptism_date', 'cpf', 'rg',
             'born_in_city', 'born_in_state', 'profession',
             'education_level', 'marital_status', 'marriage_date',
             'father_name', 'mother_name', 'church_entry',

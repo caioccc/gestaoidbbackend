@@ -4307,6 +4307,35 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.member.refresh_from_db()
         self.assertEqual(self.member.rg, '9876543')
 
+    def test_public_form_completion_prefill_returns_baptism_date(self):
+        self.member.baptism_date = '2012-03-09'
+        self.member.save(update_fields=['baptism_date'])
+        resp = APIClient().get(
+            reverse('public-member-form', args=[self.member.form_completion_hash])
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['prefill']['baptism_date'], '2012-03-09')
+
+    def test_public_form_completion_updates_baptism_date(self):
+        resp = self._submit(
+            self.member.form_completion_hash,
+            baptism_date='2012-03-09',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.member.refresh_from_db()
+        self.assertEqual(str(self.member.baptism_date), '2012-03-09')
+
+        resp = self._submit(self.member.form_completion_hash, baptism_date='')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.member.refresh_from_db()
+        self.assertIsNone(self.member.baptism_date)
+
+    def test_public_submission_preserves_baptism_date(self):
+        resp = self._submit(self.card_hash, baptism_date='2012-03-09')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        sub = MemberSubmission.objects.get(pk=resp.data['id'])
+        self.assertEqual(sub.data['baptism_date'], '2012-03-09')
+
     def test_public_form_completion_rejects_invalid_data(self):
         submissions_before = MemberSubmission.objects.count()
         resp = self._submit(self.member.form_completion_hash, cpf='11111111111')
@@ -4390,6 +4419,20 @@ class PublicMemberCardAndFormTests(BaseChurchTestCase):
         self.assertTrue(member.photo)
         self.assertEqual(member.relatives.count(), 1)
         self.assertEqual(member.relatives.first().name, 'Carla Filha')
+
+    def test_approve_candidate_creates_member_with_baptism_date(self):
+        church_hash = self.sede.ensure_member_form_hash()
+        self.sede.save(update_fields=['member_form_hash'])
+        self._submit(church_hash, name='Carlos Souza', baptism_date='2012-03-09')
+        sub = MemberSubmission.objects.get()
+        resp = self._client(self.secretaria).post(
+            reverse('member-submission-review', args=[sub.pk]),
+            {'action': 'approve'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        member = Member.objects.get(name='Carlos Souza')
+        self.assertEqual(str(member.baptism_date), '2012-03-09')
 
     def test_approve_member_updates_photo_and_replaces_relatives(self):
         from unittest import mock

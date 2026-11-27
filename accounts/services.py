@@ -22,7 +22,7 @@ from urllib.parse import unquote
 
 
 PUBLIC_MEMBER_EDIT_FIELDS = (
-    'name', 'phone', 'email', 'birth_date', 'cpf', 'rg',
+    'name', 'phone', 'email', 'birth_date', 'baptism_date', 'cpf', 'rg',
     'born_in_city', 'born_in_state', 'profession', 'education_level',
     'marital_status', 'marriage_date', 'father_name', 'mother_name',
     'church_entry', 'church_entry_other', 'street', 'number', 'complement',
@@ -344,7 +344,7 @@ def apply_public_member_data(member, data, clear_photo_when_empty=False):
     from .models import Member, MemberRelative
 
     values = dict(data)
-    for date_field in ('birth_date', 'marriage_date'):
+    for date_field in ('birth_date', 'baptism_date', 'marriage_date'):
         if values.get(date_field) in (None, ''):
             values[date_field] = None
     photo_raw = values.pop('photo', '') or ''
