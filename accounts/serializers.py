@@ -842,6 +842,7 @@ class MemberSerializer(serializers.ModelSerializer):
             'profession', 'education_level', 'education_level_display',
             'marital_status', 'marital_status_display', 'marriage_date',
             'father_name', 'mother_name', 'card_number',
+            'card_physical_received', 'card_digital_received',
             'church_entry', 'church_entry_display', 'church_entry_other',
             'ministry_areas', 'ministry_areas_display', 'photo',
             'relatives',

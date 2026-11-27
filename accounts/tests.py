@@ -773,6 +773,72 @@ class RolePermissionTests(BaseChurchTestCase):
         self.assertEqual(resp.data[0]['name'], 'José da Silva')
 
 
+class MemberCardDeliveryPermissionTests(BaseChurchTestCase):
+    def setUp(self):
+        super().setUp()
+        self.member = Member.objects.create(
+            name='Membro Teste',
+            church=self.congregation,
+        )
+
+    def _patch_delivery(self, user):
+        return self._client(user).patch(
+            reverse('member-self-detail', args=[self.member.pk]),
+            {
+                'card_physical_received': True,
+                'card_digital_received': True,
+            },
+            format='json',
+        )
+
+    def _reset_flags(self):
+        Member.objects.filter(pk=self.member.pk).update(
+            card_physical_received=False,
+            card_digital_received=False,
+        )
+
+    def test_allowed_roles_can_update_card_delivery_flags(self):
+        allowed = (
+            ('pastor-card@teste.com', ChurchMembership.Role.PASTOR),
+            ('secretaria-card@teste.com', ChurchMembership.Role.SECRETARIA),
+            ('tesoureiro-card@teste.com', ChurchMembership.Role.TESOUREIRO),
+        )
+        for email, role in allowed:
+            with self.subTest(role=role):
+                self._reset_flags()
+                user = self._user(email, church=self.congregation, role=role)
+                resp = self._patch_delivery(user)
+                self.assertEqual(resp.status_code, status.HTTP_200_OK)
+                self.member.refresh_from_db()
+                self.assertTrue(self.member.card_physical_received)
+                self.assertTrue(self.member.card_digital_received)
+
+    def test_admin_can_update_card_delivery_flags(self):
+        self._reset_flags()
+        admin = self._user(
+            'admin-card@teste.com',
+            church=self.congregation,
+            is_staff=True,
+        )
+        resp = self._patch_delivery(admin)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.member.refresh_from_db()
+        self.assertTrue(self.member.card_physical_received)
+        self.assertTrue(self.member.card_digital_received)
+
+    def test_intercession_cannot_update_card_delivery_flags(self):
+        intercessor = self._user(
+            'intercessao-card@teste.com',
+            church=self.congregation,
+            role=ChurchMembership.Role.INTERCESSAO,
+        )
+        resp = self._patch_delivery(intercessor)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.member.refresh_from_db()
+        self.assertFalse(self.member.card_physical_received)
+        self.assertFalse(self.member.card_digital_received)
+
+
 class ChurchHierarchyTests(BaseChurchTestCase):
     def test_admin_churches_list_includes_type_and_parent_name(self):
         admin = self._user('admin@idb.com', is_staff=True)

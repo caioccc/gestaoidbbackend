@@ -76,6 +76,7 @@ from .permissions import (
     IsStaffPermission,
     MEMBER_OPS_ROLES,
     accessible_churches,
+    can_edit_member_card_delivery,
     can_manage_church,
     can_view_all_members,
     is_admin,
@@ -1027,6 +1028,11 @@ class MemberSelfViewSet(viewsets.ModelViewSet):
         serializer.save(church=church)
 
     def perform_update(self, serializer):
+        if not can_edit_member_card_delivery(
+            self.request.user, self.request.user.church,
+        ):
+            serializer.validated_data.pop('card_physical_received', None)
+            serializer.validated_data.pop('card_digital_received', None)
         if not can_view_all_members(
             self.request.user, self.request.user.church,
         ):

@@ -479,6 +479,12 @@ class Member(models.Model):
         null=True,
         blank=True,
     )
+    card_physical_received = models.BooleanField(
+        'Carteirinha física recebida', default=False,
+    )
+    card_digital_received = models.BooleanField(
+        'Carteirinha digital recebida', default=False,
+    )
     church_entry = models.CharField(
         'Forma de Entrada na Igreja',
         max_length=20,
