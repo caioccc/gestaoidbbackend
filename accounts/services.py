@@ -2107,6 +2107,8 @@ def _default_member_analysis_index(instance):
 
 
 def member_analysis(member, index=None):
+    from .models import Member
+
     if index is None:
         index = _default_member_analysis_index(member)
     issues = []
@@ -2120,6 +2122,11 @@ def member_analysis(member, index=None):
         field for field in MEMBER_PROFILE_OPTIONAL_FIELDS
         if not str(getattr(member, field, '') or '').strip()
     ]
+    if (
+        'marriage_date' in missing_fields
+        and getattr(member, 'marital_status', '') != Member.MaritalStatus.CASADO
+    ):
+        missing_fields.remove('marriage_date')
     if (
         getattr(member, 'church_entry', None) == 'OUTRO'
         and not str(getattr(member, 'church_entry_other', '') or '').strip()

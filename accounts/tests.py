@@ -8790,6 +8790,37 @@ class MemberRegistrationAnalysisTests(BaseChurchTestCase):
         self.assertNotIn('complement', issue['fields'])
         self.assertIn('birth_date', issue['fields'])
 
+    def test_missing_fields_ignores_marriage_date_when_not_married(self):
+        for marital_status in (
+            '', Member.MaritalStatus.SOLTEIRO,
+            Member.MaritalStatus.UNIAO_ESTAVEL,
+            Member.MaritalStatus.DIVORCIADO,
+            Member.MaritalStatus.VIUVO,
+        ):
+            with self.subTest(marital_status=marital_status):
+                self.member.marital_status = marital_status
+                self.member.save(update_fields=['marital_status'])
+                resp = self._client(self.pastor).get(
+                    reverse('member-self-detail', args=[self.member.pk])
+                )
+                issue = next(
+                    issue for issue in resp.data['analysis']['issues']
+                    if issue['code'] == 'missing_fields'
+                )
+                self.assertNotIn('marriage_date', issue['fields'])
+
+    def test_missing_fields_includes_marriage_date_when_married(self):
+        self.member.marital_status = Member.MaritalStatus.CASADO
+        self.member.save(update_fields=['marital_status'])
+        resp = self._client(self.pastor).get(
+            reverse('member-self-detail', args=[self.member.pk])
+        )
+        issue = next(
+            issue for issue in resp.data['analysis']['issues']
+            if issue['code'] == 'missing_fields'
+        )
+        self.assertIn('marriage_date', issue['fields'])
+
     def test_member_detail_reports_missing_phone_as_critical(self):
         member = Member.objects.create(
             church=self.sede,
